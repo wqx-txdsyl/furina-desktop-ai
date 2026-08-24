@@ -1,0 +1,68 @@
+{
+  "meta": {
+    "frame_id": 1,
+    "timestamp": 0.0,
+    "schema_version": "1.0",
+    "character_id": "furina"
+  },
+  "activity": {
+    "name": "read",
+    "category": "SELF",
+    "phase": "LOOP",
+    "target": "",
+    "started_at": 0.0,
+    "progress": 0.0,
+    "interruptible": true
+  },
+  "speech": {
+    "should_speak": true,
+    "text": "在看书呢",
+    "dialogue_act": "",
+    "length": "",
+    "initiative": 0.0,
+    "mode": "",
+    "validation_status": "silent",
+    "priority": 0,
+    "can_interrupt_animation": false
+  },
+  "body": {
+    "expression": "neutral",
+    "gaze": "NONE",
+    "posture": "relaxed",
+    "body_openness": 0.5,
+    "proximity": "MAINTAIN",
+    "movement_tempo": "normal",
+    "movement_amplitude": 0.5,
+    "hesitation": 0.4,
+    "composure": 0.7,
+    "micro_preferences": [],
+    "transition_style": "SMOOTH",
+    "pose": "standing",
+    "emotion_label": "neutral",
+    "gaze_label": "front"
+  },
+  "motion": {
+    "intent": "NONE",
+    "target": "",
+    "direction": "",
+    "speed_semantic": "NONE",
+    "allow_reposition": false
+  },
+  "interaction": {
+    "available": true,
+    "focus_target": "whole",
+    "accept_touch": true,
+    "accept_drag": true,
+    "busy": false,
+    "response_mode": "available"
+  },
+  "world_hint": {
+    "user_present": true,
+    "user_working": false,
+    "user_activity": "",
+    "day_period": "",
+    "interaction_availability": 1.0,
+    "interruption_cost": 0.0,
+    "interesting_context": false
+  }
+}

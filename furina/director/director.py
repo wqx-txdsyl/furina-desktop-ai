@@ -1,0 +1,100 @@
+"""Director（plan/8）—— 唯一允许解决“谁拥有行动控制权”的模块。
+
+优先级（plan/8 §1）：
+Safety/User Control > Direct User Interaction > Active Agent Task
+> Important Internal Need > Autonomous Behavior > Idle/Micro。
+
+铁律：只有 Director 能把动作路由到 Character Runtime（plan/8 §3）。
+其它模块只发 ActionRequest。
+"""
+from __future__ import annotations
+
+import heapq
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional
+
+from furina.core import EventBus, EventType, get_logger
+from .action_queue import ActionRequest
+
+log = get_logger("director")
+
+# plan/8 §1 优先级（数字越小越高）
+P_SAFETY = 0
+P_USER_INTERACTION = 1
+P_AGENT_TASK = 2
+P_INTERNAL_NEED = 3
+P_AUTONOMOUS = 4
+P_IDLE_MICRO = 5
+
+
+class Director:
+    """仲裁竞态动作，产出唯一“当前应执行”的动作。"""
+
+    def __init__(self, bus: EventBus) -> None:
+        self.bus = bus
+        self._queue: List[ActionRequest] = []
+        self._current: Optional[ActionRequest] = None
+        self._on_execute: Optional[Callable[[ActionRequest], None]] = None
+        # 订阅其它模块的 ActionRequest
+        bus.on(EventType.ACTION_REQUEST, lambda ev: self.submit(
+            ActionRequest(source=ev.payload.get("source", ev.source),
+                          action=ev.payload["action"],
+                          priority=ev.payload.get("priority", P_AUTONOMOUS),
+                          interruptible=ev.payload.get("interruptible", True),
+                          reason=ev.payload.get("reason", ""))))
+
+    def set_executor(self, fn: Callable[[ActionRequest], None]) -> None:
+        """注册真正执行动作的 Runtime handler（仅 Director 能调用它）。"""
+        self._on_execute = fn
+
+    def submit(self, req: ActionRequest) -> None:
+        # 只入队，不立即执行；真正的竞态仲裁在 drain()（plan/8 §2-3）
+        heapq.heappush(self._queue, (req.priority, _seq(), req))
+
+    def cancel(self, source: str | None = None) -> None:
+        if source:
+            self._queue = [r for r in self._queue if r[2].source != source]
+        heapq.heapify(self._queue)
+        log.info("director: cancel(%s), queue=%d", source, len(self._queue))
+
+    def drain(self) -> None:
+        """仲裁：从队列取最高优先级请求执行。
+
+        若当前动作不可中断且优先级更高，则放回不抢占（plan/3 §18）。
+        系统每 Medium Tick 调用一次（app/scheduler 注入）。
+        """
+        if not self._queue:
+            return
+        req = heapq.heappop(self._queue)[2]
+        if self._current and req.priority >= self._current.priority and self._current.interruptible is False:
+            heapq.heappush(self._queue, (req.priority, _seq(), req))
+            return
+        self._current = req
+        log.debug("director: -> %s", req.describe())
+        if self._on_execute:
+            self._on_execute(req)
+        self.bus.emit(EventType.ACTION_STARTED, payload=req.describe(), source="director")
+
+    def current(self) -> Optional[ActionRequest]:
+        return self._current
+
+    def clear_current(self) -> None:
+        """当前动作已完成/被接管 → 释放，允许下一轮重新仲裁。
+
+        否则 `_current` 永不清空：一个不可中断的当前动作会永久压制后续请求（死锁隐患）。
+        """
+        self._current = None
+
+    def finish(self, source: str | None = None) -> None:
+        """当前动作结束：若是该 source 的动作，则释放接管权。"""
+        if source is None or (self._current and self._current.source == source):
+            self._current = None
+
+
+# 稳定编号，避免 priority 相同时 heapq 比较 ActionRequest 出错
+_seq_counter = [0]
+
+
+def _seq() -> int:
+    _seq_counter[0] += 1
+    return _seq_counter[0]

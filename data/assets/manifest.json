@@ -1,0 +1,3486 @@
+{
+  "character": "furina",
+  "version": "v1",
+  "entries": [
+    {
+      "asset_id": "furina_standing_neutral_front_idle_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P0",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_front_idle_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P0",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_neutral_front_idle_01",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P0",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_neutral_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_happy_front_idle_01",
+      "posture": "sitting",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P0",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_happy_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_lying_neutral_front_idle_01",
+      "posture": "lying",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P0",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_lying_neutral_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_lying_happy_front_idle_01",
+      "posture": "lying",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P0",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_lying_happy_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sleeping_neutral_front_idle_01",
+      "posture": "sleeping",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P0",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sleeping_neutral_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sleeping_happy_front_idle_01",
+      "posture": "sleeping",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P0",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sleeping_happy_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_curious_front_idle_01",
+      "posture": "standing",
+      "emotion": "curious",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_curious_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_thinking_front_idle_01",
+      "posture": "standing",
+      "emotion": "thinking",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_thinking_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_proud_front_idle_01",
+      "posture": "standing",
+      "emotion": "proud",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_proud_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_sleepy_front_idle_01",
+      "posture": "standing",
+      "emotion": "sleepy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_sleepy_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_annoyed_front_idle_01",
+      "posture": "standing",
+      "emotion": "annoyed",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_annoyed_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_surprised_front_idle_01",
+      "posture": "standing",
+      "emotion": "surprised",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_surprised_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_embarrassed_front_idle_01",
+      "posture": "standing",
+      "emotion": "embarrassed",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_embarrassed_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_sad_front_idle_01",
+      "posture": "standing",
+      "emotion": "sad",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_sad_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_excited_front_idle_01",
+      "posture": "standing",
+      "emotion": "excited",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_excited_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_curious_front_idle_01",
+      "posture": "sitting",
+      "emotion": "curious",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_curious_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_thinking_front_idle_01",
+      "posture": "sitting",
+      "emotion": "thinking",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_thinking_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_proud_front_idle_01",
+      "posture": "sitting",
+      "emotion": "proud",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_proud_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_sleepy_front_idle_01",
+      "posture": "sitting",
+      "emotion": "sleepy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_sleepy_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_annoyed_front_idle_01",
+      "posture": "sitting",
+      "emotion": "annoyed",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_annoyed_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_surprised_front_idle_01",
+      "posture": "sitting",
+      "emotion": "surprised",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_surprised_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_embarrassed_front_idle_01",
+      "posture": "sitting",
+      "emotion": "embarrassed",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_embarrassed_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_sad_front_idle_01",
+      "posture": "sitting",
+      "emotion": "sad",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_sad_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_excited_front_idle_01",
+      "posture": "sitting",
+      "emotion": "excited",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P1",
+        "expression"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_excited_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_neutral_user_idle_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "user",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_user_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_neutral_screen_idle_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "screen",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_screen_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_neutral_left_idle_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "left",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_left_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_neutral_right_idle_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "right",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_right_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_neutral_up_idle_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "up",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_up_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_neutral_down_idle_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "down",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_down_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_neutral_user_idle_01",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "user",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_neutral_user_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_neutral_screen_idle_01",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "screen",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_neutral_screen_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_neutral_left_idle_01",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "left",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_neutral_left_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_neutral_right_idle_01",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "right",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_neutral_right_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_neutral_up_idle_01",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "up",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_neutral_up_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_neutral_down_idle_01",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "down",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "gaze"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_neutral_down_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "gaze",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_neutral_front_blink_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "blink",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "micro"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_front_blink_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_sad_front_sigh_01",
+      "posture": "standing",
+      "emotion": "sad",
+      "gaze": "front",
+      "direction": "front",
+      "action": "sigh",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "micro"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_sad_front_sigh_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_front_giggle_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "giggle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "micro"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_front_giggle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_curious_front_look_01",
+      "posture": "standing",
+      "emotion": "curious",
+      "gaze": "front",
+      "direction": "front",
+      "action": "look",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "micro"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_curious_front_look_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_neutral_front_drink_01",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "drink",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_neutral_front_drink_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_front_eat_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "eat",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_front_eat_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_focus_front_read_01",
+      "posture": "standing",
+      "emotion": "focus",
+      "gaze": "front",
+      "direction": "front",
+      "action": "read",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_focus_front_read_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_playful_front_play_01",
+      "posture": "standing",
+      "emotion": "playful",
+      "gaze": "front",
+      "direction": "front",
+      "action": "play",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_playful_front_play_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_front_wave_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "wave",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_front_wave_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_thoughtful_front_think_01",
+      "posture": "standing",
+      "emotion": "thoughtful",
+      "gaze": "front",
+      "direction": "front",
+      "action": "think",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_thoughtful_front_think_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_sleepy_front_nap_01",
+      "posture": "standing",
+      "emotion": "sleepy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "nap",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_sleepy_front_nap_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_front_dance_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "dance",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_front_dance_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_front_excited_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "excited",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "action"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_front_excited_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "action",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_crouching_neutral_front_idle_01",
+      "posture": "crouching",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_crouching_neutral_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_crouching_happy_front_idle_01",
+      "posture": "crouching",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_crouching_happy_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_leaning_neutral_front_idle_01",
+      "posture": "leaning",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_leaning_neutral_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_leaning_happy_front_idle_01",
+      "posture": "leaning",
+      "emotion": "happy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3",
+        "base"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_leaning_happy_front_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "base_pose",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_user_head_touch_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "user",
+      "direction": "front",
+      "action": "head_touch",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_user_head_touch_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "interaction",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_surprised_user_poke_01",
+      "posture": "standing",
+      "emotion": "surprised",
+      "gaze": "user",
+      "direction": "front",
+      "action": "poke",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_surprised_user_poke_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "interaction",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_user_hold_tea_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "user",
+      "direction": "front",
+      "action": "hold_tea",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "prop"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_user_hold_tea_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "prop",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_user_hold_cake_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "user",
+      "direction": "front",
+      "action": "hold_cake",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "prop"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_user_hold_cake_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "prop",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_user_hold_book_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "user",
+      "direction": "front",
+      "action": "hold_book",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "prop"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_user_hold_book_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "prop",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_user_hold_phone_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "user",
+      "direction": "front",
+      "action": "hold_phone",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "prop"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_user_hold_phone_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "prop",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_happy_user_hold_gift_01",
+      "posture": "standing",
+      "emotion": "happy",
+      "gaze": "user",
+      "direction": "front",
+      "action": "hold_gift",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "prop"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_happy_user_hold_gift_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "prop",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_proud_user_idle_01",
+      "posture": "sitting",
+      "emotion": "proud",
+      "gaze": "user",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_proud_user_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_sleepy_user_idle_01",
+      "posture": "sitting",
+      "emotion": "sleepy",
+      "gaze": "user",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_sleepy_user_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_sitting_smug_user_idle_01",
+      "posture": "sitting",
+      "emotion": "smug",
+      "gaze": "user",
+      "direction": "front",
+      "action": "idle",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P3"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_sitting_smug_user_idle_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "expression",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_sleepy_front_yawn_01",
+      "posture": "standing",
+      "emotion": "sleepy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "yawn",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "micro"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_sleepy_front_yawn_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "furina_standing_sleepy_front_stretch_01",
+      "posture": "standing",
+      "emotion": "sleepy",
+      "gaze": "front",
+      "direction": "front",
+      "action": "stretch",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "frame",
+      "frames": [],
+      "tags": [
+        "P2",
+        "micro"
+      ],
+      "anchors": {
+        "head": [
+          0.5,
+          0.2
+        ],
+        "body": [
+          0.5,
+          0.5
+        ],
+        "hand": [
+          0.7,
+          0.45
+        ]
+      },
+      "path": "poses\\furina_standing_sleepy_front_stretch_01.png",
+      "quality_score": 10,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "anim_sit_down",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "sit_down",
+      "micro_motion": null,
+      "loop": false,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_sit_down_00.png",
+        "poses/anim_sit_down_01.png",
+        "poses/anim_sit_down_loop_00.png",
+        "poses/anim_sit_down_loop_01.png",
+        "poses/anim_sit_down_loop_02.png",
+        "poses/anim_sit_down_loop_03.png",
+        "poses/anim_sit_down_loop_04.png",
+        "poses/anim_sit_down_loop_05.png",
+        "poses/anim_sit_down_loop_06.png",
+        "poses/anim_sit_down_loop_07.png",
+        "poses/anim_sit_down_loop_08.png",
+        "poses/anim_sit_down_loop_09.png",
+        "poses/anim_sit_down_07.png",
+        "poses/anim_sit_down_06.png"
+      ],
+      "tags": [
+        "animation",
+        "transition"
+      ],
+      "anchors": {},
+      "path": "poses/anim_sit_down_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "transition",
+      "entry_frames": [
+        "poses/anim_sit_down_00.png",
+        "poses/anim_sit_down_01.png",
+        "poses/anim_sit_down_02.png",
+        "poses/anim_sit_down_03.png",
+        "poses/anim_sit_down_04.png",
+        "poses/anim_sit_down_05.png",
+        "poses/anim_sit_down_06.png",
+        "poses/anim_sit_down_07.png"
+      ],
+      "loop_frames": [
+        "poses/anim_sit_down_loop_00.png",
+        "poses/anim_sit_down_loop_01.png",
+        "poses/anim_sit_down_loop_02.png",
+        "poses/anim_sit_down_loop_03.png",
+        "poses/anim_sit_down_loop_04.png",
+        "poses/anim_sit_down_loop_05.png",
+        "poses/anim_sit_down_loop_06.png",
+        "poses/anim_sit_down_loop_07.png",
+        "poses/anim_sit_down_loop_08.png",
+        "poses/anim_sit_down_loop_09.png"
+      ],
+      "exit_frames": [
+        "poses/anim_sit_down_07.png",
+        "poses/anim_sit_down_06.png",
+        "poses/anim_sit_down_05.png",
+        "poses/anim_sit_down_04.png",
+        "poses/anim_sit_down_03.png",
+        "poses/anim_sit_down_02.png",
+        "poses/anim_sit_down_01.png",
+        "poses/anim_sit_down_00.png"
+      ],
+      "transition_from": "standing",
+      "transition_to": "sitting"
+    },
+    {
+      "asset_id": "anim_stand_up",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "stand_up",
+      "micro_motion": null,
+      "loop": false,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_stand_up_00.png",
+        "poses/anim_stand_up_01.png",
+        "poses/anim_stand_up_loop_00.png",
+        "poses/anim_stand_up_loop_01.png",
+        "poses/anim_stand_up_loop_02.png",
+        "poses/anim_stand_up_loop_03.png",
+        "poses/anim_stand_up_loop_04.png",
+        "poses/anim_stand_up_loop_05.png",
+        "poses/anim_stand_up_loop_06.png",
+        "poses/anim_stand_up_loop_07.png",
+        "poses/anim_stand_up_loop_08.png",
+        "poses/anim_stand_up_loop_09.png",
+        "poses/anim_stand_up_07.png",
+        "poses/anim_stand_up_06.png"
+      ],
+      "tags": [
+        "animation",
+        "transition"
+      ],
+      "anchors": {},
+      "path": "poses/anim_stand_up_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "transition",
+      "entry_frames": [
+        "poses/anim_stand_up_00.png",
+        "poses/anim_stand_up_01.png",
+        "poses/anim_stand_up_02.png",
+        "poses/anim_stand_up_03.png",
+        "poses/anim_stand_up_04.png",
+        "poses/anim_stand_up_05.png",
+        "poses/anim_stand_up_06.png",
+        "poses/anim_stand_up_07.png"
+      ],
+      "loop_frames": [
+        "poses/anim_stand_up_loop_00.png",
+        "poses/anim_stand_up_loop_01.png",
+        "poses/anim_stand_up_loop_02.png",
+        "poses/anim_stand_up_loop_03.png",
+        "poses/anim_stand_up_loop_04.png",
+        "poses/anim_stand_up_loop_05.png",
+        "poses/anim_stand_up_loop_06.png",
+        "poses/anim_stand_up_loop_07.png",
+        "poses/anim_stand_up_loop_08.png",
+        "poses/anim_stand_up_loop_09.png"
+      ],
+      "exit_frames": [
+        "poses/anim_stand_up_07.png",
+        "poses/anim_stand_up_06.png",
+        "poses/anim_stand_up_05.png",
+        "poses/anim_stand_up_04.png",
+        "poses/anim_stand_up_03.png",
+        "poses/anim_stand_up_02.png",
+        "poses/anim_stand_up_01.png",
+        "poses/anim_stand_up_00.png"
+      ],
+      "transition_from": "sitting",
+      "transition_to": "standing"
+    },
+    {
+      "asset_id": "anim_lie_down",
+      "posture": "lying",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "lie_down",
+      "micro_motion": null,
+      "loop": false,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_lie_down_00.png",
+        "poses/anim_lie_down_01.png",
+        "poses/anim_lie_down_loop_00.png",
+        "poses/anim_lie_down_loop_01.png",
+        "poses/anim_lie_down_loop_02.png",
+        "poses/anim_lie_down_loop_03.png",
+        "poses/anim_lie_down_loop_04.png",
+        "poses/anim_lie_down_loop_05.png",
+        "poses/anim_lie_down_loop_06.png",
+        "poses/anim_lie_down_loop_07.png",
+        "poses/anim_lie_down_loop_08.png",
+        "poses/anim_lie_down_loop_09.png",
+        "poses/anim_lie_down_07.png",
+        "poses/anim_lie_down_06.png"
+      ],
+      "tags": [
+        "animation",
+        "transition"
+      ],
+      "anchors": {},
+      "path": "poses/anim_lie_down_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "transition",
+      "entry_frames": [
+        "poses/anim_lie_down_00.png",
+        "poses/anim_lie_down_01.png",
+        "poses/anim_lie_down_02.png",
+        "poses/anim_lie_down_03.png",
+        "poses/anim_lie_down_04.png",
+        "poses/anim_lie_down_05.png",
+        "poses/anim_lie_down_06.png",
+        "poses/anim_lie_down_07.png"
+      ],
+      "loop_frames": [
+        "poses/anim_lie_down_loop_00.png",
+        "poses/anim_lie_down_loop_01.png",
+        "poses/anim_lie_down_loop_02.png",
+        "poses/anim_lie_down_loop_03.png",
+        "poses/anim_lie_down_loop_04.png",
+        "poses/anim_lie_down_loop_05.png",
+        "poses/anim_lie_down_loop_06.png",
+        "poses/anim_lie_down_loop_07.png",
+        "poses/anim_lie_down_loop_08.png",
+        "poses/anim_lie_down_loop_09.png"
+      ],
+      "exit_frames": [
+        "poses/anim_lie_down_07.png",
+        "poses/anim_lie_down_06.png",
+        "poses/anim_lie_down_05.png",
+        "poses/anim_lie_down_04.png",
+        "poses/anim_lie_down_03.png",
+        "poses/anim_lie_down_02.png",
+        "poses/anim_lie_down_01.png",
+        "poses/anim_lie_down_00.png"
+      ],
+      "transition_from": "sitting",
+      "transition_to": "lying"
+    },
+    {
+      "asset_id": "anim_lie_up",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "lie_up",
+      "micro_motion": null,
+      "loop": false,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_lie_up_00.png",
+        "poses/anim_lie_up_01.png",
+        "poses/anim_lie_up_loop_00.png",
+        "poses/anim_lie_up_loop_01.png",
+        "poses/anim_lie_up_loop_02.png",
+        "poses/anim_lie_up_loop_03.png",
+        "poses/anim_lie_up_loop_04.png",
+        "poses/anim_lie_up_loop_05.png",
+        "poses/anim_lie_up_loop_06.png",
+        "poses/anim_lie_up_loop_07.png",
+        "poses/anim_lie_up_loop_08.png",
+        "poses/anim_lie_up_loop_09.png",
+        "poses/anim_lie_up_07.png",
+        "poses/anim_lie_up_06.png"
+      ],
+      "tags": [
+        "animation",
+        "transition"
+      ],
+      "anchors": {},
+      "path": "poses/anim_lie_up_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "transition",
+      "entry_frames": [
+        "poses/anim_lie_up_00.png",
+        "poses/anim_lie_up_01.png",
+        "poses/anim_lie_up_02.png",
+        "poses/anim_lie_up_03.png",
+        "poses/anim_lie_up_04.png",
+        "poses/anim_lie_up_05.png",
+        "poses/anim_lie_up_06.png",
+        "poses/anim_lie_up_07.png"
+      ],
+      "loop_frames": [
+        "poses/anim_lie_up_loop_00.png",
+        "poses/anim_lie_up_loop_01.png",
+        "poses/anim_lie_up_loop_02.png",
+        "poses/anim_lie_up_loop_03.png",
+        "poses/anim_lie_up_loop_04.png",
+        "poses/anim_lie_up_loop_05.png",
+        "poses/anim_lie_up_loop_06.png",
+        "poses/anim_lie_up_loop_07.png",
+        "poses/anim_lie_up_loop_08.png",
+        "poses/anim_lie_up_loop_09.png"
+      ],
+      "exit_frames": [
+        "poses/anim_lie_up_07.png",
+        "poses/anim_lie_up_06.png",
+        "poses/anim_lie_up_05.png",
+        "poses/anim_lie_up_04.png",
+        "poses/anim_lie_up_03.png",
+        "poses/anim_lie_up_02.png",
+        "poses/anim_lie_up_01.png",
+        "poses/anim_lie_up_00.png"
+      ],
+      "transition_from": "lying",
+      "transition_to": "sitting"
+    },
+    {
+      "asset_id": "anim_wake_up",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "wake_up",
+      "micro_motion": null,
+      "loop": false,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_wake_up_00.png",
+        "poses/anim_wake_up_01.png",
+        "poses/anim_wake_up_loop_00.png",
+        "poses/anim_wake_up_loop_01.png",
+        "poses/anim_wake_up_loop_02.png",
+        "poses/anim_wake_up_loop_03.png",
+        "poses/anim_wake_up_loop_04.png",
+        "poses/anim_wake_up_loop_05.png",
+        "poses/anim_wake_up_loop_06.png",
+        "poses/anim_wake_up_loop_07.png",
+        "poses/anim_wake_up_loop_08.png",
+        "poses/anim_wake_up_loop_09.png",
+        "poses/anim_wake_up_07.png",
+        "poses/anim_wake_up_06.png"
+      ],
+      "tags": [
+        "animation",
+        "transition"
+      ],
+      "anchors": {},
+      "path": "poses/anim_wake_up_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "transition",
+      "entry_frames": [
+        "poses/anim_wake_up_00.png",
+        "poses/anim_wake_up_01.png",
+        "poses/anim_wake_up_02.png",
+        "poses/anim_wake_up_03.png",
+        "poses/anim_wake_up_04.png",
+        "poses/anim_wake_up_05.png",
+        "poses/anim_wake_up_06.png",
+        "poses/anim_wake_up_07.png"
+      ],
+      "loop_frames": [
+        "poses/anim_wake_up_loop_00.png",
+        "poses/anim_wake_up_loop_01.png",
+        "poses/anim_wake_up_loop_02.png",
+        "poses/anim_wake_up_loop_03.png",
+        "poses/anim_wake_up_loop_04.png",
+        "poses/anim_wake_up_loop_05.png",
+        "poses/anim_wake_up_loop_06.png",
+        "poses/anim_wake_up_loop_07.png",
+        "poses/anim_wake_up_loop_08.png",
+        "poses/anim_wake_up_loop_09.png"
+      ],
+      "exit_frames": [
+        "poses/anim_wake_up_07.png",
+        "poses/anim_wake_up_06.png",
+        "poses/anim_wake_up_05.png",
+        "poses/anim_wake_up_04.png",
+        "poses/anim_wake_up_03.png",
+        "poses/anim_wake_up_02.png",
+        "poses/anim_wake_up_01.png",
+        "poses/anim_wake_up_00.png"
+      ],
+      "transition_from": "sleeping",
+      "transition_to": "sitting"
+    },
+    {
+      "asset_id": "anim_go_sleep",
+      "posture": "sleeping",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "go_sleep",
+      "micro_motion": null,
+      "loop": false,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_go_sleep_00.png",
+        "poses/anim_go_sleep_01.png",
+        "poses/anim_go_sleep_loop_00.png",
+        "poses/anim_go_sleep_loop_01.png",
+        "poses/anim_go_sleep_loop_02.png",
+        "poses/anim_go_sleep_loop_03.png",
+        "poses/anim_go_sleep_loop_04.png",
+        "poses/anim_go_sleep_loop_05.png",
+        "poses/anim_go_sleep_loop_06.png",
+        "poses/anim_go_sleep_loop_07.png",
+        "poses/anim_go_sleep_loop_08.png",
+        "poses/anim_go_sleep_loop_09.png",
+        "poses/anim_go_sleep_07.png",
+        "poses/anim_go_sleep_06.png"
+      ],
+      "tags": [
+        "animation",
+        "transition"
+      ],
+      "anchors": {},
+      "path": "poses/anim_go_sleep_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "transition",
+      "entry_frames": [
+        "poses/anim_go_sleep_00.png",
+        "poses/anim_go_sleep_01.png",
+        "poses/anim_go_sleep_02.png",
+        "poses/anim_go_sleep_03.png",
+        "poses/anim_go_sleep_04.png",
+        "poses/anim_go_sleep_05.png",
+        "poses/anim_go_sleep_06.png",
+        "poses/anim_go_sleep_07.png"
+      ],
+      "loop_frames": [
+        "poses/anim_go_sleep_loop_00.png",
+        "poses/anim_go_sleep_loop_01.png",
+        "poses/anim_go_sleep_loop_02.png",
+        "poses/anim_go_sleep_loop_03.png",
+        "poses/anim_go_sleep_loop_04.png",
+        "poses/anim_go_sleep_loop_05.png",
+        "poses/anim_go_sleep_loop_06.png",
+        "poses/anim_go_sleep_loop_07.png",
+        "poses/anim_go_sleep_loop_08.png",
+        "poses/anim_go_sleep_loop_09.png"
+      ],
+      "exit_frames": [
+        "poses/anim_go_sleep_07.png",
+        "poses/anim_go_sleep_06.png",
+        "poses/anim_go_sleep_05.png",
+        "poses/anim_go_sleep_04.png",
+        "poses/anim_go_sleep_03.png",
+        "poses/anim_go_sleep_02.png",
+        "poses/anim_go_sleep_01.png",
+        "poses/anim_go_sleep_00.png"
+      ],
+      "transition_from": "sitting",
+      "transition_to": "sleeping"
+    },
+    {
+      "asset_id": "anim_sitting_loop",
+      "posture": "sitting",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "sitting_loop",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_sitting_loop_loop_00.png",
+        "poses/anim_sitting_loop_loop_01.png",
+        "poses/anim_sitting_loop_loop_02.png",
+        "poses/anim_sitting_loop_loop_03.png",
+        "poses/anim_sitting_loop_loop_04.png",
+        "poses/anim_sitting_loop_loop_05.png",
+        "poses/anim_sitting_loop_loop_06.png",
+        "poses/anim_sitting_loop_loop_07.png",
+        "poses/anim_sitting_loop_loop_08.png",
+        "poses/anim_sitting_loop_loop_09.png"
+      ],
+      "tags": [
+        "animation",
+        "loop"
+      ],
+      "anchors": {},
+      "path": "poses/anim_sitting_loop_loop_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "anim_standing_loop",
+      "posture": "standing",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "standing_loop",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_standing_loop_loop_00.png",
+        "poses/anim_standing_loop_loop_01.png",
+        "poses/anim_standing_loop_loop_02.png",
+        "poses/anim_standing_loop_loop_03.png",
+        "poses/anim_standing_loop_loop_04.png",
+        "poses/anim_standing_loop_loop_05.png",
+        "poses/anim_standing_loop_loop_06.png",
+        "poses/anim_standing_loop_loop_07.png",
+        "poses/anim_standing_loop_loop_08.png",
+        "poses/anim_standing_loop_loop_09.png"
+      ],
+      "tags": [
+        "animation",
+        "loop"
+      ],
+      "anchors": {},
+      "path": "poses/anim_standing_loop_loop_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "anim_lying_loop",
+      "posture": "lying",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "lying_loop",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_lying_loop_loop_00.png",
+        "poses/anim_lying_loop_loop_01.png",
+        "poses/anim_lying_loop_loop_02.png",
+        "poses/anim_lying_loop_loop_03.png",
+        "poses/anim_lying_loop_loop_04.png",
+        "poses/anim_lying_loop_loop_05.png",
+        "poses/anim_lying_loop_loop_06.png",
+        "poses/anim_lying_loop_loop_07.png",
+        "poses/anim_lying_loop_loop_08.png",
+        "poses/anim_lying_loop_loop_09.png"
+      ],
+      "tags": [
+        "animation",
+        "loop"
+      ],
+      "anchors": {},
+      "path": "poses/anim_lying_loop_loop_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    },
+    {
+      "asset_id": "anim_sleeping_loop",
+      "posture": "sleeping",
+      "emotion": "neutral",
+      "gaze": "front",
+      "direction": "front",
+      "action": "sleeping_loop",
+      "micro_motion": null,
+      "loop": true,
+      "duration": null,
+      "interruptible": true,
+      "priority": 50,
+      "fps": 12,
+      "kind": "sequence",
+      "frames": [
+        "poses/anim_sleeping_loop_loop_00.png",
+        "poses/anim_sleeping_loop_loop_01.png",
+        "poses/anim_sleeping_loop_loop_02.png",
+        "poses/anim_sleeping_loop_loop_03.png",
+        "poses/anim_sleeping_loop_loop_04.png",
+        "poses/anim_sleeping_loop_loop_05.png",
+        "poses/anim_sleeping_loop_loop_06.png",
+        "poses/anim_sleeping_loop_loop_07.png",
+        "poses/anim_sleeping_loop_loop_08.png",
+        "poses/anim_sleeping_loop_loop_09.png"
+      ],
+      "tags": [
+        "animation",
+        "loop"
+      ],
+      "anchors": {},
+      "path": "poses/anim_sleeping_loop_loop_00.png",
+      "quality_score": 0,
+      "source": "agnes",
+      "role": "micro",
+      "entry_frames": [],
+      "loop_frames": [],
+      "exit_frames": [],
+      "transition_from": null,
+      "transition_to": null
+    }
+  ],
+  "identity_anchor": "furina-base.png"
+}
