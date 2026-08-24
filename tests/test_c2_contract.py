@@ -96,6 +96,21 @@ def test_dialogue_annoyance_normalized_branch():
     assert mode_for("calm", 0.6, 0.6, 0.2, False, True) != "GUARDED", "annoyance .2 不应触发"
 
 
+def test_expressive_annoyance_warmth_brevity():
+    """C-R2 hotfix：真实 ExpressionStrategy 路径，annoyance=.7 → warmth 更低 / brevity 更高（vs .2）。"""
+    from furina.dialogue import ExpressionEngine
+    from furina.persona.character_identity import FURINA_IDENTITY
+    eng = ExpressionEngine(FURINA_IDENTITY)
+    high = eng.strategy(emotion="calm", mode="CASUAL",
+                        relationship={"annoyance": 0.7, "trust": 0.5, "comfort": 0.5, "familiarity": 0.4},
+                        task_mode=False, activation={}, user_working=False)
+    low = eng.strategy(emotion="calm", mode="CASUAL",
+                       relationship={"annoyance": 0.2, "trust": 0.5, "comfort": 0.5, "familiarity": 0.4},
+                       task_mode=False, activation={}, user_working=False)
+    assert high.warmth < low.warmth, f"annoyance .7 warmth 应更低: high={high.warmth} low={low.warmth}"
+    assert high.brevity > low.brevity, f"annoyance .7 brevity 应更高: high={high.brevity} low={low.brevity}"
+
+
 # ================================================================ positive text persists once
 def test_text_positive_response_persists_once():
     from furina.app import Furina

@@ -139,7 +139,7 @@ class ExpressionEngine:
         openness = float(s.emotional_openness)
         if float(rel.get("trust", 0)) > 0.6: openness += 0.2
         if float(rel.get("comfort", 0)) > 0.6: s.playfulness += 0.15
-        if float(rel.get("annoyance", 0)) > 60: s.warmth -= 0.25; s.brevity += 0.2
+        if float(rel.get("annoyance", 0)) > 0.6: s.warmth -= 0.25; s.brevity += 0.2   # C-R2 hotfix: normalized 0..1
         if float(rel.get("familiarity", 0)) < 0.3:
             s.self_guarding = True  # noqa
             s.defensiveness += 0.15
