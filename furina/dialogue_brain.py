@@ -47,6 +47,9 @@ class DialogueBrain:
         self._recent_surfaced_limit = 8
         # R2.2 FINAL：近期 opening styles（防"哎呀"塌缩；跨直接对话轮）
         self._recent_openings: List[str] = []
+        # R2.2.1 §7：semantic topic / open referent（来自用户输入语义，非 Furina 回复文本）
+        self._last_semantic_topic: str = ""
+        self._last_open_referent: str = ""
         # Phase 13C §24-26：有界短期对话上下文（内存，非数据库）
         self._history: List[Dict[str, Any]] = []
         self._history_limit = 8
@@ -217,7 +220,8 @@ class DialogueBrain:
             deadline: Optional[float] = None,
             interaction: str = "",         # R2.1 P1-2：互动事实 kind（petting/poke/drag/click）
             agent_state: str = "",         # R2.1 P1-1：当前 Agent 生命周期状态
-            agent_task: str = "") -> Optional[str]:
+            agent_task: str = "",
+            agent_facts: Optional[dict] = None) -> Optional[str]:   # R2.2.1 §5：AgentReportFacts
         """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
 
         R1.1-6：公开 consumer API 保持不变（返回 speech 或 None）；
@@ -233,7 +237,8 @@ class DialogueBrain:
                                   presence_known=presence_known, channel=channel,
                                   ingress_seq=ingress_seq, timeout=timeout,
                                   deadline=deadline, interaction=interaction,
-                                  agent_state=agent_state, agent_task=agent_task)["speech"]
+                                  agent_state=agent_state, agent_task=agent_task,
+                                  agent_facts=agent_facts)["speech"]
 
     def say_with_result(self, *, intent: str = "", emotion: str = "", user_text: str = "",
                         context: Optional[str] = "", memories: Optional[List[str]] = None,
@@ -248,7 +253,8 @@ class DialogueBrain:
                         deadline: Optional[float] = None,
                         interaction: str = "",
                         agent_state: str = "",
-                        agent_task: str = "") -> dict:
+                        agent_task: str = "",
+                        agent_facts: Optional[dict] = None) -> dict:
         """内部 result API（R1.1-6/R2.1 P0-3）：返回 {"speech","failure_reason",
         "validation_issues","hard_issues","soft_issues"}。
 
@@ -263,7 +269,8 @@ class DialogueBrain:
                                   presence_known=presence_known, channel=channel,
                                   ingress_seq=ingress_seq, timeout=timeout,
                                   deadline=deadline, interaction=interaction,
-                                  agent_state=agent_state, agent_task=agent_task)
+                                  agent_state=agent_state, agent_task=agent_task,
+                                  agent_facts=agent_facts)
 
     def _say_dispatch(self, *, intent: str = "", emotion: str = "", user_text: str = "",
                       context: Optional[str] = "", memories: Optional[List[str]] = None,
@@ -278,7 +285,8 @@ class DialogueBrain:
                       deadline: Optional[float] = None,
                       interaction: str = "",
                       agent_state: str = "",
-                      agent_task: str = "") -> dict:
+                      agent_task: str = "",
+                      agent_facts: Optional[dict] = None) -> dict:
         """B1/R1.1-3 lane 分发：direct 与 ambient 独立序号 + 独立门；总预算 deadline 传递。
 
         B1/R1.2-2（评审基线）**通道分 lane**：
@@ -305,7 +313,8 @@ class DialogueBrain:
                     task_mode=task_mode, solitude=solitude, user_present=user_present,
                     presence_known=presence_known, channel=channel, _seq=seq,
                     _lane="direct", timeout=eff_timeout, deadline=deadline,
-                    interaction=interaction, agent_state=agent_state, agent_task=agent_task)
+                    interaction=interaction, agent_state=agent_state, agent_task=agent_task,
+                    agent_facts=agent_facts)
                 return {"speech": speech, "failure_reason": reason,
                         "validation_issues": issues, "hard_issues": hard, "soft_issues": soft}
             finally:
@@ -327,7 +336,8 @@ class DialogueBrain:
                 task_mode=task_mode, solitude=solitude, user_present=user_present,
                 presence_known=presence_known, channel=channel, _aseq=aseq,
                 _lane="ambient", timeout=eff_timeout, deadline=deadline,
-                interaction=interaction, agent_state=agent_state, agent_task=agent_task)
+                interaction=interaction, agent_state=agent_state, agent_task=agent_task,
+                agent_facts=agent_facts)
             return {"speech": speech, "failure_reason": reason,
                     "validation_issues": issues, "hard_issues": hard, "soft_issues": soft}
         finally:
@@ -346,7 +356,8 @@ class DialogueBrain:
                   deadline: Optional[float] = None,
                   interaction: str = "",
                   agent_state: str = "",
-                  agent_task: str = "") -> tuple:
+                  agent_task: str = "",
+                  agent_facts: Optional[dict] = None) -> tuple:
         """say() 的实现体（由 lane 入口包裹）→
         (speech, failure_reason, validation_issues, hard_issues, soft_issues)。
 
@@ -398,7 +409,8 @@ class DialogueBrain:
                                          activity=activity, history=hist,
                                          interaction=interaction,
                                          agent_state=agent_state, agent_task=agent_task,
-                                         plan=plan, auto_guide=auto_guide)
+                                         plan=plan, auto_guide=auto_guide,
+                                         agent_facts=agent_facts)
             # R2.1 P1-5：用户显式格式/回答约束（优先级高于 persona style，保守确定性提取）
             if user_text:
                 m = re.search(r"只能回答([^或，,。！？\s]{1,6})(?:或者|或)([^。！？\s]{1,6})", user_text)
@@ -636,6 +648,45 @@ class DialogueBrain:
         return ""
 
     # -------------------------------------------------- R2.2 FINAL：PersonaPlan 规划（确定性）
+    # -------------------------------------------------- R2.2.1 §7：Semantic topic/referent 追踪
+    # last_semantic_topic / last_open_referent —— 来自用户输入的**语义话题**（非上一条 Furina 自然语言文本）。
+    # 供 P21→P22（"那现在呢"指代前一个 semantic topic）与 Autobiographical Router 使用。
+    def _semantic_topic_of(self, user_text: str) -> str:
+        """从用户输入提取简短语义话题（确定性，保守；空 = 无可提取）。"""
+        from furina.persona.persona_planner import parse_user_turn
+        try:
+            f = parse_user_turn(user_text or "")
+            t = (user_text or "").strip()
+            # 纯指代性输入（那现在呢/然后呢/刚才怎么样）不带新话题 → 返回空（沿用既有 topic）
+            _PURE_DEICTIC = ("那现在呢", "然后呢", "现在呢", "那呢", "刚才呢", "那你说呢")
+            if any(p in t for p in _PURE_DEICTIC):
+                return ""
+            # 高置信语义话题：自我介绍/身份/舞台/关注/孤独/日常等
+            for kw, topic in (
+                ("芙卡洛斯", "芙卡洛斯与身份"), ("水神", "过去的水神身份"),
+                ("舞台", "舞台与表演"), ("表演", "舞台与表演"),
+                ("关注", "被关注"), ("观众", "被关注"), ("没人看", "被关注"),
+                ("孤独", "孤独"), ("朋友", "朋友"), ("普通", "普通生活"),
+                ("点心", "日常"), ("茶", "日常"), ("通心粉", "日常"),
+                ("担心", "担心与不安"), ("害怕", "担心与不安"), ("压力", "压力"),
+                ("缺点", "自己的缺点"), ("优点", "自己的优点"),
+                ("介绍", "介绍自己"), ("过去", "过去"), ("自由", "自由"),
+                ("困", "困倦"), ("睡", "困倦"), ("陪", "陪伴"),
+                ("平时", "平时与真实自我"), ("夸张", "平时与真实自我"),
+                ("不像", "平时与真实自我"), ("真实", "平时与真实自我"),
+                ("自己", "自我认知"), ("以前", "过去的生活"), ("生活", "过去的生活"),
+                ("开心", "现在的心情"), ("想回到过去", "对过去的态度"),
+                ("回到过去", "对过去的态度"), ("现在", "现在"),
+            ):
+                if kw in t:
+                    return topic
+            # 默认：取用户文本前 12 字去标点作为兜底语义（不是 Furina 回复文本）
+            import re as _re
+            core = _re.sub(r"[\s，。？！、：:；;~～]", "", t)[:12]
+            return core or ""
+        except Exception:
+            return ""
+
     def _plan_turn(self, *, user_text: str, app, emotion: str = "",
                    relationship: Optional[dict] = None, activity: str = "",
                    user_initiated: bool = False, task_mode: bool = False,
@@ -653,15 +704,25 @@ class DialogueBrain:
             annoyance = float(rel.get("annoyance", 0.1))
         except Exception:
             trust, familiarity, annoyance = 0.5, 0.5, 0.1
-        history_topic = ""
+        # R2.2.1 §7：semantic topic/referent 追踪（不用 last Furina speech text[:40]）。
+        # 1) 更新既有 semantic topic：本句若带新话题 → 更新 last_semantic_topic；
+        #    本句是指代性（那/现在呢/刚才）→ 沿用 last_semantic_topic 作为 referent。
+        cur_topic = self._semantic_topic_of(user_text or "")
+        last_topic = getattr(self, "_last_semantic_topic", "")
+        if cur_topic:
+            self._last_semantic_topic = cur_topic
+        else:
+            cur_topic = last_topic
+        self._last_semantic_topic = cur_topic or last_topic
+        # 2) open referent：指代性输入 → 绑定到上一个 semantic topic（非 Furina 自然语言）
         try:
-            recent = self.recent_turns(4)
-            if recent:
-                last_f = next((h for h in reversed(recent) if h.get("role") == "furina"), None)
-                if last_f:
-                    history_topic = str(last_f.get("text", ""))[:40]
+            from furina.persona.persona_planner import parse_user_turn as _parse
+            _fr = _parse(user_text or "")
+            if _fr.has_referent_deictic and last_topic:
+                self._last_open_referent = last_topic
         except Exception:
             pass
+        history_topic = getattr(self, "_last_open_referent", "") or cur_topic or ""
         plan = plan_for(
             user_text or "", mode_hint=app.mode, emotion=emotion,
             trust=trust, familiarity=familiarity, annoyance=annoyance,
@@ -777,7 +838,8 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
                         interaction: str = "",
                         agent_state: str = "",
                         agent_task: str = "",
-                        plan=None, auto_guide: str = "") -> str:
+                        plan=None, auto_guide: str = "",
+                        agent_facts: Optional[dict] = None) -> str:
     """Phase 08B 结构化 prompt：Compact Contract + Mode + Intent + Strategy + Context + Examples + Constraints。
 
     Phase 13C：加"说话机制"引导（§43-44）与短期对话上下文（§24-26）。
@@ -844,9 +906,44 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
                      "**FACT_CORE 不允许 Persona 删改**；再允许角色口吻（Persona tail）。"
                      "不得只答'小事一桩''你越来越依赖我'而缺失事实层；不得编造未验证的细节（如'花了几分钟'）。"
                      "有验证证据就引用具体结果（如'已移到 Images/Docs 文件夹'），没有就不说。")
-    parts.append(f"【当前表达姿态】mode={ap['mode']}" +
-                 (f" (次级 {ap['secondary_mode']})" if ap["secondary_mode"] else "") +
-                 f" | dialogue_act={ap['dialogue_act']}")
+    # R2.2.1 §5：AgentReportFacts 确定性事实核心（结构化注入，供 LLM 引用具体证据）
+    if agent_facts:
+        try:
+            af = agent_facts
+            parts.append("【AgentReportFacts - 确定性事实核心（必须如实包含在回复里）】")
+            if af.get("goal"):
+                parts.append(f"- 任务目标: {af.get('goal')}")
+            parts.append(f"- 结果: 已完成（terminal={af.get('terminal_status','')}）")
+            if af.get("verified"):
+                parts.append("- 验证: 已验证通过")
+            if af.get("concrete_evidence"):
+                parts.append(f"- 具体结果证据: {af.get('concrete_evidence')}")
+            if not af.get("has_duration_evidence"):
+                parts.append("- 注意: 没有时长证据，**禁止**编造'花了几分钟/几秒'")
+        except Exception:
+            pass
+    # R2.2.1 §4：PersonaPlan.mode 是 Dialogue realization 的**唯一 mode authority**。
+    # ExpressionEngine 的 ap['mode'] 只作为 planner 输入 hint，不再作为第二个平行 prompt mode。
+    # plan 为 None（旧测试直调 _dialogue_prompt_v2 不带 plan）时回退到 ap['mode']（兼容）。
+    final_mode = ""
+    if plan is not None:
+        try:
+            final_mode = str(getattr(plan, "mode", "") or "").upper()
+        except Exception:
+            final_mode = ""
+    if not final_mode:
+        final_mode = str(ap.get("mode", "") or "").upper()
+    final_act = ""
+    if plan is not None:
+        try:
+            final_act = str(getattr(plan, "user_dialogue_act", "") or "").upper()
+        except Exception:
+            final_act = ""
+    if not final_act:
+        final_act = str(ap.get("dialogue_act", "") or "").upper()
+    parts.append(f"【当前表达姿态】mode={final_mode}" +
+                 (f" (次级 {ap['secondary_mode']})" if ap.get("secondary_mode") else "") +
+                 f" | dialogue_act={final_act}")
     parts.append(f"【表达策略】{ap['strategy']}")
     mode_lang = {
         "SINCERE": "此刻收住表演：语气真诚、平实，少夸张口癖与舞台腔，先把真实想法说清楚。",
@@ -859,7 +956,7 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
         "PROUD": "此刻可以得意，但别满嘴口癖；得意里带点真心。",
         "GUARDED": "此刻保留、嘴硬、不轻易交底，但别冷冰冰。",
     }
-    ml = mode_lang.get(str(ap["mode"]).upper())
+    ml = mode_lang.get(final_mode)
     if ml:
         parts.append(f"【语气约束（按 mode 变化，不是统一浮夸芙宁娜）】{ml}")
     ctx = []

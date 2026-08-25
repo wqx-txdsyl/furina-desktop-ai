@@ -33,6 +33,7 @@ class DialogueContextSnapshot:
     relationship: Tuple[Tuple[str, float], ...] = ()   # flat dict 副本
     memory_interp: Tuple[Tuple[str, Any], ...] = ()    # 浅拷贝 dict 副本
     ambient_recent: Tuple[str, ...] = ()
+    agent_facts: Tuple[Tuple[str, Any], ...] = ()      # R2.2.1 §5：AgentReportFacts 确定性事实核心（flat）
 
     # -------------------------------------------------- 只读辅助（副本 → 调用参数）
     def memories_list(self) -> List[str]:
@@ -73,6 +74,8 @@ class DialogueContextSnapshot:
         if self.agent_state or self.agent_task:
             kw["agent_state"] = self.agent_state    # R2.1 P1-1
             kw["agent_task"] = self.agent_task      # R2.1 P1-1
+        if self.agent_facts:
+            kw["agent_facts"] = dict(self.agent_facts)   # R2.2.1 §5
         return kw
 
     def ambient_texts(self) -> List[str]:

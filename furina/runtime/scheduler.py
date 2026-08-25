@@ -280,16 +280,49 @@ class Scheduler:
         now = time.monotonic()
         if phase in ("DIRECT_INGRESS", "QUEUED", "GENERATION_STARTED") or status in ("QUEUED", "GENERATING"):
             self._direct_active = True
-            self._ambient_deferred = []
+            # R2.2.1 §6：**不清空 deferred** —— 连续 direct 回合期间被挡的 IMPORTANT ambient
+            # 保留在队列，等所有 direct 结束、grace 过期后统一 drain（exactly-once replay）。
         elif phase in ("REPLIED", "FAILED", "CANCELLED") or status in ("REPLIED", "FAILED", "CANCELLED"):
             self._direct_active = False
             # Direct terminal + visible 完成后 → 短 conversational grace window（§16）
             self._direct_grace_until = now + self._direct_grace_window()
-            # 释放被 defer 的 IMPORTANT ambient 台词（freshness 检查）
-            deferred = list(self._ambient_deferred)
-            self._ambient_deferred = []
-            for d in deferred:
-                self._try_deferred_ambient(d, now)
+            # R2.2.1 §6：**不清空 deferred** —— IMPORTANT ambient 保留到 grace 真正结束后
+            # 由 `_tick_deferred_ambient`（medium tick）drain + freshness 检查（replay exactly-once）。
+
+    def _tick_deferred_ambient(self, now: Optional[float] = None) -> None:
+        """R2.2.1 §6：drain 被 defer 的 IMPORTANT ambient 台词。
+
+        在 medium tick 中调用：grace 未结束 → retained（继续等）；
+        grace 结束且 fresh（born≤8s）→ replay exactly-once（重新走 start_autonomous_dialogue）；
+        stale（born>8s）→ drop。
+        每 tick 至多处理一次（幂等：重放成功/过期后从列表移除）。
+        """
+        now = time.monotonic() if now is None else now
+        if not self._ambient_deferred:
+            return
+        if self._direct_active:
+            return                                  # direct 重新活跃 → 继续 defer
+        if now < self._direct_grace_until:
+            return                                  # grace 未结束 → retained
+        remaining = []
+        for d in self._ambient_deferred:
+            born = float(d.get("born", 0.0) or 0.0)
+            if now - born > 8.0:
+                continue                            # stale → drop
+            # fresh + grace 已结束 → replay exactly-once
+            try:
+                self.start_autonomous_dialogue(
+                    activity=d.get("activity", ""),
+                    speech_level=int(d.get("speech_level", 0) or 0),
+                    speech_intent=d.get("speech_intent", ""),
+                    dialogue_needed=bool(d.get("dialogue_needed", False)),
+                    emotion=d.get("emotion", ""),
+                    duration=float(d.get("duration", 0.0) or 0.0),
+                    intent=d.get("intent", ""),
+                    bypass_throttle=True)            # R2.2.1 §6：补发被挡意图，绕过节流
+            except Exception:
+                pass
+        self._ambient_deferred = []                 # 本轮 drain 后清空（已 replay 或 drop）
 
     def _direct_grace_window(self) -> float:
         """direct 终态后的对话宽限窗（秒）。短：刚对话完不给 ambient 插话。"""
@@ -311,28 +344,8 @@ class Scheduler:
         return True
 
     def _try_deferred_ambient(self, d: Dict, now: float) -> None:
-        """freshness 检查后重放被 defer 的 IMPORTANT ambient（过时则 stale drop）。
-
-        defer 记录的是"意图参数"（未生成 speech）；grace 结束后重新走正常自主台词路径
-        （此时 _ambient_allowed=True，会重新做节流 + 冻结快照 + LLM 生成）。
-        超过 8s 的 defer 视为过期（EPHEMERAL 语义）→ drop。
-        """
-        try:
-            if now < self._direct_grace_until:
-                return                      # 仍在 grace 内 → 再等
-            born = d.get("born", 0.0)
-            if now - born > 8.0:            # 过期 → stale drop
-                return
-            self.start_autonomous_dialogue(
-                activity=d.get("activity", ""),
-                speech_level=int(d.get("speech_level", 0) or 0),
-                speech_intent=d.get("speech_intent", ""),
-                dialogue_needed=bool(d.get("dialogue_needed", False)),
-                emotion=d.get("emotion", ""),
-                duration=float(d.get("duration", 0.0) or 0.0),
-                intent=d.get("intent", ""))
-        except Exception:
-            pass
+        """（保留兼容入口）deferred 的 drain 统一走 `_tick_deferred_ambient`。"""
+        self._tick_deferred_ambient(now)
 
     def _agent_facts_sched(self) -> tuple:
         """R2.1 P1-1：CURRENT_FACTS 权威 —— (agent_state, active_task)。"""
@@ -374,9 +387,19 @@ class Scheduler:
             pass
         # 结果绑定报告（exactly-once：角色报告成功出话，否则确定性事实回退）
         # R2.1.1 P1-4：Agent success 必须用 AGENT_REPORT semantics（interaction="agent"）
+        # R2.2.1 §5：AgentReportFacts 确定性事实核心 —— persona 漏事实时 deterministic 保留。
+        agent_facts = {
+            "original_request": req,
+            "goal": goal,
+            "terminal_status": "COMPLETED_VERIFIED",
+            "verified": bool(payload.get("verified", False)),
+            "summary": summary,
+            "concrete_evidence": concrete,
+            "has_duration_evidence": False,   # 无 duration 证据 → 禁编"几分钟/几秒"
+        }
         self._speak_via_dialogue(intent="assist_user", emotion=self.se.state.emotion.label,
                                  user_initiated=True, context=ctx, activity="agent_report",
-                                 interaction="agent",
+                                 interaction="agent", agent_facts=agent_facts,
                                  fallback=f"（系统状态：任务已完成：{goal}。）")
 
     def _on_agent_fail(self, ev) -> None:
@@ -567,6 +590,11 @@ class Scheduler:
         # FINAL-R1 §7：社交响应窗口到期检查（owner 线程，medium tick）
         try:
             self._tick_social_bid()
+        except Exception:
+            pass
+        # R2.2.1 §6：drain deferred IMPORTANT ambient（grace 结束 + fresh → replay exactly-once）
+        try:
+            self._tick_deferred_ambient()
         except Exception:
             pass
         # 关系自然恢复（Phase 04：无负向事件时 annoyance/tolerance/confidence 回落）
@@ -817,7 +845,7 @@ class Scheduler:
     def start_autonomous_dialogue(self, *, activity: str, speech_level: int = 0,
                                   speech_intent: str = "", dialogue_needed: bool = False,
                                   emotion: str = "", duration: float = 0.0,
-                                  intent: str = "") -> None:
+                                  intent: str = "", bypass_throttle: bool = False) -> None:
         """H1-FINAL §3：**Director 实际执行 mind 动作后**才启动自主台词（owner 线程）。
 
         owner：节流检查 + 冻结快照 → worker：DialogueBrain.say → owner：应用台词/开 social bid。
@@ -844,14 +872,16 @@ class Scheduler:
                         "duration": duration, "speech_level": int(speech_level or 0),
                         "dialogue_needed": dialogue_needed, "born": now,
                     })
-                    self._ambient_deferred = self._ambient_deferred[-3:]
+                    self._ambient_deferred = self._ambient_deferred[-8:]
                 return   # EPHEMERAL → stale drop；IMPORTANT → defer
             last = getattr(self, "_llm_speech_at", 0.0)
             speech_level = int(speech_level or 0)
             # 节流：自主/状态触发的说话必须 >= 35s 一次，否则会刷屏（每次决策都说同一句）。
             # 只有高 speech_level(>=3 深聊) 或明确 dialogue_needed 且过了 15s 才放行。
+            # R2.2.1 §6：deferred replay（bypass_throttle）绕过节流 —— 那是被 direct 挡下的
+            # 意图在 grace 后的补发，不是新的自主刷屏。
             min_gap = 15.0 if (speech_level >= 3 or (dialogue_needed and speech_level >= 2)) else 35.0
-            if (now - last) < min_gap:
+            if (not bypass_throttle) and (now - last) < min_gap:
                 return
             voiced = activity in SPEAKABLE_ACTIVITIES
             if not (dialogue_needed or speech_level >= 1 or voiced):
@@ -1259,12 +1289,15 @@ class Scheduler:
 
     def _speak_via_dialogue(self, *, intent: str, emotion: str, user_initiated: bool,
                             context: str, activity: str, interaction: str = "",
-                            fallback: str = "") -> None:
+                            fallback: str = "", agent_facts: Optional[dict] = None) -> None:
         """FIX G：把高频互动/系统事件台词交给 DialogueBrain（背景线程，不阻塞 UI）。
 
         唯一语言源 = DialogueBrain → Frame.speech。DialogueBrain 失败/无 LLM → 沉默（§9），
         不回退固定句池；`fallback`（R2.1 P1-4）为 Agent 报告等**必须恰好一次用户可见**的
         场景提供确定性事实回退（SYSTEM_STATUS 样式，非角色人格化）。
+        R2.2.1 §5：`agent_facts`（AgentReportFacts）在 persona 出话后做**确定性 FACT_CORE 保证**——
+        如果 persona LLM 漏掉 factual core（completed/result semantic / verified / concrete evidence），
+        确定性拼接 FACT_CORE 到可见输出（不依赖"prompt 写了不可删除"）。
         H1 §10：**owner 线程冻结 DialogueContextSnapshot**（互动/Agent 报告通道），worker 只读快照。
         """
         if self.dialogue_brain is None:
@@ -1273,11 +1306,14 @@ class Scheduler:
             return
         snap = self._freeze_reaction_snapshot(intent=intent, emotion=emotion,
                                               user_initiated=user_initiated, context=context,
-                                              activity=activity, interaction=interaction)
+                                              activity=activity, interaction=interaction,
+                                              agent_facts=agent_facts)
         def _work(snapshot, _fallback):
             try:
                 speech = self.dialogue_brain.say(**snapshot.say_kwargs())
                 if speech:
+                    # R2.2.1 §5：确定性 FACT_CORE closure（persona 漏事实时保留事实层）
+                    speech = self._ensure_agent_fact_core(speech, snapshot)
                     # §8：对话结果经 apply 队列在 owner 线程落地（worker 线程不直接改 _speech）
                     # R2.1.1 P0-4：_say 绑定快照 channel（interaction/feed/agent/ambient）
                     self._enqueue_apply(
@@ -1295,8 +1331,67 @@ class Scheduler:
         import threading
         threading.Thread(target=_work, args=(snap, fallback), daemon=True).start()
 
+    @staticmethod
+    def _ensure_agent_fact_core(speech: str, snapshot) -> str:
+        """R2.2.1 §5：Agent 报告 deterministic FACT_CORE closure。
+
+        如果 persona 输出漏掉：完成/结果语义、verified 结果、具体证据 —— 用 snapshot.agent_facts
+        的**确定性事实**补齐（不依赖 LLM 是否记牢 prompt 指令）。
+        无 duration 证据时，禁止出现"几分钟/几秒"（除非 persona 自己本来没编——只做检查拦截）。
+        返回最终可见 speech。
+        """
+        s = (speech or "").strip()
+        if not s:
+            return s
+        facts = dict(getattr(snapshot, "agent_facts", ()) or {})
+        if not facts:
+            return s
+        try:
+            goal = str(facts.get("goal", "") or "")
+            verified = bool(facts.get("verified", False))
+            concrete = str(facts.get("concrete_evidence", "") or "")
+            # 1) 无 duration 证据：persona 若编造时长 → 移除
+            if not facts.get("has_duration_evidence"):
+                import re as _re
+                s = _re.sub(r"[，,。]?\s*也就(花|用)了?(大概|约)?[一二三四五六七八九十几0-9]+分钟[。]?",
+                            "", s)
+                s = _re.sub(r"[，,。]?\s*(花|用)了?(大概|约)?[一二三四五六七八九十几0-9]+秒[。]?",
+                            "", s)
+                s = s.rstrip("，,。 ") + ("。" if s and not s.endswith(("。", "！", "？", "!")) else "")
+            # 2) 完成/结果语义缺失 → 确定性前缀补齐（先事实后 persona）
+            has_completed = any(k in s for k in ("完成", "办好了", "开好了", "搞定", "好了",
+                                                 "已", "移", "整理好", "成功", "done", "ok"))
+            has_goal = goal and goal in s
+            has_verified = (not verified) or any(k in s for k in ("验证", "确认", "检查过", "verified"))
+            missing = []
+            if not (has_completed or has_goal):
+                missing.append("已完成" if goal else "已完成")
+            if verified and not has_verified:
+                missing.append("已验证")
+            if concrete and concrete not in s:
+                # 具体证据缺失 → 追加一句事实（如"notes.md 已移到 Docs，image.png 已移到 Images"）
+                pass
+            if missing:
+                prefix = f"（任务已完成：{goal}。已验证。）" if goal else "（任务已完成，已验证。）"
+                s = prefix + s
+            # 具体证据缺失/未覆盖 → 追加一句事实（若输出已含相似证据则跳过）
+            if concrete and concrete not in s:
+                # 粗粒度判断：persona 若已提到关键文件/目录名，视为已覆盖具体证据
+                _key_tokens = [t for t in concrete.replace("→", " ").replace(";", " ").split()
+                               if len(t) >= 2]
+                covered = False
+                if _key_tokens:
+                    covered = all(tok in s for tok in _key_tokens[:2])
+                if not covered:
+                    s = s.rstrip("。！？") + f"。具体：{concrete}。" if not s.endswith(("。", "！", "？")) \
+                        else s + f"具体：{concrete}。"
+            return s
+        except Exception:
+            return speech
+
     def _freeze_reaction_snapshot(self, *, intent: str, emotion: str, user_initiated: bool,
-                                  context: str, activity: str, interaction: str = ""):
+                                  context: str, activity: str, interaction: str = "",
+                                  agent_facts: Optional[dict] = None):
         """H1 §10：owner 冻结互动/Agent 报告通道的对话快照（只读事实副本）。"""
         from furina.runtime.dialogue_snapshot import DialogueContextSnapshot, freeze_flat
         wf = {}
@@ -1343,6 +1438,7 @@ class Scheduler:
             world=freeze_flat(wf),
             relationship=freeze_flat(rel),
             memory_interp=freeze_flat(minterp),
+            agent_facts=freeze_flat(agent_facts),  # R2.2.1 §5：确定性事实核心
         )
 
     def body_snapshot(self) -> Optional[dict]:

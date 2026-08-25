@@ -284,6 +284,16 @@ class Furina:
         st.life.activity = req.action
         st.intent.action = req.action
         st.life.reason = req.reason
+        # R2.2.1 §8：recent activity truth —— activity 变化时把上一 current 记入 recent（确定性事实）。
+        # current_activity=req.action；recent_activity=上一个 current；recent_activity_finished_at=此刻。
+        try:
+            prev = getattr(self, "_current_activity_truth", "") or ""
+            if prev and prev != req.action:
+                self._recent_activity = prev
+                self._recent_activity_finished_at = __import__("time").time()
+            self._current_activity_truth = req.action
+        except Exception:
+            pass
         # Phase 13 终审 §4.5：**EmotionEngine 是情绪真相的唯一所有者**。
         # LifeDecision 的 emotion 只是 LifeBrain 的表达/行为提示（非权威），
         # 落到 Intent.emotion（结构化输出槽），**不得覆盖 EmotionState.label**。
@@ -598,15 +608,22 @@ class Furina:
             activity = str(getattr(snapshot, "activity", "") or "")
             if not activity:
                 return ""
+            user_text = str(getattr(snapshot, "user_text", "") or "")
+            # R2.2.1 §8：问"刚才…"优先 recent activity；问"现在…"优先 current。
+            # recent activity 是确定性事实（_on_execute 在 activity 变化时记录），不来自旧 Memory。
+            asks_recent = any(k in user_text for k in ("刚才", "之前", "刚刚", "刚才有", "刚才在做"))
+            asks_current = any(k in user_text for k in ("现在", "正在", "你现在", "在干嘛", "在做", "现在在"))
+            recent_act = getattr(self, "_recent_activity", "") or ""
+            picked = activity
+            if asks_recent and recent_act and recent_act != activity:
+                picked = recent_act
             # authoritative activity → 事实描述（确定性，不依赖 LLM）
-            desc = self._activity_fact_line(activity)
+            desc = self._activity_fact_line(picked)
             if not desc:
                 return ""
-            user_text = str(getattr(snapshot, "user_text", "") or "")
-            # 用户问"刚才/在做什么" → 事实层回答（简短 persona wrapping 可选）
-            if any(k in user_text for k in ("你在干嘛", "在做什么", "刚才", "干嘛", "做自己的事情")):
+            if asks_recent:
                 return f"嗯，刚才我在{desc}。怎么，你好奇呀？"
-            return f"嗯，我刚才在{desc}。"
+            return f"嗯，我刚才在{desc}。怎么，你好奇呀？"
         except Exception:
             return ""
 

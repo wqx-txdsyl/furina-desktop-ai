@@ -242,7 +242,16 @@ def plan_for(user_text: str, *, mode_hint: str = "", emotion: str = "calm",
              autobiography_level: Optional[int] = None,
              autobiography_anchor_ids: Optional[List[str]] = None,
              recent_openings: Optional[List[str]] = None) -> PersonaPlan:
-    """从用户输入 + 运行时状态 → PersonaPlan（确定性）。"""
+    """从用户输入 + 运行时状态 → PersonaPlan（确定性）。
+
+    R2.2.1 §1/§2：**Relationship 只作 mode modifier，不作 blanket override**。
+    - 低 trust（如真实新用户 trust=0.0）不得把 correction/serious/listening/quiet/confide
+      覆盖为 GUARDED，也不得覆盖 RESPONSIBLE；
+    - 低 trust 只降低 intimacy / vulnerability disclosure / autobiography explicitness；
+    - 高 annoyance 只允许影响**适合被关系影响的社交 mode**（CHALLENGE/ABSENCE/ATTENTION
+      可保留 GUARDED；PLAYFUL/PROUD/TEASE 等社交 mode 高烦可压 GUARDED）；
+    - correction 恒优先：'我是认真问的' 在任何关系初值下都产生 SINCERE semantics。
+    """
     f = parse_user_turn(user_text, history_topic=history_topic)
     plan = PersonaPlan(user_dialogue_act=f.act, user_need=f.emotional_need,
                        topic=f.topic, referent=f.referent, raw=f.raw)
@@ -253,11 +262,28 @@ def plan_for(user_text: str, *, mode_hint: str = "", emotion: str = "calm",
         plan.mode = "RESPONSIBLE"
     else:
         plan.mode = _MODE_BY_ACT.get(f.act, mode_hint or "CASUAL")
-    # 情绪微调（高信任 + 严肃情绪 → SINCERE）
+    # 情绪微调（高信任 + 严肃情绪 → SINCERE；correction 已置 SINCERE 不受影响）
     if f.seriousness >= 0.8 and trust >= 0.55 and plan.mode in ("CASUAL", "PLAYFUL"):
         plan.mode = "SINCERE"
-    if annoyance >= 0.6 or trust < 0.25:
-        plan.mode = "GUARDED"
+    # ============ R2.2.1 §1：关系只作 modifier，不 blanket override ============
+    # 受关系影响的社交 mode 集合（低 trust / 高 annoyance 允许压成 GUARDED）
+    _REL_AFFECTED = {"CASUAL", "PLAYFUL", "PROUD", "TEASE", "PERFORMATIVE"}
+    # 关系保护 mode：不得被关系覆盖（serious/listening/quiet/confide/RESPONSIBLE/self）
+    _REL_PROTECTED = {"SINCERE", "RESPONSIBLE", "VULNERABLE", "GUARDED"}
+    if plan.mode in _REL_AFFECTED:
+        if annoyance >= 0.6:
+            plan.mode = "GUARDED"
+        elif trust < 0.25:
+            # 低信任不无条件 GUARDED：仅当该 act 的语义适合保留距离时才压；
+            # 普通闲聊（COMMENT/ANSWER）低信任 → GUARDED（新用户保持分寸）
+            if f.act in ("CHALLENGE", "ABSENCE", "ATTENTION_PROBE") or f.act in ("COMMENT", "ANSWER", "PRAISE"):
+                plan.mode = "GUARDED"
+            # PLAYFUL/TEASE 在低信任下也可保留（玩闹不需要信任）
+            elif plan.mode == "PROUD":
+                plan.mode = "GUARDED" if f.act == "PRAISE" else plan.mode
+    # correction 保护：即使上面误改，correction 恒 SINCERE
+    if f.correction:
+        plan.mode = "SINCERE"
 
     # ---- stance / social_goal / forbidden（按 act 的确定性策略）----
     if f.act == "QUIET":
@@ -353,8 +379,12 @@ def plan_for(user_text: str, *, mode_hint: str = "", emotion: str = "calm",
         plan.must_answer = True
         plan.must_include_semantics = [f"严格按用户约束回答（只能回答'{f.explicit_constraint[0]}'或'{f.explicit_constraint[1]}'）"]
         plan.forbidden_moves.append("输出约束外的其它内容")
-    # ---- 关系微调 ----
+    # ---- 关系微调（R2.2.1 §1：低 trust 降 intimacy/vuln，不覆盖 mode）----
     plan.intimacy_level = min(1.0, 0.3 + familiarity * 0.5 + trust * 0.2)
+    if trust < 0.25:
+        # 新用户（低信任）：降低亲密/脆弱可见度（自传显式度在下方 auto 计算后限制）
+        plan.intimacy_level = min(plan.intimacy_level, 0.35)
+        plan.vulnerability_level = min(plan.vulnerability_level, 0.1)
     if plan.intimacy_level >= 0.75 and plan.mode in ("SINCERE", "GUARDED", "PLAYFUL"):
         plan.god_register = "optional" if plan.god_register == "off" else plan.god_register
     # ---- autobiography（外部注入或自算）----
@@ -369,6 +399,9 @@ def plan_for(user_text: str, *, mode_hint: str = "", emotion: str = "calm",
         plan.autobiography_anchor_ids = list(autobiography_anchor_ids)
     else:
         plan.autobiography_anchor_ids = [aid for aid, _s in matched[:2]]
+    # R2.2.1 §1：低 trust 降自传显式度（新用户不主动掏历史）
+    if trust < 0.25 and plan.autobiography_activation > 1:
+        plan.autobiography_activation = 1
     # ---- 强度带 ----
     from .furina_canon import DRAMATIC_INTENSITY
     lo, hi = DRAMATIC_INTENSITY.get(plan.mode, (0.3, 0.5))

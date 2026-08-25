@@ -360,32 +360,133 @@ def test_foreground_important_deferred_during_direct():
     assert sched._ambient_deferred[0]["dialogue_needed"] is True
 
 
-def test_foreground_deferred_replayed_after_grace():
-    """grace 结束 + 未过期 → defer 的 IMPORTANT 重放（重新走自主台词路径）。"""
+def test_foreground_deferred_retained_during_grace():
+    """R2.2.1 §6：terminal 后 grace 未结束 → deferred retained（不丢不重放）。"""
     sched, bus = _make_sched()
-    sched.dialogue_brain = object()
-    # 先 defer
+    brain = _FakeBrain()
+    sched.dialogue_brain = brain
     sched._ambient_deferred = [{"activity": "talk", "speech_intent": "打个招呼",
                                 "emotion": "happy", "intent": "talk", "duration": 3.0,
                                 "speech_level": 3, "dialogue_needed": True,
-                                "born": time.monotonic() - 2.0}]
-    # 重放（grace 已过，freshness 内）→ 会再调 start_autonomous_dialogue（此时 allowed）
+                                "born": time.monotonic()}]
+    # direct 终态 → grace 开启（此刻 deferred 保留）
+    bus.emit(EventType.DIRECT_TURN_TRACE, payload={"phase": "REPLIED", "status": "REPLIED",
+                                                   "turn_id": 1}, source="test")
+    assert sched._direct_active is False
+    assert sched._direct_grace_until > time.monotonic(), "grace 已开启"
+    assert len(sched._ambient_deferred) == 1, "grace 未结束 deferred 必须 retained"
+    # grace 内 drain → retained（不重放）
+    sched._tick_deferred_ambient(time.monotonic())
+    assert len(sched._ambient_deferred) == 1, "grace 内不得 drain"
+    assert brain.calls == [], "grace 内不得 replay"
+
+
+class _FakeBrain:
+    """记录 start_autonomous_dialogue 重放时实际调用的 DialogueBrain。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def say(self, **kw):
+        self.calls.append(dict(kw))
+        return "嗯，我在这儿呢。"
+
+
+def test_foreground_deferred_replayed_exactly_once_after_grace():
+    """R2.2.1 §6：grace 结束 + fresh → replay exactly-once（真实调用 DialogueBrain）。"""
+    sched, bus = _make_sched()
+    brain = _FakeBrain()
+    sched.dialogue_brain = brain
+    sched._ambient_deferred = [{"activity": "talk", "speech_intent": "打个招呼",
+                                "emotion": "happy", "intent": "talk", "duration": 3.0,
+                                "speech_level": 3, "dialogue_needed": True,
+                                "born": time.monotonic() - 1.0}]
+    # grace 已结束（手动置过期）
     sched._direct_grace_until = time.monotonic() - 1.0
-    sched._try_deferred_ambient(sched._ambient_deferred[0], time.monotonic())
-    # 允许路径下 dialogue_brain=object() 无 say → 不产生新 defer（正常返回）
-    assert True
+    sched._tick_deferred_ambient(time.monotonic())
+    assert len(brain.calls) == 1, f"grace 后必须真实 replay 一次: {brain.calls}"
+    assert brain.calls[0].get("activity") == "talk"
+    # drain 后列表清空（exactly-once：再次 drain 不重复）
+    assert sched._ambient_deferred == []
+    sched._tick_deferred_ambient(time.monotonic())
+    assert len(brain.calls) == 1, "exactly-once：不得二次 replay"
 
 
 def test_foreground_deferred_stale_dropped():
     """defer 超过 8s → stale drop（不重放）。"""
     sched, bus = _make_sched()
-    sched.dialogue_brain = object()
-    old = {"activity": "talk", "speech_intent": "", "emotion": "", "intent": "talk",
-           "duration": 0.0, "speech_level": 3, "dialogue_needed": True,
-           "born": time.monotonic() - 20.0}
+    brain = _FakeBrain()
+    sched.dialogue_brain = brain
+    sched._ambient_deferred = [{"activity": "talk", "speech_intent": "", "emotion": "",
+                                "intent": "talk", "duration": 0.0, "speech_level": 3,
+                                "dialogue_needed": True, "born": time.monotonic() - 20.0}]
     sched._direct_grace_until = time.monotonic() - 1.0
-    sched._try_deferred_ambient(old, time.monotonic())
+    sched._tick_deferred_ambient(time.monotonic())
     assert sched._ambient_deferred == [], "过期 defer 应 drop"
+    assert brain.calls == [], "stale 不得 replay"
+
+
+def test_foreground_important_deferred_then_replayed_after_direct():
+    """R2.2.1 §6 端到端：Direct active → IMPORTANT defer → terminal → grace → replay。"""
+    sched, bus = _make_sched()
+    brain = _FakeBrain()
+    sched.dialogue_brain = brain
+    # 1) direct active → IMPORTANT defer
+    bus.emit(EventType.DIRECT_TURN_TRACE, payload={"phase": "GENERATION_STARTED",
+                                                   "status": "GENERATING", "turn_id": 1},
+             source="test")
+    sched.start_autonomous_dialogue(activity="talk", speech_level=3, dialogue_needed=True)
+    assert len(sched._ambient_deferred) == 1, "direct active 时 IMPORTANT 应 defer"
+    assert brain.calls == [], "direct active 时不得 replay"
+    # 2) direct terminal → grace（deferred retained）
+    bus.emit(EventType.DIRECT_TURN_TRACE, payload={"phase": "REPLIED", "status": "REPLIED",
+                                                   "turn_id": 1}, source="test")
+    assert len(sched._ambient_deferred) == 1, "terminal 后 deferred 不得丢失"
+    # 3) grace 未结束 → retained
+    sched._tick_deferred_ambient(time.monotonic())
+    assert len(sched._ambient_deferred) == 1 and brain.calls == []
+    # 4) grace 结束 + fresh → replay exactly-once
+    sched._direct_grace_until = time.monotonic() - 1.0
+    sched._tick_deferred_ambient(time.monotonic())
+    assert len(brain.calls) == 1, "grace 结束必须 replay 一次"
+    assert sched._ambient_deferred == []
+
+
+def test_foreground_5_rapid_direct_no_ambient_interruption():
+    """R2.2.1 §6：5 个 rapid Direct 回合期间 ambient 不得插入（前台所有权）。"""
+    sched, bus = _make_sched()
+    brain = _FakeBrain()
+    sched.dialogue_brain = brain
+    # 5 个 rapid Direct：每个进入 GENERATING → terminal（终态后开 grace）
+    for tid in range(1, 6):
+        bus.emit(EventType.DIRECT_TURN_TRACE,
+                 payload={"phase": "GENERATION_STARTED", "status": "GENERATING", "turn_id": tid},
+                 source="test")
+        # direct active 时 ambient 尝试 → 被挡（EPHEMERAL drop；IMPORTANT defer）
+        sched.start_autonomous_dialogue(activity="talk", speech_level=1, dialogue_needed=False)
+        sched.start_autonomous_dialogue(activity="talk", speech_level=3, dialogue_needed=True)
+        assert sched._direct_active is True
+        # ambient 不得 surface（_ambient_allowed=False）且 brain 未被调用
+        assert sched._ambient_allowed() is False
+        assert brain.calls == [], f"direct active 时 ambient 不得 replay: tid={tid}"
+        # terminal → grace（deferred 保留，不立即 replay）
+        bus.emit(EventType.DIRECT_TURN_TRACE,
+                 payload={"phase": "REPLIED", "status": "REPLIED", "turn_id": tid},
+                 source="test")
+        # grace 内 drain → retained
+        sched._tick_deferred_ambient(time.monotonic())
+        assert brain.calls == [], f"grace 内 ambient 不得 surface: tid={tid}"
+    # 全部 5 轮结束后 grace 过期 → deferred replay（至多一次/条）
+    sched._direct_grace_until = time.monotonic() - 1.0
+    sched._tick_deferred_ambient(time.monotonic())
+    # 等待 worker 线程（ambient_work 异步 say）完成
+    import time as _t
+    deadline = _t.monotonic() + 2.0
+    while len(brain.calls) < 5 and _t.monotonic() < deadline:
+        _t.sleep(0.02)
+    # 每轮 1 条 IMPORTANT defer，共 5 条（ephemeral 直接 drop）→ drain 后 replay 5 条
+    assert len(brain.calls) == 5, f"5 轮 IMPORTANT 应在 grace 后全部 replay: {len(brain.calls)}"
+    assert sched._ambient_deferred == []
 
 
 # ================================================================ Agent Fact Core（>=5）

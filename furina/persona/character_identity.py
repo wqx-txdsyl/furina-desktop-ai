@@ -57,47 +57,63 @@ class CharacterIdentity:
 
 
 # -----------------------------------------------------------------------------
-# 芙宁娜身份（08A 校准，依据 docs/FURINA_CHARACTER_EVIDENCE.md，默认 POST_ARCHON_QUEST 时期）
+# 芙宁娜身份（R2.2.1 §3：从 furina_canon 唯一 Canon 源派生，禁止平行 truth）
 #
-# 分层（不能扁平成一个数）：
+# Canon 分层（不能扁平成一个数）：
 #   Stable Core          —— 跨剧情较稳定：戏剧性/表现力/自尊/好奇/爱表演
 #   Former Mask          —— 历史面具：神性威严/夸大的确信/永不破功（历史，非当前)
 #   Historical Scars     —— latent/triggered：怕被看穿/孤独敏感/失败敏感（相似情境才激活）
 #   Current Growth       —— 卸任后：自由/做自己/主动重拾表演/能真诚不表演
 # 关键：fear_of_being_exposed / loneliness_sensitivity 是 **triggered**，不是 always-on。
+# 数值映射：dramatic_self_presentation ← canon theatricality；need_to_maintain_dignity ←
+# canon dignity；desire_to_be_recognized ← canon attention_sensitivity；其余为显式 adapter。
 # -----------------------------------------------------------------------------
-FURINA_IDENTITY = CharacterIdentity(
-    name="furina",
-    # ---- Stable Core（跨阶段稳定）----
-    need_to_maintain_dignity=0.9,
-    desire_to_be_recognized=0.82,
-    dramatic_self_presentation=0.8,
-    sensitivity_to_appearing_incompetent=0.7,   # 稳定但不过度
-    desire_to_be_seen_as_capable=0.78,
-    independent_self_image=0.65,                 # 卸任后更需要"自己作主"
-    # ---- Current Growth（08A 关键补充：之前的缺口）----
-    craves_genuine_connection=0.85,              # 渴望真实、非表演的连接
-    # ---- Former Mask（降到 historical/latent，不是核心强度）----
-    fear_of_being_exposed=0.5,                   # 历史残留，**默认背景级**
-    loneliness_sensitivity=0.5,                  # 历史残留，**默认背景级**
-    values={"dignity": 0.85, "recognition": 0.8, "freedom": 0.7, "companionship": 0.85,
-            "responsibility": 0.7, "competence": 0.8, "enjoyment": 0.8, "care_for_others": 0.72,
-            "authenticity": 0.8},                # 渴望真实（虽爱表演）
-    sensitivities={"praise": 0.9, "being_ignored": 0.8, "public_failure": 0.75, "successful_performance": 0.85,
-                   "user_return": 0.8, "rejection": 0.8, "being_needed": 0.7, "successful_help": 0.7,
-                   "unexpected_attention": 0.6, "loss_of_control": 0.7, "connection": 0.9},
-    # trait 时期（08A §3-4）：历史创伤标成 historical/latent，非 always_active_core
-    trait_eras={
-        "fear_of_being_exposed": "historical_latent",
-        "loneliness_sensitivity": "historical_latent",
-        "dramatic_self_presentation": "stable",
-        "craves_genuine_connection": "post_story_growth",
-        "desire_to_be_recognized": "stable",
-        "independent_self_image": "post_story_growth",
-    },
-    # 激活：默认背景级（普通场景不悲剧化），相似情境才显著（08A §9/§16）
-    trait_activation={"fear_of_being_exposed": 0.3, "loneliness_sensitivity": 0.3},
-)
+def _canon_furina_identity() -> CharacterIdentity:
+    """从 furina_canon（唯一 Canon 源）派生 Furina 行为层身份（显式 adapter）。"""
+    from .furina_canon import PERSONALITY_AXES, DEFAULT_PERIOD
+    ax = PERSONALITY_AXES
+    identity = CharacterIdentity(
+        name="furina",
+        # ---- Stable Core（跨阶段稳定；从 canon axes 派生）----
+        need_to_maintain_dignity=float(ax["dignity"]["default"]),
+        desire_to_be_recognized=float(ax["attention_sensitivity"]["default"]),
+        dramatic_self_presentation=float(ax["theatricality"]["default"]),
+        sensitivity_to_appearing_incompetent=0.7,   # 稳定但不过度
+        desire_to_be_seen_as_capable=float(ax["pride"]["default"]) * 0.975,
+        independent_self_image=0.65,                 # 卸任后更需要"自己作主"
+        # ---- Current Growth（08A 关键补充：之前的缺口）----
+        craves_genuine_connection=0.85,              # 渴望真实、非表演的连接
+        # ---- Former Mask（降到 historical/latent，不是核心强度）----
+        fear_of_being_exposed=0.5,                   # 历史残留，**默认背景级**
+        loneliness_sensitivity=0.5,                  # 历史残留，**默认背景级**
+        values={"dignity": float(ax["dignity"]["default"]),
+                "recognition": float(ax["attention_sensitivity"]["default"]),
+                "freedom": 0.7, "companionship": 0.85,
+                "responsibility": 0.7, "competence": 0.8, "enjoyment": 0.8,
+                "care_for_others": 0.72, "authenticity": 0.8},   # 渴望真实（虽爱表演）
+        sensitivities={"praise": 0.9, "being_ignored": float(ax["attention_sensitivity"]["default"]),
+                       "public_failure": 0.75, "successful_performance": 0.85,
+                       "user_return": 0.8, "rejection": 0.8, "being_needed": 0.7,
+                       "successful_help": 0.7, "unexpected_attention": 0.6,
+                       "loss_of_control": 0.7, "connection": 0.9},
+        # trait 时期（08A §3-4）：历史创伤标成 historical/latent，非 always_active_core
+        trait_eras={
+            "fear_of_being_exposed": "historical_latent",
+            "loneliness_sensitivity": "historical_latent",
+            "dramatic_self_presentation": "stable",
+            "craves_genuine_connection": "post_story_growth",
+            "desire_to_be_recognized": "stable",
+            "independent_self_image": "post_story_growth",
+        },
+        # 激活：默认背景级（普通场景不悲剧化），相似情境才显著（08A §9/§16）
+        trait_activation={"fear_of_being_exposed": 0.3, "loneliness_sensitivity": 0.3},
+    )
+    # 记录派生来源（诊断：默认时期来自 Canon）
+    identity.trait_eras["_canon_source"] = f"furina_canon.{DEFAULT_PERIOD}"
+    return identity
+
+
+FURINA_IDENTITY: CharacterIdentity = _canon_furina_identity()
 
 # 中性身份：所有值 0.5（用于严格反事实 —— 与 Furina 使用完全相同 Behavioral Personality）
 NEUTRAL_CHARACTER_IDENTITY = CharacterIdentity(name="neutral")

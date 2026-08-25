@@ -250,3 +250,63 @@ def test_seriousness_intensity_bounds():
         seen.add(plan.mode)
     # 至少覆盖 4 种不同 mode（不同 act 路由到不同强度带）
     assert len(seen) >= 4, f"应覆盖多种 mode: {seen}"
+
+
+# ================================================================ R2.2.1 §1/§2：Production Truth
+def _real_new_user_factors():
+    """真实 RelationshipState() 初始 factors（trust=0, familiarity=0, annoyance=0 的 0..1 契约）。"""
+    from furina.relationship.engine import RelationshipEngine, relationship_factors
+    fac = relationship_factors(RelationshipEngine().state)
+    return (fac["trust"], fac["familiarity"], fac["annoyance"])
+
+
+def test_r221_real_relationship_initial_not_all_guarded():
+    """R2.2.1 §1：真实 RelationshipState 初值不得让所有 act 都 GUARDED。"""
+    t, fam, ann = _real_new_user_factors()
+    assert t == 0.0 and fam == 0.0 and ann == 0.0, "新用户关系初值应为 0"
+    cases = {
+        "correction": "我是认真问的，没人看你你会怎么办？",
+        "confide": "我担心自己做的没人喜欢。",
+        "quiet": "不用说什么特别的。",
+        "action": "帮我打开记事本。",
+        "tease": "怎么，不服？",
+    }
+    modes = {label: plan_for(text, trust=t, familiarity=fam, annoyance=ann).mode
+             for label, text in cases.items()}
+    assert modes["correction"] == "SINCERE", f"correction 不得被低 trust 覆盖: {modes}"
+    assert modes["confide"] == "SINCERE", f"confide 不得被低 trust 覆盖: {modes}"
+    assert modes["quiet"] == "SINCERE", f"quiet 不得被低 trust 覆盖: {modes}"
+    assert modes["action"] == "RESPONSIBLE", f"RESPONSIBLE 不得被关系覆盖: {modes}"
+    assert len({m for m in modes.values()}) >= 3, f"mode 应多样化: {modes}"
+
+
+def test_r221_low_trust_reduces_intimacy_vuln_auto():
+    """R2.2.1 §1：低 trust 降低 intimacy/vulnerability/autobiography explicitness。"""
+    t0, fam, ann = _real_new_user_factors()
+    hi = plan_for("你和芙卡洛斯是什么关系？", trust=0.8, familiarity=0.8, annoyance=0.05)
+    lo = plan_for("你和芙卡洛斯是什么关系？", trust=t0, familiarity=fam, annoyance=ann)
+    assert lo.intimacy_level <= 0.35, f"低 trust intimacy 应受限: {lo.intimacy_level}"
+    assert hi.intimacy_level > lo.intimacy_level
+    assert lo.autobiography_activation <= 1, f"低 trust 自传显式度应受限: {lo.autobiography_activation}"
+
+
+def test_r221_high_annoyance_only_affects_social_modes():
+    """R2.2.1 §1：高 annoyance 只影响适合被关系影响的社交 mode。"""
+    hi_ann = plan_for("你陪我一会儿。", trust=0.0, familiarity=0.0, annoyance=0.8)
+    assert hi_ann.mode == "SINCERE", f"LISTEN_WANT 不得被高烦覆盖: {hi_ann.mode}"
+    resp = plan_for("帮我打开记事本。", trust=0.0, familiarity=0.0, annoyance=0.8)
+    assert resp.mode == "RESPONSIBLE", f"RESPONSIBLE 不得被高烦覆盖: {resp.mode}"
+    social = plan_for("你今天真可爱。", trust=0.0, familiarity=0.0, annoyance=0.8)
+    assert social.mode == "GUARDED", "高烦下 PRAISE 社交 mode 可压 GUARDED"
+
+
+def test_r221_correction_sincere_at_trust_zero():
+    """R2.2.1 §2：trust=0 下 correction → SINCERE + dramatic intensity 下降。"""
+    t, fam, ann = _real_new_user_factors()
+    playful = plan_for("如果大家不关注你了，你会怎么办？", trust=t, familiarity=fam, annoyance=ann,
+                       emotion="happy")
+    serious = plan_for("如果大家不关注你了，你会怎么办？我是认真问的。", trust=t, familiarity=fam,
+                       annoyance=ann, emotion="happy")
+    assert serious.mode == "SINCERE", f"correction 在 trust=0 必须 SINCERE: {serious.mode}"
+    assert serious.dramatic_intensity <= playful.dramatic_intensity + 1e-9, \
+        f"correction 后戏剧强度必须下降: {serious.dramatic_intensity} vs {playful.dramatic_intensity}"
