@@ -88,12 +88,10 @@ class Furina:
         self.embodiment = EmbodiedExpressionEngine(FURINA_EMBODIMENT)
         self.body_validator = BodyValidator()
 
-        # 互动事件 → 情绪（确定性映射，不用 LLM）
-        emotion_event = {"petting": EVENT_PET, "poke": EVENT_POKE,
-                         "click": EVENT_CLICK, "drag": EVENT_DRAG}
-        self.bus.on(EventType.INTERACTION_INPUT,
-                    lambda ev: self.emotion.apply(emotion_event.get(
-                        getattr(ev.payload.type, "value", ""), None)) if ev.payload else None)
+        # 互动事件 → 情绪（确定性映射，不用 LLM）。
+        # Phase 13 FINAL-R1 §2.4：只有**显式语义映射**才调用 EmotionEngine；
+        # 未映射的指针控制（grab/release/hover/leave/approach/double_click）**不进 emotion._recent**。
+        self.bus.on(EventType.INTERACTION_INPUT, self._on_interaction_emotion)
 
         # Director（唯一仲裁）
         self.director = Director(self.bus)
@@ -141,6 +139,21 @@ class Furina:
             {"head": [0.5, 0.18], "body": [0.5, 0.52], "hand": [0.72, 0.45],
              "foot": [0.5, 0.9], "item": [0.5, 0.7]},
             (0.5, 0.5, 0.42, 0.46))
+
+    # -------------------------------------------------- FINAL-R1 §2.2/§2.4：互动 → 情绪语义
+    def _on_interaction_emotion(self, ev) -> None:
+        """INTERACTION_INPUT → 显式语义情绪事件（无映射 → 不调用 EmotionEngine）。"""
+        if not ev or not ev.payload:
+            return None
+        from furina.emotion import EVENT_PET, EVENT_POKE, EVENT_CLICK, EVENT_DRAG
+        _map = {"petting": EVENT_PET, "poke": EVENT_POKE,
+                "click": EVENT_CLICK, "drag": EVENT_DRAG}
+        event = _map.get(getattr(ev.payload.type, "value", ""), None)
+        if event is None:
+            return None   # 未映射 → 不进入 emotion._recent（§2.4）
+        # §2.2：apply + 立即派生权威 label（owner 线程语义事件边界）
+        self.emotion.apply_event(event, tired_hint=self._tired_hint())
+        return None
 
     def _load_assets(self) -> None:
         """若 data/assets/manifest.json 存在则加载，并把一个真实资产设为 fallback。"""
@@ -232,6 +245,16 @@ class Furina:
             st.attention.target = AttentionTarget.ACTIVE_WINDOW
             st.intent.action = req.action
             return
+        # FINAL-R1 §5：**mind 动作真正执行（Director executor 落地）时才启动活动生命周期**。
+        # 被更高优先级请求阻塞、从未执行的 mind 动作不创建实例、不 mark_done。
+        if getattr(req, "source", "") == "mind":
+            try:
+                sched = getattr(self, "_sched", None)
+                if sched is not None and hasattr(sched, "on_mind_action_started"):
+                    sched.on_mind_action_started(
+                        req.action, float((getattr(req, "payload", {}) or {}).get("planned_duration", 0.0) or 0.0))
+            except Exception:
+                pass
         st.life.macro = macro
         st.life.activity = req.action
         st.intent.action = req.action
@@ -272,17 +295,23 @@ class Furina:
 
     # -------------------------------------------------- Agent → 角色身体同步（plan/5 §15）
     def _on_agent_body(self, phase: str) -> None:
-        # Phase 13 终审 §10.5：Agent 身体/动作所有权必须经 Director（source=agent, P_AGENT_TASK），
-        # 由唯一 executor 在运行时主线程落地 —— 回调线程（Agent worker）**不得直接写 CharacterState**。
-        # phase: approach / work / report / confused
-        try:
-            from furina.director import ActionRequest
-            from furina.director.director import P_AGENT_TASK
-            self.director.submit(ActionRequest(
-                source="agent", action=f"agent_{phase}",
-                priority=P_AGENT_TASK, reason=f"agent body: {phase}"))
-        except Exception:
-            pass
+        # Phase 13 终审 §10.5 + FINAL-R1 §3：Agent 身体/动作所有权必须经 Director
+        # （source=agent, P_AGENT_TASK）。**Director 队列变更只能在 owner 线程** ——
+        # 回调来自 Agent worker，先经 dispatcher 排队，由 owner 线程执行 submit。
+        def _submit_body():
+            try:
+                from furina.director import ActionRequest
+                from furina.director.director import P_AGENT_TASK
+                self.director.submit(ActionRequest(
+                    source="agent", action=f"agent_{phase}",
+                    priority=P_AGENT_TASK, reason=f"agent body: {phase}"))
+            except Exception:
+                pass
+        d = self._rt_dispatcher()
+        if d.is_owner():
+            _submit_body()
+        else:
+            d.submit(_submit_body)
 
     # -------------------------------------------------- 用户命令（右键菜单触发）
     AGENT_TASKS = {
@@ -292,14 +321,14 @@ class Furina:
     }
 
     def _on_user_command(self, text: str) -> None:
-        """从窗口进入的命令：喂食 / Agent 任务 / 对话（后台线程，避免卡 UI）。"""
+        """从窗口进入的命令：喂食 / Agent 任务 / 对话（统一生产入口，FINAL-R1 §3）。"""
         import threading
         if text.startswith("喂："):
-            self._feed(text.split("：", 1)[1])
+            self.submit_feed(text.split("：", 1)[1])
         elif text in self.AGENT_TASKS:
             self.submit_agent_task(text)   # 唯一正式 Agent 请求入口（§7）
         else:
-            threading.Thread(target=self._brain_worker, args=(text,), daemon=True).start()
+            self.submit_user_message(text)   # FINAL-R1 §3：唯一用户对话生产入口（owner 语义 + worker LLM）
 
     def _feed(self, food_name: str) -> None:
         """给芙宁娜喂食（M3）。喂食是一个“事件”，由 LifeBrain 决定她做什么（三脑原则）。
@@ -310,10 +339,10 @@ class Furina:
         from furina.feeding import apply_food, default_food
         food = default_food(food_name)
         res = apply_food(self.state.state, food)
-        # §4.4：喂食 → EVENT_FEED（EmotionEngine 唯一 owner，恰好一次）
+        # §4.4/FINAL-R1 §2.2：喂食 → EVENT_FEED，apply + 立即派生 label（owner 线程语义边界）
         try:
             from furina.emotion import EVENT_FEED
-            self.emotion.apply(EVENT_FEED)
+            self.emotion.apply_event(EVENT_FEED, tired_hint=self._tired_hint())
         except Exception:
             pass
         # Phase 13 终审 §11：**喂食台词在后台线程执行**（LLM 慢调用不阻塞 Qt/调用方）。
@@ -344,7 +373,8 @@ class Furina:
                         intent="eat", emotion=self.state.state.emotion.label,
                         user_initiated=True, context=f"用户喂了我{food.name}",
                         activity="eat", memories=mems, world=wf, relationship=rel,
-                        memory_interp=minterp, user_present=True)
+                        memory_interp=minterp, user_present=True,
+                        channel="FEED_REACTION")   # FINAL-R1 §4.2：喂食台词不进直接对话历史
                     if speech:
                         self.bus.emit(EventType.BRAIN_SPOKE,
                                       payload=type("_O", (), {"speech": speech,
@@ -368,6 +398,57 @@ class Furina:
             self._sched.interrupt_life("user_fed")
         log.info("feed %s -> %s", food.name, res)
 
+    # -------------------------------------------------- FINAL-R1 §3：生产入口（GUI + Harness 共用）
+    def _rt_dispatcher(self):
+        """运行时 owner 分发器：优先 Scheduler 的（同一实例），否则本地兜底。"""
+        sched = getattr(self, "_sched", None)
+        if sched is not None and hasattr(sched, "dispatcher"):
+            return sched.dispatcher
+        disp = getattr(self, "_fallback_dispatcher", None)
+        if disp is None:
+            from furina.runtime.dispatcher import RuntimeDispatcher
+            disp = RuntimeDispatcher()
+            self._fallback_dispatcher = disp
+        return disp
+
+    def submit_feed(self, food: str) -> None:
+        """FINAL-R1 §3：**唯一喂食生产入口**（GUI 右键菜单 + Harness 共用）。
+
+        owner（调用线程）：确定性食物效应 + 语义情绪 + 记忆 + Life 打断，**恰好一次**；
+        worker：慢 Dialogue LLM；最终 speech 经 dispatcher 回 owner 应用。
+        Harness **不得**再包一层 worker 线程（否则两路径线程 owner 不同）。
+        """
+        self._rt_dispatcher().require_owner("submit_feed")
+        # FINAL-R1 §7：喂食 = 用户回应 → 取消 pending social bid
+        try:
+            sched = getattr(self, "_sched", None)
+            if sched is not None and hasattr(sched, "on_user_response"):
+                sched.on_user_response()
+        except Exception:
+            pass
+        self._feed(food)
+
+    def submit_user_message(self, text: str) -> None:
+        """FINAL-R1 §3：**唯一用户直接对话生产入口**（GUI 输入框 + Harness 共用）。
+
+        owner（调用线程）：高置信语义事件 / 关系 / 情绪（恰好一次）；
+        worker：DialogueBrain LLM（FIFO）；
+        owner（dispatcher）：最终 speech 应用 + 对话后记忆提交。
+        """
+        d = self._rt_dispatcher()
+        d.require_owner("submit_user_message")
+        # 1. owner：文本高置信语义因果（reject/praise/talk → 关系/情绪）恰好一次
+        fx = self._apply_user_text_fx(text)
+        if not fx:
+            try:
+                from furina.emotion import EVENT_TALK
+                self.emotion.apply_event(EVENT_TALK, tired_hint=self._tired_hint())
+            except Exception:
+                pass
+        # 2. worker：LLM 对话（_brain_worker 只做 LLM/快照，域变更经 dispatcher 回 owner）
+        import threading
+        threading.Thread(target=self._brain_worker, args=(text,), daemon=True).start()
+
     def _confirm_agent_permission(self, description: str, level) -> bool:
         """角色化权限确认（plan/5 §20）：用户主动点的菜单任务直接放行，给出认可台词。"""
         log.info("agent 授权: %s (level=%s)", description, getattr(level, "name", level))
@@ -382,9 +463,15 @@ class Furina:
         import threading
         threading.Thread(target=self._agent_worker, args=(user_request, extra_context), daemon=True).start()
 
-    def _agent_worker(self, text: str, extra_context: dict | None = None) -> None:
+    def _set_agent_planning(self) -> None:
+        """owner 线程：Agent 进入 planning 域状态（FINAL-R1 §3）。"""
         self.state.state.life.macro = MacroState.WORKING
         self.state.state.life.activity = "agent_planning"
+
+    def _agent_worker(self, text: str, extra_context: dict | None = None) -> None:
+        # FINAL-R1 §3：worker 线程**不得直接写 CharacterState** —— 进入 agent_planning 状态
+        # 是域变更，经 dispatcher 由 owner 线程落地。
+        self._rt_dispatcher().submit(self._set_agent_planning)
         log.info("avatar command -> agent: %s", text)
         try:
             req = self.AGENT_TASKS.get(text, text)   # 未登记任务也可作为直接请求（Harness 安全目录）
@@ -405,20 +492,14 @@ class Furina:
             log.warning("agent worker err: %s", e)
 
     def _brain_worker(self, text: str) -> None:
-        """用户直接对话 → DialogueBrain（三脑架构：语言只负责“怎么说”）。"""
+        """用户直接对话 → DialogueBrain（worker 线程：只做 LLM + 只读快照）。
+
+        FINAL-R1 §3：**域变更**（文本语义因果/关系/情绪）已由生产入口 `submit_user_message`
+        在 owner 线程完成；本 worker 不再触碰域状态。对话后的记忆提交经 dispatcher 回 owner。
+        """
         if not self.dialogue_brain:
             return
         log.info("avatar conversation: %s", text)
-        # Phase 13C §32-36：文本→互动因果（exactly-once per message；无新 LLM）。§28-31 观察放**对话后**，
-        # 避免"本轮刚存的记忆立即被同一 prompt 检索回显"（C-R1.3.2）。
-        fx = self._apply_user_text_fx(text)
-        # §4.4：普通对话 → EVENT_TALK（reject/praise 已用更强语义事件，不叠加 talk）
-        if not fx:
-            try:
-                from furina.emotion import EVENT_TALK
-                self.emotion.apply(EVENT_TALK)
-            except Exception:
-                pass
         # FIX H：完整 runtime context（user_initiated / activity / world / relationship / memory interp / 在场）
         mem_objs = []
         try:
@@ -438,7 +519,6 @@ class Furina:
                 minterp = self.memory.interpret(mem_objs, context=text)   # §5：传 List[Memory] 而非 List[str]
         except Exception:
             pass
-        # 对话前建立 root trace（§11 由 harness trace context 关联）
         speech = self.dialogue_brain.say(
             intent="talk", emotion=self.state.state.emotion.label,
             user_text=text, memories=mems, user_initiated=True,
@@ -453,17 +533,18 @@ class Furina:
                           source="app")
         else:
             # Phase 13 终审 §9：用户直接消息的校验失败必须**可观察**（不得静默永久失声）。
-            # 经确定性 SYSTEM_STATUS 路径（非角色化、非固定句池）暴露"这句话没通过人格校验"。
             try:
                 db = getattr(self, "dialogue_brain", None)
                 if db is not None and getattr(db, "last_validation_failure", None):
                     sched = getattr(self, "_sched", None)
                     if sched is not None and hasattr(sched, "_say"):
-                        sched._say("（系统状态：刚才那句话没通过人格校验，没有展示。）", dur=4.0)
+                        # §3：SYSTEM_STATUS 也是域变更 → 经 dispatcher 回 owner 应用
+                        self._rt_dispatcher().submit(
+                            lambda: sched._say("（系统状态：刚才那句话没通过人格校验，没有展示。）", dur=4.0))
             except Exception:
                 pass
-        # C-R1.3.2：记忆候选观察放在**对话回复完成之后**，避免当前轮记忆被同一 prompt 检索回显。
-        self._maybe_observe_conversation(text)
+        # C-R1.3.2：记忆候选观察放对话后；**记忆写入是域变更** → dispatcher 回 owner 执行
+        self._rt_dispatcher().submit(lambda: self._maybe_observe_conversation(text))
 
     def _recent_memories(self, query: str = ""):
         try:
@@ -482,6 +563,14 @@ class Furina:
             pass
         return {}
 
+    def _tired_hint(self) -> float:
+        """真实困倦信号 0..1（sleepiness+fatigue），供情绪派生（sleepy 只允许真实困倦触发）。"""
+        try:
+            n = self.state.state.needs
+            return max(0.0, min(1.0, (float(n.sleepiness) + float(n.fatigue)) / 200.0))
+        except Exception:
+            return 0.0
+
     # -------------------------------------------------- Phase 13C §32-36：高置信文本 → 互动因果（conservative）
     def _apply_user_text_fx(self, text: str) -> str:
         """用户**对芙宁娜**的高置信语言意义 → 统一语义执行入口（不做第二套 Interaction System）。
@@ -496,6 +585,13 @@ class Furina:
         t = (text or "").strip()
         if not t:
             return
+        # FINAL-R1 §7：文本回应也取消 pending social bid（用户回应了）
+        try:
+            sched = getattr(self, "_sched", None)
+            if sched is not None and hasattr(sched, "on_user_response"):
+                sched.on_user_response()
+        except Exception:
+            pass
         # 1. 高置信拒绝（对芙宁娜的明确指令）→ 与 Reject 按钮同一 route
         if re.search(r"别烦我|别吵我|走开|离我远点|不要烦我|先别理我|我要忙|我要专心|没空理你们|别打扰我", t):
             sched = getattr(self, "_sched", None)
@@ -507,10 +603,10 @@ class Furina:
                     self.relationship.apply(EV_REJECT)
                 except Exception:
                     pass
-                # 无 Scheduler 兜底：情绪语义事件（EmotionEngine 唯一 owner）
+                # 无 Scheduler 兜底：情绪语义事件（EmotionEngine 唯一 owner，§2.2 立即派生）
                 try:
                     from furina.emotion import EVENT_REJECT
-                    self.emotion.apply(EVENT_REJECT)
+                    self.emotion.apply_event(EVENT_REJECT, tired_hint=self._tired_hint())
                 except Exception:
                     pass
             return "reject"
@@ -530,10 +626,10 @@ class Furina:
                         pass
             except Exception:
                 pass
-            # §4.4：夸奖 → EVENT_PRAISE（恰好一次）
+            # §4.4/FINAL-R1 §2.2：夸奖 → EVENT_PRAISE，apply + 立即派生（恰好一次）
             try:
                 from furina.emotion import EVENT_PRAISE
-                self.emotion.apply(EVENT_PRAISE)
+                self.emotion.apply_event(EVENT_PRAISE, tired_hint=self._tired_hint())
             except Exception:
                 pass
             return "praise"

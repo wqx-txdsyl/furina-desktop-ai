@@ -46,40 +46,75 @@ class DialogueBrain:
         self.god_gate = GodCalibrationGate()
         # Phase 13 终审 §9：最近一次校验失败（可观察对话失败路径；空 = 无失败）
         self.last_validation_failure: List[str] = []
-        # Phase 13 终审 §8：**对话 FIFO 串行** —— say() 全程持锁（含 LLM 调用），
-        # 保证 history 严格时序：user1 → furina1 → user2 → furina2（即使 turn1 模型比 turn2 慢）。
+        # Phase 13 终审 §8：内部安全锁（RLock）—— 不是排序机制。
         import threading
         self._say_lock = threading.RLock()
+        # FINAL-R1 §4.1：**显式 FIFO** —— 消息在入口分配递增 seq，history 提交严格按 seq 排序
+        # （后到者等待前序 seq 完成，与锁获取顺序无关）。
+        self._ingress_seq = 0
+        self._ingress_lock = threading.Lock()
+        self._hist_cond = threading.Condition()
+        self._last_pushed_seq = 0
+        # FINAL-R1 §4.2：对话通道语义 —— 只有 DIRECT_USER_TURN 进入直接对话历史；
+        # 自主/喂食/Agent/互动台词进 ambient 池（作为近期上下文事实，不当孤儿 Furina 回合）。
+        self._ambient: List[Dict[str, Any]] = []
+        self._ambient_limit = 8
 
-    # -------------------------------------------------- Phase 13 终审 §8：FIFO 串行入口
-    def say(self, *, intent: str = "", emotion: str = "", user_text: str = "",
-            context: Optional[str] = "", memories: Optional[List[str]] = None,
-            world: Optional[dict] = None, activity: str = "",
-            relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
-            user_initiated: bool = False, task_mode: bool = False,
-            solitude: bool = False, user_present: bool = True) -> Optional[str]:
-        """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
+    # -------------------------------------------------- FINAL-R1 §4.1：显式 FIFO 入口
+    def _next_seq(self) -> int:
+        with self._ingress_lock:
+            self._ingress_seq += 1
+            return self._ingress_seq
 
-        world/relationship/memory_interp 提供具体细节。可通过 expression 层决定 should_speak。
-        **线程安全**：FIFO 串行（锁覆盖整个生成 + history 写入），保证对话时序不被并发打乱。
-        """
-        with self._say_lock:
-            return self._say_impl(intent=intent, emotion=emotion, user_text=user_text,
-                                  context=context, memories=memories, world=world,
-                                  activity=activity, relationship=relationship,
-                                  memory_interp=memory_interp, user_initiated=user_initiated,
-                                  task_mode=task_mode, solitude=solitude, user_present=user_present)
-
-    def push_history(self, role: str, text: str) -> None:
-        """短期对话上下文（bounded）。只存发言，不存系统 prompt。"""
+    def _push_ordered(self, seq: int, role: str, text: str) -> None:
+        """按 seq 严格排序提交直接对话历史（Condition 等待前序完成；stale seq 幂等丢弃）。"""
         if not text:
             return
-        self._hist_seq = getattr(self, "_hist_seq", 0) + 1
-        self._history.append({"role": role, "text": str(text), "seq": self._hist_seq})
-        self._history = self._history[-self._history_limit:]
+        with self._hist_cond:
+            if seq <= self._last_pushed_seq:
+                return   # 已被消费/跳过（陈旧 push，幂等丢弃）
+            while seq != self._last_pushed_seq + 1:
+                self._hist_cond.wait(timeout=1.0)
+            self._history.append({"role": role, "text": str(text), "seq": seq,
+                                  "channel": "DIRECT_USER_TURN"})
+            self._history = self._history[-self._history_limit:]
+            self._last_pushed_seq = seq
+            self._hist_cond.notify_all()
+
+    def _skip_slots(self, slots) -> None:
+        """占用（跳过）指定的历史槽位，保持 seq 严格连续（幂等：已消费的槽不再等待）。
+
+        环境回合/沉默/校验失败等不写直接历史的回合，也必须推进本回合槽位（2s-1, 2s），
+        否则后续直接回合会永远等待不存在的 seq。
+        """
+        with self._hist_cond:
+            for s in slots:
+                if s <= self._last_pushed_seq:
+                    continue          # 该槽已被实际推送消费
+                while s != self._last_pushed_seq + 1:
+                    self._hist_cond.wait(timeout=1.0)
+                self._last_pushed_seq = s
+            self._hist_cond.notify_all()
+
+    def push_history(self, role: str, text: str, seq: Optional[int] = None) -> None:
+        """短期对话上下文（bounded）。只存发言，不存系统 prompt（显式 FIFO 提交）。"""
+        if seq is None:
+            seq = self._next_seq()
+        self._push_ordered(seq, role, text)
+
+    def push_ambient(self, channel: str, text: str) -> None:
+        """FINAL-R1 §4.2：环境通道台词（不进入直接对话历史，避免孤儿回合）。"""
+        if not text:
+            return
+        self._ambient.append({"channel": channel, "text": str(text)})
+        self._ambient = self._ambient[-self._ambient_limit:]
 
     def recent_turns(self, n: int = 4) -> List[Dict[str, Any]]:
         return list(self._history[-n:])
+
+    def recent_ambient(self, n: int = 4) -> List[Dict[str, Any]]:
+        """近期环境台词（AMBIENT/FEED/AGENT/INTERACTION），供上下文事实，不混入直接历史。"""
+        return list(self._ambient[-n:])
 
     # -------------------------------------------------- Phase 13C §19-20：确定性 DialogueAct 路由
     def classify_act(self, user_text: str = "") -> str:
@@ -105,16 +140,46 @@ class DialogueBrain:
             return "REFLECT"
         return "COMMENT"
 
+    # -------------------------------------------------- Phase 13 终审 §8 / FINAL-R1 §4：FIFO 串行入口
+    def say(self, *, intent: str = "", emotion: str = "", user_text: str = "",
+            context: Optional[str] = "", memories: Optional[List[str]] = None,
+            world: Optional[dict] = None, activity: str = "",
+            relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
+            user_initiated: bool = False, task_mode: bool = False,
+            solitude: bool = False, user_present: bool = True,
+            channel: str = "DIRECT_USER_TURN") -> Optional[str]:
+        """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
+
+        FINAL-R1 §4.1：**入队即分配递增 seq**（在取锁之前），history 提交严格按 seq 排序
+        —— 即使 turn1 模型比 turn2 慢、即使 worker 调度乱序，直接对话历史仍是
+        user1 → furina1 → user2 → furina2。
+        FINAL-R1 §4.2：`channel` 决定台词归属：
+          DIRECT_USER_TURN（默认）→ 进入直接对话历史（user/Furina 成对）
+          AMBIENT_AUTONOMOUS / FEED_REACTION / AGENT_REPORT / INTERACTION_REACTION
+          → 进 ambient 池（近期上下文事实，不当孤儿 Furina 回合）。
+        """
+        seq = self._next_seq()          # 调用顺序 = seq 顺序（与锁获取顺序无关）
+        try:
+            with self._say_lock:            # 内部安全锁（非排序机制）
+                return self._say_impl(intent=intent, emotion=emotion, user_text=user_text,
+                                      context=context, memories=memories, world=world,
+                                      activity=activity, relationship=relationship,
+                                      memory_interp=memory_interp, user_initiated=user_initiated,
+                                      task_mode=task_mode, solitude=solitude, user_present=user_present,
+                                      channel=channel, _seq=seq)
+        finally:
+            # FINAL-R1 §4.1：无论成功/沉默/环境/校验失败，本回合槽位（2s-1, 2s）必须推进，
+            # 否则后续直接回合会死锁等待不存在的 seq（幂等：已消费的槽自动跳过）。
+            self._skip_slots((seq * 2 - 1, seq * 2))
+
     def _say_impl(self, *, intent: str = "", emotion: str = "", user_text: str = "",
                   context: Optional[str] = "", memories: Optional[List[str]] = None,
                   world: Optional[dict] = None, activity: str = "",
                   relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
                   user_initiated: bool = False, task_mode: bool = False,
-                  solitude: bool = False, user_present: bool = True) -> Optional[str]:
-        """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
-
-        world/relationship/memory_interp 提供具体细节。可通过 expression 层决定 should_speak。
-        """
+                  solitude: bool = False, user_present: bool = True,
+                  channel: str = "DIRECT_USER_TURN", _seq: Optional[int] = None) -> Optional[str]:
+        """say() 的实现体（由 FIFO 入口包裹；_seq 为入队序号）。"""
         # 1) Expression Appraisal（确定性）：ShouldSpeak / Mode / Intent / Strategy
         app = self.expression.appraise(
             emotion=emotion, intent=intent, user_text=user_text,
@@ -145,8 +210,10 @@ class DialogueBrain:
                                      examples=examples, person=self.persona,
                                      activity=activity,
                                      history=hist)
-        if user_text:
-            self.push_history("user", user_text)   # 当前轮入历史（供下一轮），但本 prompt 不含它
+        if user_text and channel == "DIRECT_USER_TURN":
+            # 当前轮入历史（供下一轮），但本 prompt 不含它；按入队 seq 严格 FIFO 提交
+            # （同一回合 user/furina 用同一 _seq 的两个子序号：2*seq-1 / 2*seq）
+            self.push_history("user", user_text, seq=(_seq or 1) * 2 - 1)
         # 4b) 注入"本神"语境 advice（非强制）
         prompt += "\n" + self.god_gate.prompt_advice(god_cal)
 
@@ -206,7 +273,16 @@ class DialogueBrain:
         self._recent_acts = self._recent_acts[-3:]
         if not user_initiated and len(self._recent_acts) >= 3 and len(set(self._recent_acts)) == 1:
             return None
-        self.push_history("furina", speech)   # §24-26 短期上下文
+        # FINAL-R1 §4.2：通道归属 —— 只有直接对话回合进直接历史（按 seq FIFO）；环境台词进 ambient 池
+        if channel == "DIRECT_USER_TURN":
+            # 无 user_text 的直接回合先占位槽 2s-1，否则 furina push(2s) 会永远等待缺失的 user 槽（死锁）
+            if not user_text:
+                self._skip_slots(((_seq or 1) * 2 - 1,))
+            if speech:
+                self.push_history("furina", speech, seq=(_seq or 1) * 2)
+        else:
+            if speech:
+                self.push_ambient(channel, speech)
         return speech
 
     # -------------------------------------------------- synthetic example 检索（§29 / C-R1.6 路由）

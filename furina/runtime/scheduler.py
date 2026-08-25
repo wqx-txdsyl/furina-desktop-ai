@@ -135,15 +135,16 @@ class Scheduler:
         self.clock = Clock(fast=1 / 60, medium=3.0, slow=120.0)
 
         # 订阅事件
-        # Phase 13 终审 §8：**运行时单 apply 线程** —— 后台线程（Dialogue/Agent worker）emit 的
-        # BRAIN_SPOKE / AGENT_COMPLETED / AGENT_FAILED **不得在 worker 线程同步改运行时状态**，
-        # 一律入 apply 队列，由 owner 线程（step()/drain_apply() 的调用者）统一落地。
-        self._apply_q: list = []
+        # Phase 13 终审 §8 / FINAL-R1 §3：**运行时单 apply 线程** —— 后台线程（Dialogue/Agent worker）
+        # emit 的 BRAIN_SPOKE / AGENT_COMPLETED / AGENT_FAILED 不得在 worker 线程同步改运行时状态，
+        # 一律经 RuntimeDispatcher（显式队列）由 owner 线程统一落地。
+        from furina.runtime.dispatcher import RuntimeDispatcher
+        self.dispatcher = RuntimeDispatcher()
         bus.on(EventType.ACTIVE_WINDOW_UPDATED, self._on_window)
         bus.on(EventType.INTERACTION_INPUT, self._on_interaction)   # GUI/owner 线程来源，直接处理
-        bus.on(EventType.BRAIN_SPOKE, lambda ev: self._enqueue_apply(lambda: self._on_brain(ev)))
-        bus.on(EventType.AGENT_COMPLETED, lambda ev: self._enqueue_apply(lambda: self._on_agent_done(ev)))
-        bus.on(EventType.AGENT_FAILED, lambda ev: self._enqueue_apply(lambda: self._on_agent_fail(ev)))
+        bus.on(EventType.BRAIN_SPOKE, lambda ev: self.dispatcher.submit(lambda: self._on_brain(ev)))
+        bus.on(EventType.AGENT_COMPLETED, lambda ev: self.dispatcher.submit(lambda: self._on_agent_done(ev)))
+        bus.on(EventType.AGENT_FAILED, lambda ev: self.dispatcher.submit(lambda: self._on_agent_fail(ev)))
 
         self._last_window_poll = 0.0
         self._debug_text = ""
@@ -154,6 +155,10 @@ class Scheduler:
         self._life_decision_at = 0.0   # 上次 LifeBrain 重决策时间
         self._life_interrupt_pending = False   # 有重要事件要立即重决策
         self._life_next_think = 90.0    # LifeBrain 下次重决策间隔
+        # FINAL-R1 §7：社交响应窗口 —— 芙宁娜主动发起社交尝试后，用户在窗口内无回应 → USER_IGNORE 一次。
+        # 窗口时长是**交互语义**（不是多样调参）；用户缺席从起点就不开窗口。
+        self._pending_social_bid: Optional[dict] = None
+        self._social_bid_window = 60.0
         self._current_life_activity = "idle"   # 当前执行中的生活活动（闭环：结束时结算经历）
         self._current_activity_duration = 0.0  # 当前活动已执行时长
         # KPI 监控（任务书 §24-27）
@@ -180,18 +185,18 @@ class Scheduler:
         # Phase 12：像素空间移动已由 SpatialRuntime 接管。
         # Scheduler 不再拥有 / 操作 自主移动状态（legacy _move_step 已收敛为 no-op）。
 
-    # -------------------------------------------------- §8：运行时 apply 队列（单 owner 线程落地）
+    # -------------------------------------------------- §8/§3：运行时 apply 队列（单 owner 线程落地）
     def _enqueue_apply(self, fn) -> None:
-        self._apply_q.append(fn)   # list.append 原子（GIL），跨线程入队安全
+        """提交一段"owner 线程执行"的运行时变更（worker 线程调用）。"""
+        self.dispatcher.submit(fn)
 
     def drain_apply(self) -> None:
         """把排队的运行时变更在**当前线程**（owner）逐条落地。Harness/测试在 GUI/主线程调用。"""
-        q, self._apply_q = self._apply_q, []
-        for fn in q:
-            try:
-                fn()
-            except Exception:  # pragma: no cover — apply 失败绝不拖垮主循环
-                pass
+        self.dispatcher.drain()
+
+    def require_owner(self, what: str) -> None:
+        """域变更守卫：非 owner 线程调用将抛错（FINAL-R1 §3 生产契约）。"""
+        self.dispatcher.require_owner(what)
 
     def _move_step(self) -> None:
         """⚠️ DEPRECATED（Phase 12 Spatial Ownership Migration）。
@@ -209,19 +214,13 @@ class Scheduler:
     def _on_window(self, ev) -> None:
         info = ev.payload
         if info:
-            self._last_info = info   # 供 _tick_medium 读取真实 process/idle（§2）
+            # Phase 13 FINAL-R1 §1.2：这里**只缓存原始窗口事实**（供 _tick_medium 做唯一一次 World 更新）。
+            # 不再独立调用 world_perc.update —— 否则同一 medium 采样内 class/process 两次喂入，
+            # 会与 30s 稳定性窗口互相重置 pending 候选（UNKNOWN↔CODING 抖动，转换永不提交）。
+            self._last_info = info
             self.se.on_active_window(info.process or info.app, info.title)
-            self.world.update_active_window(info.rect)
-            # 实时喂给世界感知（结构化归类）
-            try:
-                self.world_perc.update(app=info.app, title=info.title,
-                                       idle_seconds=self.se.state.user_idle_seconds,
-                                       hour=self.se.state.clock_hour,
-                                       minute=self.se.state.clock_minute,
-                                       typing=False)
-                self.se.state.world = self.world_perc
-            except Exception:
-                pass
+            if getattr(info, "rect", None) is not None:
+                self.world.update_active_window(info.rect)
 
     def _on_brain(self, ev) -> None:
         out = ev.payload
@@ -236,16 +235,21 @@ class Scheduler:
                              "play": "living", "rest": "resting", "approach_user": "living",
                              "observe_user": "working"}
                 self.se.state.life.macro = st.MacroState(macro_map.get(intent, self.se.state.life.macro.value))
-            self.se.state.emotion.label = getattr(out, "emotion", self.se.state.emotion.label)
+            # Phase 13 FINAL-R1 §2.1：**EmotionEngine 是情绪真相唯一所有者**。
+            # BRAIN_SPOKE 的 emotion 只是表达提示（可能来自 stale worker 快照），
+            # 落入非权威槽 Intent.emotion，**绝不写 EmotionState.label**。
+            payload_emotion = getattr(out, "emotion", "")
+            if payload_emotion:
+                self.se.state.intent.emotion = payload_emotion
 
     def _on_agent_done(self, ev) -> None:
         # FIX G：Agent 完成 → 角色台词走 DialogueBrain（非固定 summary 冒充人格）
         summary = (ev.payload or {}).get("summary", "完成啦。")
         self.se.state.life.macro = st.MacroState.IDLE
-        # §4.4：Agent 验证成功 → EVENT_AGENT_DONE（EmotionEngine 唯一 owner，恰好一次）
+        # §4.4/FINAL-R1 §2.2：Agent 验证成功 → EVENT_AGENT_DONE，apply + 立即派生（owner 线程）
         try:
             from furina.emotion import EVENT_AGENT_DONE
-            self.emotion.apply(EVENT_AGENT_DONE)
+            self.emotion.apply_event(EVENT_AGENT_DONE, tired_hint=self._tired_hint())
         except Exception:
             pass
         # §6：**已验证**的 Agent 帮助 → 真实关系证据 EV_SUCCESSFUL_HELP（恰好一次，
@@ -286,6 +290,8 @@ class Scheduler:
         _POINTER_CONTROL = ("grab", "release", "hover", "leave", "approach", "double_click")
         if kind in _POINTER_CONTROL:
             return
+        # FINAL-R1 §7：真实用户回应（定型语义互动）→ 取消 pending social bid（不产生 ignore）
+        self._pending_social_bid = None
         # 互动台词（FIX G）→ 走 DialogueBrain（非固定句池）。
         # Phase 13A §6：**Emotion state = EmotionEngine only；Relationship = RelationshipEngine.apply only**。
         # Scheduler._on_interaction **不再直接写 emotion/relationship**（App 的 EmotionEngine/Harness 路由负责），
@@ -366,17 +372,19 @@ class Scheduler:
         # Phase 13 终审 §2.1：localtime()[:2] 是 (year, month)，必须传 (hour, minute)。
         lt = time.localtime()
         self.se.update_clock(lt.tm_hour, lt.tm_min)
-        # §2.2/2.3：**真实输入空闲秒**来自 WindowAwareness（GetLastInputInfo），
-        # 不再把上一帧的 user_idle_seconds 原样传回（自喂）。
-        real_idle = float(getattr(self.wa, "last_idle", 0.0) or 0.0)
-        self.se.state.user_idle_seconds = real_idle
-        # 世界感知：即使窗口不变也要随 idle/时间演化（activity/events/salience）
+        # §2.2/FINAL-R1 §1.1：**真实输入空闲秒**来自 WindowAwareness（GetLastInputInfo+GetTickCount64）。
+        # 空闲真相不可用时（idle_available=False）保留上一有效值，**不假装 0**（那不是"用户一直活跃"）。
+        if getattr(self.wa, "idle_available", False):
+            self.se.state.user_idle_seconds = float(getattr(self.wa, "last_idle", 0.0) or 0.0)
+        # 世界感知：**每 medium 采样恰好一次 update**（§1.2）。
+        # 原始事实（class/process/title/rect/idle/hour/minute）由 wa.poll() 缓存，这里统一消费；
+        # _on_window 不再独立推进 WorldPerception。
         try:
             info = getattr(self, "_last_info", None)
             self.world_perc.update(app=getattr(info, "app", "") or self.se.state.active_window_app,
                                    title=getattr(info, "title", "") or self.se.state.active_window_title,
                                    process=getattr(info, "process", "") or self.se.state.active_window_app,
-                                   idle_seconds=real_idle,
+                                   idle_seconds=self.se.state.user_idle_seconds,
                                    hour=self.se.state.clock_hour,
                                    minute=self.se.state.clock_minute,
                                    typing=bool(getattr(self, "_last_typing", False)), dt=dt)
@@ -384,6 +392,24 @@ class Scheduler:
             # §2.3：user_working 来自 World 感知（进程分类），不再用上一帧值自喂
             self.se.state.user_working = bool(
                 self.world_perc.factors().get("user_working", False))
+            # Phase 13 FINAL-R1 §2.3：**稳定**的 WORK_STARTED/WORK_ENDED → 情绪语义事件，恰好一次。
+            # World 事件本身有 20s debounce + 30s 稳定性窗口（不会从 pending 候选发出）；
+            # 这里再用时间戳去重，避免 recent 列表连续多 tick 重复消费。
+            try:
+                w = self.world_perc.state
+                for ev_key, emo_ev in (("WORK_STARTED", "user_work_start"),
+                                       ("WORK_ENDED", "user_work_end")):
+                    if ev_key in w.recent_world_events and self.emotion is not None:
+                        last = getattr(self, "_last_world_emo_consumed", {}).get(ev_key, 0.0)
+                        if w.timestamp - last > 20.0:
+                            from furina.emotion import EVENT_WORK_START, EVENT_WORK_END
+                            self.emotion.apply_event(emo_ev, tired_hint=self._tired_hint())
+                            d = dict(getattr(self, "_last_world_emo_consumed", {}))
+                            d[ev_key] = w.timestamp
+                            self._last_world_emo_consumed = d
+                            self._recent_events.append(ev_key)
+            except Exception:
+                pass
         except Exception:
             pass
         # 需求（本地规则，无需 LLM）
@@ -413,15 +439,20 @@ class Scheduler:
                 self.emotion.derive_label(tired_hint=max(0.0, min(1.0, tired)))
             except Exception:
                 pass
-        # §4.4：用户返回（idle → active 边界）→ EVENT_RETURN 恰好一次
+        # §4.4/FINAL-R1 §2.2：用户返回（idle → active 边界）→ EVENT_RETURN，apply + 立即派生
         try:
             idle = float(getattr(self.se.state, "user_idle_seconds", 0.0))
             was_idle = bool(getattr(self, "_was_user_absent", False))
             if idle < 300 and was_idle and self.emotion is not None:
                 from furina.emotion import EVENT_RETURN
-                self.emotion.apply(EVENT_RETURN)
+                self.emotion.apply_event(EVENT_RETURN, tired_hint=self._tired_hint())
                 self._recent_events.append("user_return")
             self._was_user_absent = idle >= 300
+        except Exception:
+            pass
+        # FINAL-R1 §7：社交响应窗口到期检查（owner 线程，medium tick）
+        try:
+            self._tick_social_bid()
         except Exception:
             pass
         # 关系自然恢复（Phase 04：无负向事件时 annoyance/tolerance/confidence 回落）
@@ -598,44 +629,34 @@ class Scheduler:
             # 当前行为仍合适：仅延长下次重决策时间，不改变状态（避免翻车/“睡死”外的抖动）
             self._life_next_think = max(15.0, d.next_think_in)
             return
-        # 经历→状态反馈（Life Simulation 闭环）：上一个行为结束 → 因果结算其"后果"。
-        # Phase 13 终审 §6：**替换 ≠ 自动完成**。结算前检查活动实例：
-        #   实际运行时长 ≥ 计划时长 → COMPLETED（全额）；
-        #   否则 → INTERRUPTED（减半，不假装完成）。
-        # 每个实例有 started_at / planned_duration / finish reason（可观察诊断）。
+        # 经历→状态反馈（Life Simulation 闭环）：上一个**真正执行过的**活动结束 → 因果结算。
+        # FINAL-R1 §5：实例只在 Director 实际执行（on_mind_action_started）时创建。
+        # 若 mind 请求被更高优先级（用户/Agent）阻塞、从未执行 → 无实例 → 无结算、无 outcome。
         prev = getattr(self, "_current_life_activity", "idle")
-        if prev != d.activity:
+        inst = getattr(self, "_activity_instance", None)
+        if prev != d.activity and inst is not None and inst.get("status") == "RUNNING":
             try:
-                inst = getattr(self, "_activity_instance", None) or {}
                 now_t = time.time()
                 started = float(inst.get("started_at", now_t))
                 planned = float(inst.get("planned_duration", 0.0))
                 elapsed = max(0.0, now_t - started)
-                if planned > 0 and elapsed >= planned:
-                    self._apply_activity_outcome(prev, success=True, reason="completed")
+                progress = min(1.0, elapsed / planned) if planned > 0 else 1.0
+                pending = inst.get("pending_finish")   # 用户打断等外部原因
+                if pending in ("aborted", "failed"):
+                    reason, success = pending, False
+                elif progress >= 1.0:
+                    reason, success = "completed", True
                 else:
-                    self._apply_activity_outcome(prev, success=False, reason="interrupted_replaced")
+                    reason, success = "interrupted", False
+                inst.update({"status": "COMPLETED" if reason == "completed" else reason.upper(),
+                             "elapsed": round(elapsed, 1), "progress": round(progress, 2),
+                             "finish_reason": reason})
                 self._last_activity_finish = {
-                    "activity": prev, "reason": "completed" if (planned > 0 and elapsed >= planned) else "interrupted_replaced",
+                    "activity": prev, "reason": reason,
                     "elapsed": round(elapsed, 1), "planned_duration": round(planned, 1),
+                    "progress": round(progress, 2),
                 }
-            except Exception:
-                pass
-        # 新活动实例（§6：实例 id + 起点 + 计划时长；替换结算恰好一次）
-        self._activity_instance = {
-            "activity": d.activity,
-            "started_at": time.time(),
-            "planned_duration": max(float(getattr(d, "duration", 0.0) or 0.0), 1.0),
-            "instance_id": f"{d.activity}-{time.time_ns() % 10 ** 8}",
-        }
-        # 硬性反塌缩（任务 §18）—— Phase 13A：anti-collapse = OFF（与项目声明一致）。
-        # 生产路径**不再**调用；由 personality/needs/homeostasis 产生自然多样性。
-        # 旧 `_anti_collapse` 保留为未启用 debt（见 docs）。不要为"补分布"调任何参数。
-        # d = self._anti_collapse(d)
-        # 记录该行为已做（Behavior Motivation 的 recency，避免机械重复）
-        if self.motivation is not None:
-            try:
-                self.motivation.mark_done(d.activity, time.monotonic())
+                self._apply_activity_outcome(prev, success=success, reason=reason, progress=progress)
             except Exception:
                 pass
         # 旧的生命行为（mind）已结束 → 释放 Director 接管权，让新决策能被仲裁
@@ -643,7 +664,13 @@ class Scheduler:
             self.director.finish(source="mind")
         except Exception:
             pass
-        # 交给 Director（唯一 resolver）：source=mind（LifeBrain），priority 用内部需求
+        # 硬性反塌缩（任务 §18）—— Phase 13A：anti-collapse = OFF（与项目声明一致）。
+        # 生产路径**不再**调用；由 personality/needs/homeostasis 产生自然多样性。
+        # 旧 `_anti_collapse` 保留为未启用 debt（见 docs）。不要为"补分布"调任何参数。
+        # d = self._anti_collapse(d)
+        # 交给 Director（唯一 resolver）：source=mind（LifeBrain），priority 用内部需求。
+        # FINAL-R1 §5：**这里不创建实例、不 mark_done** —— 只有 Director 真正执行该动作
+        # （executor 回调 on_mind_action_started）才开始活动生命周期。
         try:
             from furina.director import ActionRequest
             from furina.director.director import P_INTERNAL_NEED
@@ -651,6 +678,7 @@ class Scheduler:
                                 interruptible=bool(getattr(d, "interruptible", True)),
                                 reason=d.reason or f"{d.intent or d.activity}",
                                 payload={"emotion": d.emotion,
+                                         "planned_duration": float(getattr(d, "duration", 0.0) or 0.0),
                                          "speech_intent": getattr(d, "speech_intent", ""),
                                          "speech_level": getattr(d, "speech_level", 0),
                                          "dialogue_needed": getattr(d, "dialogue_needed", False),
@@ -658,12 +686,11 @@ class Scheduler:
             self.director.submit(req)
         except Exception as e:  # pragma: no cover
             log.warning("submit life decision to director err: %s", e)
-            # 兜底：直接写状态（避免角色卡死）
+            # 兜底：直接写状态（避免角色卡死）—— 但**不**创建活动实例（未真正执行）
             st.life.activity = d.activity
             st.life.macro = _macro_for(d.activity)
-        # 跟踪当前执行中的活动（供闭环在下一次换活动时结算其经历；duration 也用于"是否完成"）
-        self._current_life_activity = d.activity
-        self._current_activity_duration = max(getattr(d, "duration", 0.0), 1.0)
+        # 计划时长（供 Frame/显示诊断；实例状态由 on_mind_action_started 负责）
+        self._current_activity_duration = max(float(getattr(d, "duration", 0.0) or 0.0), 1.0)
         self._life_next_think = max(15.0, d.next_think_in)
 
         # 需要说话 → 交给 DialogueBrain（三脑：语言只负责怎么说；此处仅产出台词，不决定行为）
@@ -708,6 +735,7 @@ class Scheduler:
                         memory_interp=minterp,
                         solitude=bool(st.user_idle_seconds > 300),
                         user_present=bool(st.user_idle_seconds < 300),
+                        channel="AMBIENT_AUTONOMOUS",   # FINAL-R1 §4.2：自主台词不进直接对话历史
                     )
                     if speech:
                         self._say(speech, dur=min(6.0, d.duration) if d.duration else 4.0)
@@ -718,16 +746,46 @@ class Scheduler:
         # 需要操作电脑 → 交给 Tool Agent（三脑：手）
         if d.tool_needed:
             log.info("life decision requested tool, but tool task needs explicit user goal; 交给用户或在 Agent 菜单触发")
+        # FINAL-R1 §7：芙宁娜主动选择社交类活动（approach/talk/greet/…）→ 开启响应窗口
+        if d.activity in self._SOCIAL_BID_KINDS:
+            try:
+                self.begin_social_bid(reason=f"life:{d.activity}")
+            except Exception:
+                pass
+
+    # -------------------------------------------------- FINAL-R1 §5：Director 实际执行时才启动实例
+    def on_mind_action_started(self, activity: str, planned_duration: float = 0.0) -> None:
+        """Director 执行器确认 `source=mind` 动作**真正开始**时调用（owner 线程）。
+
+        此刻才：创建 ActivityInstance（RUNNING）、更新 _current_life_activity、
+        记录 recency（mark_done）—— 被阻塞/从未执行的 mind 请求不会走到这里。
+        """
+        self.require_owner("mind_action_started")
+        self._activity_instance = {
+            "activity": activity,
+            "started_at": time.time(),
+            "planned_duration": max(float(planned_duration or 0.0), 1.0),
+            "instance_id": f"{activity}-{time.time_ns() % 10 ** 8}",
+            "status": "RUNNING", "elapsed": 0.0, "progress": 0.0,
+            "finish_reason": None, "source": "mind",
+        }
+        self._current_life_activity = activity
+        # 只有实际开始的活动才更新 recency/history（§5 mark_done 时机）
+        if self.motivation is not None:
+            try:
+                self.motivation.mark_done(activity, time.monotonic())
+            except Exception:
+                pass
 
     # -------------------------------------------------- 经历→状态反馈（Life Simulation 闭环）
     def _apply_activity_outcome(self, activity: str, success: bool = True,
-                                reason: str = "completed") -> None:
+                                reason: str = "completed", progress: float = 1.0) -> None:
         """上一个生活行为结束 → 因果结算其"后果"（needs/emotion）。
 
         用 Activity Outcome 模型（`furina.behavior.outcome`）做**因果反馈**，
         不是行为选择规则 —— 反馈后状态变了，下一行为仍由 Motivation 决定。
-        Phase 13 终审 §6：success=False（interrupted/failed/aborted）时收益减半，不假装完成；
-        reason 记录生命周期结局（completed/interrupted_replaced/...）。
+        FINAL-R1 §5：**进度感知奖励** —— interrupted 收益随真实进度缩放（10% < 70% < 完成），
+        不再固定减半（0.5）。
         """
         try:
             from furina.behavior.outcome import apply_outcome
@@ -737,18 +795,20 @@ class Scheduler:
                 for a in getattr(self.motivation, "_activity_history", []):
                     recent_counts[a] = recent_counts.get(a, 0) + 1
             o = apply_outcome(self.se.state, activity, self.emotion,
-                              success=success, relationship=getattr(self.me, "relationship", None),
+                              success=success, progress=progress,
+                              relationship=getattr(self.me, "relationship", None),
                               recent_counts=recent_counts)
-            # 结局（reason/elapsed/planned）由 _apply_life_decision 在结算点记录到 _last_activity_finish；
+            # 结局（reason/elapsed/planned/progress）已由结算点记录到 _last_activity_finish；
             # 这里仅兜底记录 reason（活动被外部直接结算时也有迹可循）
             fin = getattr(self, "_last_activity_finish", None)
             self._last_activity_finish = {
                 "activity": activity, "reason": reason,
+                "progress": round(progress, 2),
                 "elapsed": fin.get("elapsed", 0.0) if isinstance(fin, dict) else 0.0,
                 "planned_duration": fin.get("planned_duration", 0.0) if isinstance(fin, dict) else 0.0,
             }
-            log.debug("outcome '%s' success=%s reason=%s: needs=%s emotion=%s",
-                      activity, success, reason, o.needs, o.emotion)
+            log.debug("outcome '%s' success=%s reason=%s progress=%.2f: needs=%s emotion=%s",
+                      activity, success, reason, progress, o.needs, o.emotion)
         except Exception as e:  # pragma: no cover
             log.warning("apply activity outcome err: %s", e)
 
@@ -818,10 +878,10 @@ class Scheduler:
                     self.me.store.save_relationship(self.relationship.state)
             except Exception:
                 pass
-        # §4.4：拒绝 → EVENT_REJECT（EmotionEngine 唯一 owner，恰好一次）
+        # §4.4/FINAL-R1 §2.2：拒绝 → EVENT_REJECT，apply + 立即派生（owner 线程）
         try:
             from furina.emotion import EVENT_REJECT
-            self.emotion.apply(EVENT_REJECT)
+            self.emotion.apply_event(EVENT_REJECT, tired_hint=self._tired_hint())
         except Exception:
             pass
         if self.life_brain is not None and hasattr(self.life_brain, "adapt_tolerance"):
@@ -846,10 +906,10 @@ class Scheduler:
                     self.me.store.save_relationship(self.relationship.state)
             except Exception:
                 pass
-        # 情绪（EmotionEngine 唯一 owner）
+        # 情绪（EmotionEngine 唯一 owner，§2.2 立即派生）
         try:
             from furina.emotion import EVENT_IGNORE
-            self.emotion.apply(EVENT_IGNORE)
+            self.emotion.apply_event(EVENT_IGNORE, tired_hint=self._tired_hint())
         except Exception:
             pass
         # Life：用户没回应 → 主动社交收敛
@@ -864,6 +924,39 @@ class Scheduler:
         except Exception:
             pass
         self._interrupt_life("user_ignored")
+
+    # -------------------------------------------------- FINAL-R1 §7：社交响应窗口（真实 ignore 探测器）
+    _SOCIAL_BID_KINDS = ("talk", "approach_user", "greet", "invite_user", "seek_attention",
+                         "ask_user", "comfort")
+
+    def begin_social_bid(self, reason: str = "initiated") -> None:
+        """芙宁娜发起**合格的直接社交尝试** → 开启响应窗口（pending token + deadline）。
+
+        不合格（不开启）：自主自说自话（AMBIENT）、非社交环境台词、指针离开、
+        用户从一开始就缺席、Agent/系统状态台词。
+        """
+        if getattr(self, "_pending_social_bid", None) is not None:
+            return   # 已有 pending，不重复
+        if self.se.state.user_idle_seconds >= 300:
+            return   # 用户缺席从起点就不开窗口（不制造假 ignore）
+        self._pending_social_bid = {
+            "token": f"bid-{time.time_ns() % 10 ** 8}",
+            "deadline": time.time() + self._social_bid_window,
+            "reason": reason,
+        }
+
+    def on_user_response(self) -> None:
+        """真实用户回应（点击/摸头/对话/喂食/拒绝等）→ 取消 pending（不产生 ignore）。"""
+        self._pending_social_bid = None
+
+    def _tick_social_bid(self, now: Optional[float] = None) -> None:
+        """响应窗口到期且无回应 → 语义 USER_IGNORE **恰好一次**（owner 线程，medium tick 调用）。"""
+        bid = getattr(self, "_pending_social_bid", None)
+        if bid is None:
+            return
+        if (now if now is not None else time.time()) >= bid["deadline"]:
+            self._pending_social_bid = None
+            self.on_user_ignore()
 
     # -------------------------------------------------- M4：走向活动窗口（陪伴）—— DEPRECATED
     def _maybe_walk_to_window(self) -> None:
@@ -896,6 +989,14 @@ class Scheduler:
         except Exception:
             pass
         return {}
+
+    def _tired_hint(self) -> float:
+        """真实困倦信号 0..1（sleepiness+fatigue），供情绪派生（sleepy 只允许真实困倦触发）。"""
+        try:
+            n = self.se.state.needs
+            return max(0.0, min(1.0, (float(n.sleepiness) + float(n.fatigue)) / 200.0))
+        except Exception:
+            return 0.0
 
     def _say(self, text: str, dur: float = 4.0) -> None:
         """立即显示一句台词（带显示时长，不刷屏）。"""
@@ -939,7 +1040,9 @@ class Scheduler:
                     relationship=rel, memory_interp=minterp,
                     user_present=bool(getattr(self.se.state, "user_idle_seconds", 0) < 300),
                     solitude=bool(getattr(self.se.state, "user_idle_seconds", 0) > 300),
-                    task_mode=bool(interaction == "agent"))
+                    task_mode=bool(interaction == "agent"),
+                    # FINAL-R1 §4.2：通道归属（Agent 报告 / 互动反应 → 不进直接对话历史）
+                    channel="AGENT_REPORT" if interaction == "agent" else "INTERACTION_REACTION")
                 if speech:
                     # §8：对话结果经 apply 队列在 owner 线程落地（worker 线程不直接改 _speech）
                     self._enqueue_apply(lambda sp=speech: (self._say(sp, dur=3.0),

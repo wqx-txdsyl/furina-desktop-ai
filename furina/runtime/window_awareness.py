@@ -24,29 +24,42 @@ class WindowInfo:
     app: str = ""          # 窗口类名（识别 UI 归属用，不做业务分类）
     title: str = ""
     process: str = ""      # 进程可执行名（如 chrome / notepad / Code）—— 业务分类的唯一输入
-    idle: float = 0.0      # 真实输入空闲秒（GetLastInputInfo）
+    idle: Optional[float] = None   # 真实输入空闲秒（GetLastInputInfo）；None = 不可用（不假装 0）
     rect: Optional[Rect] = None
 
     def to_dict(self) -> dict:
-        return {"app": self.app, "title": self.title, "process": self.process, "idle": round(self.idle, 1),
+        return {"app": self.app, "title": self.title, "process": self.process,
+                "idle": (None if self.idle is None else round(self.idle, 1)),
                 "rect": (None if not self.rect else [self.rect.x, self.rect.y, self.rect.w, self.rect.h])}
 
 
+def _idle_from_ticks(last_input_ms: float, now_ms: float) -> float:
+    """纯函数：tick 差 → 空闲秒（FINAL-R1 §1.1 可测性）。"""
+    return max(0.0, (now_ms - last_input_ms) / 1000.0)
+
+
 def _get_idle_seconds() -> Optional[float]:
-    """真实输入空闲秒：GetLastInputInfo（系统级真相，非估算）。"""
+    """真实输入空闲秒：GetLastInputInfo（User32）− GetTickCount64（Kernel32）。
+
+    Phase 13 FINAL-R1 §1.1：**GetTickCount/GetTickCount64 属于 Kernel32**，不是 User32。
+    用 64 位 tick（无回绕问题）。API 失败 → 返回 None（**绝不假装成 0.0**，那是"用户一直活跃"的假象）。
+    """
     try:
         import ctypes
         from ctypes import wintypes
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
         class LASTINPUTINFO(ctypes.Structure):
             _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
         lii = LASTINPUTINFO()
         lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
         if not user32.GetLastInputInfo(ctypes.byref(lii)):
             return None
-        ticks = user32.GetTickCount()
-        return max(0.0, (ticks - lii.dwTime) / 1000.0)
-    except Exception:  # pragma: no cover
+        # Kernel32.GetTickCount64：64 位毫秒 tick（无回绕），与 dwTime(32 位) 同基准
+        ticks = kernel32.GetTickCount64()
+        return _idle_from_ticks(lii.dwTime, ticks)
+    except Exception:  # pragma: no cover — API 失败：不假装成 0（未知空闲）
         return None
 
 
@@ -110,7 +123,9 @@ class WindowAwareness:
 
     def __init__(self, update_cb) -> None:
         self.update_cb = update_cb   # callable(WindowInfo)
-        self.last_idle: float = 0.0  # 最近一次真实 idle（供 Scheduler 读取）
+        # Phase 13 FINAL-R1 §1.1：空闲真相显式化 —— None = 尚无有效采样（绝不假装 0）
+        self.last_idle: Optional[float] = None
+        self.idle_available: bool = False
 
     def poll(self) -> Optional[WindowInfo]:
         info = None
@@ -122,8 +137,13 @@ class WindowAwareness:
         else:
             # 非 Windows：占位（不假装知道进程/输入）
             info = WindowInfo(app="unknown", title="", process="unknown",
-                              idle=0.0, rect=Rect(0, 0, 1920, 1080))
+                              idle=None, rect=Rect(0, 0, 1920, 1080))
         if info is not None:
-            self.last_idle = info.idle
+            if info.idle is None:
+                # API 失败/不可用：保留上一有效值（或 None），不假装成 0（用户活跃的假象）
+                self.idle_available = False
+            else:
+                self.last_idle = info.idle
+                self.idle_available = True
         self.update_cb(info)
         return info

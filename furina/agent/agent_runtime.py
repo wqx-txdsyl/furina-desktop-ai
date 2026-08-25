@@ -35,9 +35,12 @@ class AgentRuntime:
         self.context = AgentContext()
         # 角色行为同步钩子（plan/5 §15），由 app 注入：如 approach/walk/report
         self.on_body_sync: Optional[Callable[[str], None]] = None
+        # FINAL-R1 §8.1：**显式生命周期状态**（Harness 只读此真相，不读不存在的字段）
+        self.status = "IDLE"   # IDLE / RUNNING / COMPLETED_VERIFIED / FAILED / UNVERIFIED
 
     # -------------------------------------------------- 主循环
     def execute(self, user_request: str, extra_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self.status = "RUNNING"   # FINAL-R1 §8.1：真实生命周期状态（每个转移都更新）
         self.bus.emit(EventType.AGENT_STARTED, payload={"request": user_request}, source="agent")
         log.info("agent: %s", user_request)
         # Phase 13 终审 §10.2：**任务局部上下文** —— 每次 execute 用全新 AgentContext，
@@ -53,6 +56,7 @@ class AgentRuntime:
             reason = plan.constraints[-1] if plan.constraints else f"plan_status:{plan.status}"
             self.bus.emit(EventType.AGENT_FAILED, payload={"reason": reason}, source="agent")
             self._body("confused")
+            self.status = "FAILED"
             return {"status": "failed", "reason": reason, "results": []}
         self._body("work")
 
@@ -66,6 +70,7 @@ class AgentRuntime:
                               payload={"step": i, "reason": f"unknown_tool:{step.tool}"},
                               source="agent")
                 self._body("confused")
+                self.status = "FAILED"
                 return {"status": "failed", "reason": str(e), "results": results}
             # 权限检查
             decision = self.permission.check(f"{tool.description}：{step.args}", tool.permission)
@@ -73,6 +78,7 @@ class AgentRuntime:
                 self.bus.emit(EventType.AGENT_FAILED, payload={"step": i, "reason": "permission_denied"},
                               source="agent")
                 self._body("report")
+                self.status = "FAILED"
                 return {"status": "failed", "reason": "permission_denied", "results": results}
             # 执行
             try:
@@ -88,12 +94,14 @@ class AgentRuntime:
             if not res.ok:
                 self.bus.emit(EventType.AGENT_FAILED, payload={"step": i, "error": res.error}, source="agent")
                 self._body("confused")
+                self.status = "FAILED"
                 return {"status": "failed", "reason": res.error, "results": results}
             # Phase 13 终审 §10.3：**verified=False 不得 COMPLETED**（ok 只是"没抛错"，不是"完成"）
             if not verified:
                 reason = f"unverified_step:{i}:{step.tool}"
                 self.bus.emit(EventType.AGENT_FAILED, payload={"step": i, "reason": reason}, source="agent")
                 self._body("confused")
+                self.status = "UNVERIFIED"
                 return {"status": "unverified", "reason": reason, "results": results}
 
         self._body("report")
@@ -105,18 +113,23 @@ class AgentRuntime:
                       payload={"goal": plan.goal, "results": results, "summary": summary,
                                "verified": True},
                       source="agent")
+        self.status = "COMPLETED_VERIFIED"
         return {"status": "completed", "goal": plan.goal, "results": results, "summary": summary}
 
-    # -------------------------------------------------- Verify（§5）
+    # -------------------------------------------------- Verify（§5 / FINAL-R1 §6）
     def _verify(self, step, res: ToolResult) -> bool:
-        # 简单骨架验证：失败必 false
+        """FINAL-R1 §6：**全局硬门** —— 必需条件 `res.ok AND res.verified`。
+
+        工具特定的语义检查只会更严、绝不放宽（BaseTool.verify 语义一致执行）。
+        `ToolResult(ok=True, verified=False)`（如 launch 观察失败）**绝不**算完成。
+        """
         if not res.ok:
             return False
-        # 需有数据的只读/写操作，data 缺失视为未验证成功；
-        # **空列表/空 dict 是合法的"确实为空"结果**（如空目录列出 0 项），不算未验证。
+        if not res.verified:
+            return False
+        # 工具特定语义（更严，不更松）：有数据才可验证
         if step.tool in ("fs.list_dir", "fs.make_dirs", "fs.organize"):
             return res.data is not None
-        # fs.organize 的 dry_run 预览：data 非 None（可观察的预览结果）即可
         return True
 
     # -------------------------------------------------- 身体同步（plan/5 §15）

@@ -117,14 +117,16 @@ def test_agent_summary_contains_verified_fact():
 
 # ================================================================ §11 Feed 生产路径
 def test_gui_feed_uses_same_submit_path_as_harness():
-    """GUI 命令与 Harness Feed 都调用 App._feed（同一生产路径）。"""
+    """FINAL-R1 §3：GUI 命令与 Harness Feed 都走唯一生产入口 submit_feed（同一路径、同一线程 owner）。"""
     import furina.app as A
     import furina.runtime.harness.controller as C
     src_a = open(A.__file__, encoding="utf-8").read()
     cmd = src_a[src_a.index("def _on_user_command"):src_a.index("def _feed")]
-    assert "self._feed(" in cmd, "GUI 喂食必须走 _feed"
+    assert "self.submit_feed(" in cmd, "GUI 喂食必须走 submit_feed 生产入口"
+    assert "def submit_feed" in src_a, "必须有统一 submit_feed 入口"
     src_c = open(C.__file__, encoding="utf-8").read()
-    assert "self.app._feed(food)" in src_c, "Harness Feed 必须走同一个 _feed"
+    assert "self.app.submit_feed(food)" in src_c, "Harness Feed 必须走同一个 submit_feed"
+    assert "threading.Thread(target=self._apply_feed" not in src_c, "Harness 不得再包 worker 线程"
 
 
 def test_feed_emotion_event_exactly_once():
@@ -132,8 +134,8 @@ def test_feed_emotion_event_exactly_once():
     import furina.app as A
     src = open(A.__file__, encoding="utf-8").read()
     feed = src[src.index("def _feed"):src.index("def _confirm_agent_permission")]
-    assert feed.count("self.emotion.apply(EVENT_FEED)") == 1, \
-        f"EVENT_FEED 应恰好 apply 一次，实际 {feed.count('self.emotion.apply(EVENT_FEED)')}"
+    assert feed.count("apply_event(EVENT_FEED") == 1, \
+        f"EVENT_FEED 应恰好 apply 一次，实际 {feed.count('apply_event(EVENT_FEED')}"
 
 
 def test_slow_feed_dialogue_does_not_block_caller():

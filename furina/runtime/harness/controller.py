@@ -169,6 +169,8 @@ class RuntimeHarness:
             try:
                 d = orig(**kw)
                 self._life_last["success"] += 1
+                self._life_last["last_outcome"] = "OK"   # FINAL-R1 §8.2：最新一次，非聚合
+                self._life_last["last_attempt_at"] = time.time()
                 self.recorder.child(root, subsystem="life", stage="DECISION",
                                     output_summary=f"selected={getattr(d,'activity','')}",
                                     model="glm-4v-flash", success=True,
@@ -177,6 +179,8 @@ class RuntimeHarness:
             except Exception as e:
                 self._life_last["fallback"] += 1
                 self._life_last["failure"] += 1
+                self._life_last["last_outcome"] = "FALLBACK"   # FINAL-R1 §8.2
+                self._life_last["last_attempt_at"] = time.time()
                 self.recorder.child(root, subsystem="life", stage="DECISION",
                                     output_summary=f"fallback:{type(e).__name__}", model="local-fallback",
                                     success=False, fallback=True, latency_ms=(time.perf_counter()-t0)*1000)
@@ -185,18 +189,20 @@ class RuntimeHarness:
 
     # ================================================== 真实用户事件入口
     def on_user_message(self, text: str) -> None:
+        # FINAL-R1 §3：走**唯一生产入口** submit_user_message（owner 线程语义 + worker LLM）。
+        # Harness **不**再包一层 worker 线程（否则域变更的线程 owner 与 GUI 不一致）。
         self.conversation.append(("You", text))
         self.queue_chat("You", text)
         root = self.recorder.start_root(trigger_type="USER_MESSAGE", trigger_source="harness",
                                         subsystem="dialogue", stage="USER_INPUT", input_summary=text)
-        # §11：后台线程显式承载 root_trace_id（contextvar，线程安全；两条消息不串）
-        def _work():
-            tok = _ROOT_VAR.set(root.root_trace_id)
-            try:
+        tok = _ROOT_VAR.set(root.root_trace_id)
+        try:
+            if hasattr(self.app, "submit_user_message"):
+                self.app.submit_user_message(text)
+            else:
                 self.app._brain_worker(text)
-            finally:
-                _ROOT_VAR.reset(tok)
-        threading.Thread(target=_work, daemon=True).start()
+        finally:
+            _ROOT_VAR.reset(tok)
 
     def on_interact(self, kind: str, zone: str = "whole") -> None:
         # §10：真实 before/after 因果 trace（emotion/relationship 来自 ObservationAdapter 只读快照）
@@ -227,19 +233,19 @@ class RuntimeHarness:
             return {}
 
     def on_feed(self, food: str) -> None:
-        # §9：食物 deterministic effect 立即执行，但 DialogueBrain 调用（_feed 内含）放后台，不阻塞 GUI。
+        # FINAL-R1 §3/§8.3：走**唯一生产入口** submit_feed（owner 线程确定性效果，无第二 wrapper 线程）。
         root = self.recorder.start_root(trigger_type="FEED", trigger_source="harness",
                                         subsystem="feeding", stage="USER_ACTION", input_summary=food)
-        threading.Thread(target=self._apply_feed, args=(food, root.trace_id), daemon=True).start()
-
-    def _apply_feed(self, food: str, root_id: str) -> None:
         before = self._need_snapshot()
         try:
-            self.app._feed(food)     # 真实喂食链（effect + memory + life interrupt + 背景 Dialogue 交给 _feed 内部）
+            if hasattr(self.app, "submit_feed"):
+                self.app.submit_feed(food)
+            else:
+                self.app._feed(food)
         except Exception:
             pass
         after = self._need_snapshot()
-        self.recorder.child_to_root(root_id, subsystem="feeding", stage="NEEDS",
+        self.recorder.child_to_root(root.root_trace_id, subsystem="feeding", stage="NEEDS",
                                     input_summary=f"{food} before={before}",
                                     output_summary=f"after={after}")
 
@@ -332,13 +338,25 @@ class RuntimeHarness:
 
     # -------------------------------------------------- §14：真实徽章语义
     def life_badge(self) -> str:
+        """FINAL-R1 §8.2：徽章用**最新一次** outcome（last_outcome），聚合计数只是诊断。
+
+        顺序：success → 随后失败 => LAST_FAILED（不再被历史 success 掩盖）。
+        """
         lf = dict(self._life_last)
         if lf.get("attempt", 0) == 0:
             return "UNAVAILABLE"                    # 从未尝试 = 不绿
-        if lf.get("fallback", 0) and not lf.get("success", 0):
+        last = lf.get("last_outcome")
+        if last == "FALLBACK":
             return "FALLBACK"
+        if last == "OK":
+            return "LAST_OK"
+        if last == "FAILED":
+            return "LAST_FAILED"
+        # 兼容旧路径（无 last_outcome 时回退聚合判断）
         if lf.get("success", 0):
             return "LAST_OK"
+        if lf.get("fallback", 0):
+            return "FALLBACK"
         if lf.get("failure", 0):
             return "LAST_FAILED"
         return "UNAVAILABLE"
@@ -374,16 +392,15 @@ class RuntimeHarness:
             return {"status": "UNAVAILABLE", "count": -1}
 
     def _read_agent_state(self) -> str:
+        """FINAL-R1 §8.1：Agent 状态单一 owner = AgentRuntime.status（真实生命周期转移）。
+        不再从 _busy/_last_err/_last_success 等不存在的字段读取（否则会覆盖事件态回 IDLE）。"""
         try:
             agent = getattr(self.app, "agent", None)
             if agent is None:
                 return "IDLE"
-            if getattr(agent, "_busy", False):
-                return "RUNNING"
-            if getattr(agent, "_last_err", None):
-                return "FAILED"
-            if getattr(agent, "_last_success", False):
-                return "COMPLETED_VERIFIED"
+            st = getattr(agent, "status", None)
+            if st in ("RUNNING", "COMPLETED_VERIFIED", "FAILED", "UNVERIFIED"):
+                return st
             return "IDLE"
         except Exception:
             return "IDLE"

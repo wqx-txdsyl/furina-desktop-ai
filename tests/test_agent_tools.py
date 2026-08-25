@@ -1,6 +1,7 @@
 """Agent 工具测试（M7）。"""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest import mock
 
 from furina.agent import ToolRegistry, PermissionManager, AgentRuntime
@@ -110,10 +111,9 @@ def test_unverified_step_cannot_complete():
 
 
 def test_agent_completed_only_after_all_verified():
-    """§10.3（评审契约名）：全部步骤 ok AND verified 才发 AGENT_COMPLETED。"""
+    """§10.3/FINAL-R1 §6（评审契约名）：全部步骤 ok AND verified 才发 AGENT_COMPLETED。"""
     from furina.agent.tools.filesystem import ListDirTool, MakeDirsTool, OrganizeTool
     from furina.agent.tool import ToolResult
-    from furina.agent.permission import Permission
     bus = EventBus()
     completed = []
     bus.on(EventType.AGENT_COMPLETED, lambda ev: completed.append(ev))
@@ -130,6 +130,88 @@ def test_agent_completed_only_after_all_verified():
         res = agent.execute("整理下载文件夹", {"path": "/tmp/xxx"})
     assert res["status"] != "completed", f"未全部 verified 不得 completed: {res}"
     assert not completed, "未全部 verified 不得发 AGENT_COMPLETED"
+
+
+def test_agent_completed_contract_test_not_early_failure(tmp_path):
+    """FINAL-R1 §6：重写 false-green —— 必须**真正执行到**被 mock 的 unverified 步骤
+    （旧版 /tmp/xxx 在 fs.list_dir 就早退，断言通过是巧合，没测到 verified 门）。"""
+    from furina.agent.tools.filesystem import ListDirTool, MakeDirsTool, OrganizeTool
+    from furina.agent.tool import ToolResult
+    bus = EventBus()
+    completed = []
+    bus.on(EventType.AGENT_COMPLETED, lambda ev: completed.append(ev))
+    tools = ToolRegistry()
+    for t in (ListDirTool, MakeDirsTool, OrganizeTool):
+        tools.register(t())
+    perm = PermissionManager()
+    perm.on_confirm = lambda d, l: True
+    agent = AgentRuntime(bus, tools, perm)
+    calls = {"organize": 0}
+
+    def _fake_run(self, base="~", dry_run=True):
+        calls["organize"] += 1
+        return ToolResult(True, data=[{"from": "a.txt", "to": "Docs"}], verified=False)
+    with mock.patch.object(OrganizeTool, "run", _fake_run):
+        res = agent.execute("整理下载文件夹", {"path": str(tmp_path)})
+    assert calls["organize"] > 0, "必须真正执行到被 mock 的 unverified 步骤（早退不算数）"
+    assert res["status"] != "completed", res
+    assert not completed, "unverified 步骤不得发 AGENT_COMPLETED"
+
+
+def test_toolresult_verified_false_is_global_hard_gate(tmp_path):
+    """FINAL-R1 §6：ToolResult(ok=True, verified=False) 对**任何工具**都是硬门（不只是 launch）。"""
+    from furina.agent.tools.filesystem import ListDirTool
+    from furina.agent.tool import ToolResult
+    bus = EventBus()
+    completed = []
+    bus.on(EventType.AGENT_COMPLETED, lambda ev: completed.append(ev))
+    tools = ToolRegistry()
+    tools.register(ListDirTool())
+    perm = PermissionManager()
+    agent = AgentRuntime(bus, tools, perm)
+    with mock.patch.object(ListDirTool, "run",
+                           return_value=ToolResult(True, data=[{"name": "x"}], verified=False)):
+        res = agent.execute("整理下载文件夹", {"path": str(tmp_path)})
+    assert res["status"] != "completed", f"ok=True verified=False 不得完成: {res}"
+    assert not completed
+
+
+def test_unverified_launch_cannot_complete():
+    """launch 观察失败（verified=False）→ 不 COMPLETED、无 AGENT_COMPLETED。"""
+    bus = EventBus()
+    completed = []
+    bus.on(EventType.AGENT_COMPLETED, lambda ev: completed.append(ev))
+    tools = _registry()
+    perm = PermissionManager()
+    agent = AgentRuntime(bus, tools, perm)
+    with mock.patch("furina.agent.tools.apps.subprocess.Popen"), \
+         mock.patch("furina.agent.tools.apps._observe_process", return_value=False):
+        res = agent.execute("打开记事本", {})
+    assert res["status"] != "completed", "启动观察失败不得 completed"
+    assert not completed, "启动观察失败不得发 AGENT_COMPLETED"
+
+
+def test_calculator_launch_verifier_accepts_real_windows_observable_identity():
+    """FINAL-R1 §6：calc 的可观察身份包含 Calculator.exe（UWP），不假设启动名==进程名。"""
+    from furina.agent.tools.apps import _OBSERVABLE_ALIASES, _observe_process
+    assert "calculator.exe" in _OBSERVABLE_ALIASES["calc"], "calc 必须有真实可观察别名"
+    with mock.patch("furina.agent.tools.apps.sys.platform", "win32"), \
+         mock.patch("furina.agent.tools.apps.subprocess.run",
+                    side_effect=lambda *a, **k: SimpleNamespace(stdout="Calculator.exe   1234 ...")):
+        assert _observe_process("calc") is True, "tasklist 显示 Calculator.exe 时应验证通过"
+
+
+def test_launch_observation_failure_emits_no_completed():
+    bus = EventBus()
+    events = []
+    bus.on(EventType.AGENT_COMPLETED, lambda ev: events.append(ev))
+    tools = _registry()
+    agent = AgentRuntime(bus, tools, PermissionManager())
+    with mock.patch("furina.agent.tools.apps.subprocess.Popen"), \
+         mock.patch("furina.agent.tools.apps._observe_process", return_value=False):
+        res = agent.execute("打开记事本", {})
+    assert res["status"] != "completed"
+    assert not events, "观察失败不得发出 AGENT_COMPLETED"
 
 
 def test_agent_context_is_task_local():

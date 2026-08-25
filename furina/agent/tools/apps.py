@@ -27,18 +27,39 @@ _APPS = {
 _LAUNCH_VERIFY_TRIES = 15
 _LAUNCH_VERIFY_INTERVAL = 0.2   # 最多 ~3s 可观察验证窗口
 
+# FINAL-R1 §6：应用可观察身份别名 —— 启动名 ≠ 最终可观察进程名。
+# 例：`calc` 在 Windows 11 上实际进程是 Calculator.exe（UWP/WindowsApps），
+# 而"calc.exe"作为 tasklist 过滤名可能观察不到 → 必须按真实身份验证。
+_OBSERVABLE_ALIASES = {
+    "calc": ("calc.exe", "calculator.exe", "calculatorapp.exe"),
+    "chrome": ("chrome.exe",),
+    "msedge": ("msedge.exe",),
+    "notepad": ("notepad.exe", "notepad++.exe"),
+    "code": ("code.exe", "Code.exe", "Microsoft VS Code.exe"),
+    "explorer": ("explorer.exe",),
+    "write": ("write.exe", "wordpad.exe"),
+    "cmd": ("cmd.exe",),
+    "winword": ("winword.exe",),
+    "excel": ("excel.exe",),
+    "powerpnt": ("powerpnt.exe",),
+}
+
 
 def _observe_process(exe: str) -> bool:
-    """可观察验证：进程是否真实出现（Windows tasklist；非 Windows 无法观察 → False）。"""
+    """可观察验证：进程是否真实出现（Windows tasklist；非 Windows 无法观察 → False）。
+
+    按应用的真实可观察身份（别名列表）匹配，绝不假设启动名 == 最终进程名。
+    """
     if sys.platform != "win32":
         return False
-    name = f"{exe}.exe" if not exe.lower().endswith(".exe") else exe
+    names = _OBSERVABLE_ALIASES.get(exe, (f"{exe}.exe",))
     for _ in range(_LAUNCH_VERIFY_TRIES):
         try:
-            r = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}"],
-                               capture_output=True, text=True, timeout=1.0)
-            if name.lower() in (r.stdout or "").lower():
-                return True
+            for name in names:
+                r = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}"],
+                                   capture_output=True, text=True, timeout=1.0)
+                if name.lower() in (r.stdout or "").lower():
+                    return True
         except Exception:
             return False
         time.sleep(_LAUNCH_VERIFY_INTERVAL)

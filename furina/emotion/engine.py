@@ -73,26 +73,6 @@ EVENT_DELTAS: Dict[str, EmotionDelta] = {
 }
 
 
-class EmotionEngine:
-    """确定性情绪引擎：apply(event) → decay(dt) → 派生 label。"""
-
-    def __init__(self, state: Optional[EmotionState] = None) -> None:
-        self.state = state or EmotionState()
-        self._recent: Dict[str, float] = {}   # 最近情绪事件（用于 debug）
-
-    # -------------------------------------------------- 应用事件
-    def apply(self, event: str, delta: Optional[EmotionDelta] = None) -> EmotionDelta:
-        """把一个事件映射为情绪增量，并叠加到 state。"""
-        d = delta or EVENT_DELTAS.get(event, EmotionDelta())
-        if d is None:
-            d = EmotionDelta()
-        for dim in DIMENSIONS:
-            cur = getattr(self.state, dim)
-            setattr(self.state, dim, max(0.0, min(100.0, cur + getattr(d, dim))))
-        self.state.clamp()
-        self._recent[event] = self._recent.get(event, 0) + 1
-        return d
-
 # ---------------------------------------------------------------- 衰减（随时间回到稳定基线）
 # Phase 13 终审 §4.3：情绪衰减改为**分钟级时间常数**（τ≈10 分钟），
 # 不再 ~60s 就把事件效果几乎抹平。普通有意义事件在 5 分钟仍显著（≈61% 残留），30 分钟基本回落（≈5%）。
@@ -132,6 +112,20 @@ class EmotionEngine:
         self._recent[event] = self._recent.get(event, 0) + 1
         return d
 
+    # -------------------------------------------------- Phase 13 FINAL-R1 §2.2：权威语义事件边界
+    def apply_event(self, event: str, tired_hint: float = 0.0,
+                    delta: Optional[EmotionDelta] = None) -> EmotionDelta:
+        """**生产语义事件唯一入口**：apply 维度变化后**立即派生权威 label**（同线程、同调用栈）。
+
+        这样 praise/reject/feed/poke/agent_done 等事件后的 Dialogue/Body 快照
+        读到的是 post-event label，而不是等下一个 medium tick 才 derive。
+        维度仍是真相；label 由维度派生（不硬编码 event→label）。
+        **必须在运行时 owner 线程调用**（§3 分发边界）。
+        """
+        d = self.apply(event, delta=delta)
+        self.derive_label(tired_hint=tired_hint)
+        return d
+
     # -------------------------------------------------- 衰减（随时间回到稳定基线）
     def decay(self, dt: float = 3.0, rate: float = 0.15) -> None:
         """情绪随时间自然衰减（分钟级：τ=10 分钟 @ rate=0.15）。
@@ -169,8 +163,10 @@ class EmotionEngine:
             "sad": sal["sadness"] * 1.0 + sal["loneliness"] * 0.6,
             "annoyed": sal["anger"] * 1.2 + sal["embarrassment"] * 0.2,
             "embarrassed": sal["embarrassment"] * 1.0 + sal["sadness"] * 0.4,
-            # 困倦必须有真实 tired 信号才参与竞争（情绪维度本身不足以判定 sleepy）
-            "sleepy": max(0.0, tired_hint) * 100.0 * 0.8 + sal["calm"] * 0.2,
+            # 困倦必须有真实 tired 信号才参与竞争（情绪维度本身不足以判定 sleepy）。
+            # FINAL-R1：tired_hint 需 **明显困倦**（>0.5，对应 sleepiness+fatigue>100）才可能派生 sleepy；
+            # 健康基线（sleepiness10+fatigue20→0.15）绝不误判 sleepy。
+            "sleepy": max(0.0, (tired_hint - 0.5)) * 100.0 * 0.9 + sal["calm"] * 0.2,
         }
         best = max(scores, key=scores.get)
         # 无事/无显著情绪 → calm（默认健康基线）

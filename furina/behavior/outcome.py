@@ -101,29 +101,34 @@ def _clamp01(v: float) -> float:
 def outcome_for(activity: str, success: bool = True) -> Outcome:
     """取活动的因果影响；未知活动给空反馈（不改变状态，避免凭空造因果）。
 
-    Phase 13 终审 §6.4：**返回新鲜副本**（dataclasses.replace）—— 绝不修改全局 OUTCOMES 共享对象，
-    否则 success=False 的一次调用会污染另一个调用持有的同一 spec。
+    FINAL-R1 §5：返回**深拷贝**（dataclasses.replace 只浅拷贝 needs/emotion dict，
+    会与全局 OUTCOMES 共享可变 dict）—— 调用方改副本不影响全局 spec。
+    success 只写进副本（全局 spec 保持 True）。
     """
-    from dataclasses import replace
-    o = OUTCOMES.get(activity, Outcome())
-    return replace(o, success=success)
+    import copy
+    o = copy.deepcopy(OUTCOMES.get(activity, Outcome()))
+    o.success = success
+    return o
 
 
 def apply_outcome(state: CharacterState, activity: str, emotion: EmotionEngine,
-                  success: bool = True, relationship: Optional[RelationshipState] = None,
+                  success: bool = True, progress: Optional[float] = None,
+                  relationship: Optional[RelationshipState] = None,
                   recent_counts: Optional[Dict[str, int]] = None) -> Outcome:
-    """把活动的因果反馈应用到当前状态（needs + emotion + relationship）。
+    """把活动的因果反馈应用到当前状态（needs + emotion）。
 
-    **失败/中断**：success=False 时收益减半（不假装完成了）。
+    **FINAL-R1 §5 进度感知**：
+      - success=True（completed）→ scale = 1.0（全额）；
+      - success=False（interrupted/aborted/failed）→ scale = 0.3 + 0.7×progress
+        （progress=10% → 0.37；70% → 0.79；未给 progress 时默认 50% 中断 → 0.65，兼容旧"减半"语义）。
+      不假装完成。
 
-    **Diminishing returns（§）**：
-      - 对"需求满足"类反馈：需求已很低时，继续做同样的事满足感递减（如 boredom=5 时 play 几乎不再降）。
-        这依赖 **当前需求状态**，使行为"玩够了"自然涌现，而不是靠 anti-collapse 强制。
-      - 连续做同一种活动：收益递减（recent_counts 记录近 N 次内该活动次数）。
-    反馈后**不选择行为** —— 下一行为仍由 Motivation 决定。
+    **Diminishing returns（§）**：依赖当前需求状态 + recent_counts（自然涌现，非 anti-collapse）。
     """
     o = outcome_for(activity, success)
-    scale = 1.0 if o.success else 0.5    # 完成=全额；失败/中断=减半
+    if progress is None:
+        progress = 0.5 if not o.success else 1.0
+    scale = 1.0 if o.success else (0.3 + 0.7 * max(0.0, min(1.0, progress)))
     # 连续做同一种活动 → 收益递减（重复抑制的自然涌现，非行为选择规则）
     rep = recent_counts.get(activity, 0) if recent_counts else 0
     rep_scale = max(0.3, 1.0 - 0.25 * rep)      # 1次=0.75, 2次=0.5, 3次=0.3

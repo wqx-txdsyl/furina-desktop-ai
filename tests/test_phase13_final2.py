@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import math
 from types import SimpleNamespace
 
-from furina.core import EventBus
+from furina.core import EventBus, EventType
 from furina.state import CharacterState
 from furina.state.state_engine import StateEngine, classify_activity
 from furina.emotion import (EmotionEngine, EVENT_PRAISE, EVENT_REJECT, EVENT_POKE,
@@ -163,12 +163,38 @@ def test_foreground_process_separate_from_window_class():
 
 
 def test_state_user_working_comes_from_world():
-    """Scheduler._tick_medium 的 user_working 必须来自 world_perc.factors()（非上一帧自喂）。"""
-    import furina.runtime.scheduler as S
-    src = open(S.__file__, encoding="utf-8").read()
-    assert 'self.world_perc.factors().get("user_working", False)' in src, \
-        "user_working 必须来自 World 感知"
-    assert "self.se.state.user_idle_seconds = real_idle" in src, "idle 必须来自 WindowAwareness"
+    """FINAL-R1：行为级 —— _tick_medium 采样路径下 user_working 必须来自 World 感知（进程分类）。"""
+    from furina.runtime.window_awareness import WindowInfo
+    from furina.runtime.world import DesktopWorld, Rect
+    from furina.runtime.scheduler import Scheduler
+    from furina.emotion import EmotionEngine
+    from furina.world_perception import UserActivity
+
+    bus = EventBus()
+    se = StateEngine(bus)
+    world = DesktopWorld(1920, 1080)
+    world.taskbar_height = 48.0
+    info = WindowInfo(app="Chrome_WidgetWin_1", title="main.py", process="Code",
+                      idle=5.0, rect=Rect(100, 100, 800, 600))
+    emitted = []
+
+    class _WA:
+        last_idle = 5.0
+        idle_available = True
+        def poll(self):
+            bus.emit(EventType.ACTIVE_WINDOW_UPDATED, payload=info, source="runtime")
+            return info
+
+    sched = Scheduler(bus, se, None, None, None, world, _WA())
+    sched.emotion = EmotionEngine(se.state.emotion)
+    sched.be = SimpleNamespace(step=lambda s: None)
+    sched.director = SimpleNamespace(drain=lambda: None, submit=lambda r: None, finish=lambda **k: None)
+    sched._last_window_poll = 0.0
+    for _ in range(14):
+        sched._tick_medium(3.0)
+    assert sched.world_perc.state.user_activity == UserActivity.CODING, \
+        f"Code 进程应分类为 coding: {sched.world_perc.state.user_activity}"
+    assert sched.se.state.user_working is True, "user_working 必须来自 World（进程分类）"
 
 
 def test_windows_idle_signal_is_runtime_truth():
