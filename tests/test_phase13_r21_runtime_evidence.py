@@ -134,7 +134,7 @@ def _app_with_queue(brain):
                                  store=SimpleNamespace(save_relationship=lambda r: None))
     app.bus = EventBus()
     app._sched = SimpleNamespace(interrupt_life=lambda r: None, on_user_response=lambda: None,
-                                 _say=lambda t, dur=4.0: None)
+                                 _say=lambda t, dur=4.0, channel="", turn_id=None: None)
     app.dialogue_brain = brain
     app._fallback_dispatcher = None
     app._rt_dispatcher().bind_owner()

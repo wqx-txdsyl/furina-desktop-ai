@@ -223,6 +223,7 @@ class DirectDialogueQueue:
         if self.bus is None:
             return
         try:
+            # R2.1.1 P0-3：validation telemetry 进入 DIRECT_TURN_TRACE（EventBus 直读，不依赖 private）
             self.bus.emit(EventType.DIRECT_TURN_TRACE, payload={
                 "turn_id": turn.turn_id,
                 "ingress_seq": turn.ingress_seq,
@@ -232,6 +233,9 @@ class DirectDialogueQueue:
                 "latency_ms": round(latency_ms, 1),
                 "failure_reason": failure_reason,
                 "user_text": (turn.user_text or "")[:40],
+                "validation_issues": list(getattr(turn, "validation_issues", []) or []),
+                "hard_issues": list(getattr(turn, "hard_issues", []) or []),
+                "soft_issues": list(getattr(turn, "soft_issues", []) or []),
             }, source="dialogue_queue")
         except Exception:
             pass

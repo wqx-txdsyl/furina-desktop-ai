@@ -51,6 +51,9 @@ class EventType(str, enum.Enum):
     # B1：直接对话回合生命周期 trace（DIRECT_INGRESS/QUEUED/GENERATION_STARTED/
     # GENERATION_FINISHED → REPLIED/FAILED/CANCELLED；含 turn_id/ingress_seq/latency/failure_reason）
     DIRECT_TURN_TRACE = "dialogue.turn_trace"
+    # R2.1.1 P0-4：每次 user-visible utterance 的独立事件（speech_id/text/channel/turn_id）
+    # —— 单一 _speech 视觉槽不承担历史事件队列职责；Harness 从此事件 exactly-once 记录。
+    SPEECH_SURFACED = "dialogue.speech_surfaced"
 
     # ---- 生命周期 ----
     SLEEP_STARTED = "life.sleep_started"

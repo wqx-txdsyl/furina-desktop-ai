@@ -42,7 +42,7 @@ def _app_brain_none():
                                  store=SimpleNamespace(save_relationship=lambda r: None))
     app.bus = EventBus()
     app._sched = SimpleNamespace(interrupt_life=lambda r: None, on_user_response=lambda: None,
-                                 _say=lambda t, dur=4.0: None)
+                                 _say=lambda t, dur=4.0, channel="", turn_id=None: None)
     app.dialogue_brain = None
     app._fallback_dispatcher = None
     app._rt_dispatcher().bind_owner()
@@ -67,7 +67,7 @@ def test_direct_message_brain_none_has_system_status():
     """R1.1-1：db=None 也必须产生可观察 SYSTEM_STATUS。"""
     app = _app_brain_none()
     sys_status = []
-    app._sched._say = lambda t, dur=4.0: sys_status.append(t)
+    app._sched._say = lambda t, dur=4.0, channel="", turn_id=None: sys_status.append(t)
     app.submit_user_message("在吗")
     dq = app._direct_dialogue_queue()
     assert dq.wait_idle(timeout=8.0)

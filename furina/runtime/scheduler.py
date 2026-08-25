@@ -232,7 +232,10 @@ class Scheduler:
     def _on_brain(self, ev) -> None:
         out = ev.payload
         if out and getattr(out, "speech", ""):
-            self._say(out.speech)
+            # R2.1.1 P0-4/P2：_say 绑定 channel/turn_id（BRAIN_SPOKE 载荷携带）
+            self._say(out.speech,
+                      channel=getattr(out, "channel", "") or "DIRECT_USER_TURN",
+                      turn_id=getattr(out, "turn_id", None))
             # 让大脑意图进入行为（表现层 plan/8 §5：LLM 只产出结构化意图/状态）
             intent = getattr(out, "intent", "")
             if intent:
@@ -296,8 +299,10 @@ class Scheduler:
         except Exception:
             pass
         # 结果绑定报告（exactly-once：角色报告成功出话，否则确定性事实回退）
+        # R2.1.1 P1-4：Agent success 必须用 AGENT_REPORT semantics（interaction="agent"）
         self._speak_via_dialogue(intent="assist_user", emotion=self.se.state.emotion.label,
                                  user_initiated=True, context=ctx, activity="agent_report",
+                                 interaction="agent",
                                  fallback=f"（系统状态：任务已完成：{goal}。）")
 
     def _on_agent_fail(self, ev) -> None:
@@ -1136,17 +1141,28 @@ class Scheduler:
         except Exception:
             return 0.0
 
-    def _say(self, text: str, dur: float = 4.0) -> None:
+    def _say(self, text: str, dur: float = 4.0, channel: str = "",
+             turn_id: int | None = None) -> None:
         """立即显示一句台词（带显示时长，不刷屏）。
 
         R2.1 P0-1：每次新 utterance 递增 speech_id（speech event identity）——
         不同 utterance 即使文本完全相同（如连续失败的 SYSTEM_STATUS）也是不同事件；
         Frame 携带该 id，Harness 按 id 去重而不是按 text。
+        R2.1.1 P0-4/P2：每次 _say 产生一个**独立 user-visible utterance 事件**
+        （SPEECH_SURFACED：speech_id/text/channel/turn_id）—— 单一 _speech 视觉槽
+        不承担历史事件队列职责；Harness 从该事件 exactly-once 记录，直接回合绑定 turn_id。
         """
         if text:
             self._speech_seq = getattr(self, "_speech_seq", 0) + 1
             self._speech = text
             self._speech_until = time.monotonic() + dur
+            try:
+                self.bus.emit(EventType.SPEECH_SURFACED, payload={
+                    "speech_id": self._speech_seq, "text": text,
+                    "channel": channel or "", "turn_id": turn_id,
+                    "at": time.time()}, source="runtime")
+            except Exception:
+                pass
 
     def _speak_via_dialogue(self, *, intent: str, emotion: str, user_initiated: bool,
                             context: str, activity: str, interaction: str = "",
@@ -1170,14 +1186,19 @@ class Scheduler:
                 speech = self.dialogue_brain.say(**snapshot.say_kwargs())
                 if speech:
                     # §8：对话结果经 apply 队列在 owner 线程落地（worker 线程不直接改 _speech）
-                    self._enqueue_apply(lambda sp=speech: (self._say(sp, dur=3.0),
-                                                           setattr(self, "_last_speech_at", time.monotonic())))
+                    # R2.1.1 P0-4：_say 绑定快照 channel（interaction/feed/agent/ambient）
+                    self._enqueue_apply(
+                        lambda sp=speech, ch=snapshot.channel: (
+                            self._say(sp, dur=3.0, channel=ch),
+                            setattr(self, "_last_speech_at", time.monotonic())))
                 elif _fallback:
                     # 角色报告未出话 → 确定性事实回退（exactly-once 用户可见）
-                    self._enqueue_apply(lambda fb=_fallback: self._say(fb, dur=4.0))
+                    self._enqueue_apply(
+                        lambda fb=_fallback, ch=snapshot.channel: self._say(fb, dur=4.0, channel=ch))
             except Exception:
                 if _fallback:
-                    self._enqueue_apply(lambda fb=_fallback: self._say(fb, dur=4.0))
+                    self._enqueue_apply(
+                        lambda fb=_fallback, ch=snapshot.channel: self._say(fb, dur=4.0, channel=ch))
         import threading
         threading.Thread(target=_work, args=(snap, fallback), daemon=True).start()
 

@@ -121,10 +121,11 @@ _ISSUE_FEEDBACK = {
 
 # R2.1 P0-3：issue severity —— HARD（不可展示：身份/事实/结构）vs SOFT（仅风格质量）。
 # “一句话不够漂亮”不得变成系统错误/沉默；HARD 才会失败 DirectTurn。
+# R2.1.1：example_copy = SOFT（复读范例属风格缺陷，不属结构不可用）。
 _HARD_ISSUES = frozenset({
     "empty_when_should_speak", "too_long", "generic_assistant_identity",
     "nonhuman_user_framing", "ungrounded_activity", "activity_contradiction",
-    "stage_direction", "example_copy", "interaction_contradiction",
+    "stage_direction", "interaction_contradiction",
     "explicit_user_constraint_violation",
 })
 
@@ -162,6 +163,9 @@ class ValidationResult:
     def _classify(self) -> None:
         self.hard_issues = [i for i in self.issues if i in _HARD_ISSUES]
         self.soft_issues = [i for i in self.issues if i not in _HARD_ISSUES]
+        # R2.1.1 P0-8：severity invariant —— hard_issues 非空 ⇒ valid=False（禁止 valid=True+hard）
+        if self.hard_issues:
+            self.valid = False
 
     def as_dict(self) -> dict:
         return {"valid": self.valid, "issues": self.issues,
@@ -268,8 +272,9 @@ class DialogueValidator:
             for ex in example_phrases:
                 if ex and ex.strip() and len(ex) >= 7 and ex.strip() in s:
                     r.valid = False; r.issues.append("example_copy"); break
-        # 活动矛盾（§26）
+        # 活动矛盾（§26）—— R2.1.1 P0-8：HARD issue 必须设 valid=False（severity invariant）
         if activity == "offer_help" and not any(w in s for w in ("帮", "我来", "搭把", "交给")):
+            r.valid = False
             r.issues.append("activity_contradiction")
         # R2.1 P1-6：generic interview self-analysis（模板化自我描述）
         if any(p.search(s) for p in self._generic_self):

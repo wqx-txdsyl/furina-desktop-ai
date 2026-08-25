@@ -123,7 +123,7 @@ def _app_with_dialogue(db):
                                  store=SimpleNamespace(save_relationship=lambda r: None))
     app.bus = EventBus()
     app._sched = SimpleNamespace(interrupt_life=lambda r: None, on_user_response=lambda: None,
-                                 _say=lambda t, dur=4.0: None)
+                                 _say=lambda t, dur=4.0, channel="", turn_id=None: None)
     app.dialogue_brain = db
     app._fallback_dispatcher = None
     app._rt_dispatcher().bind_owner()
@@ -262,7 +262,7 @@ def test_dialogue_l9_system_status_not_in_persona_history():
     brain = DialogueBrain(_SeqLLM(fail={1}), persona="你是芙宁娜。", timeout=5.0)
     app = _app_with_dialogue(brain)
     sys_status = []
-    app._sched._say = lambda t, dur=4.0: sys_status.append(t)
+    app._sched._say = lambda t, dur=4.0, channel="", turn_id=None: sys_status.append(t)
     app.submit_user_message("在吗")
     dq = app._direct_dialogue_queue()
     assert dq.wait_idle(timeout=8.0)

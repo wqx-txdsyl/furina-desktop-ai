@@ -43,6 +43,9 @@ class RuntimeHarness:
         # R2.1 P0-2：direct 回合最近一次 outcome（来自真实 DIRECT_TURN_TRACE）
         self._direct_last: dict = {"status": "NONE", "turn_id": 0, "ingress_seq": None,
                                    "failure_reason": "", "latency_ms": 0.0, "at": 0.0}
+        # R2.1.1 P5：turn_id → terminal status（SPEECH_SURFACED 可能晚于终态 trace，
+        # 晚到的 Furina utterance 据此绑定 terminal_status）
+        self._turn_terminal: dict = {}
         # 真实健康指标（§1：不许假绿）
         self._life_last = {"attempt": 0, "success": 0, "fallback": 0, "failure": 0}
         self._dialog_last = {"attempt": 0, "outcome": "NONE", "model": ""}
@@ -86,6 +89,8 @@ class RuntimeHarness:
         # R2.1 P0-2：Direct 回合 telemetry 直接订阅 DIRECT_TURN_TRACE（生产 DirectQueue 走
         # say_with_result，不再经过 db.say —— 只包 say 会导致 badge stale / trace 缺失）
         self.bus.on(EventType.DIRECT_TURN_TRACE, self._on_direct_turn_trace)
+        # R2.1.1 P0-4：每次 user-visible utterance 的独立事件（exactly-once 记录，绑定 turn_id）
+        self.bus.on(EventType.SPEECH_SURFACED, self._on_speech_surfaced)
         # §10：Agent 生命周期（真实 AGENT 事件，非伪造阶段）
         self.bus.on(EventType.AGENT_STARTED, self._on_agent_started)
         self.bus.on(EventType.AGENT_COMPLETED, self._on_agent_completed)
@@ -111,14 +116,45 @@ class RuntimeHarness:
 
     # -------------------------------------------------- R2.1 P2：结构化 Conversation 事件
     def _record_utterance(self, role: str, text: str, *, turn_id=None, channel="",
-                          speech_id: int = 0) -> None:
-        """P2：Conversation 存储保留 turn_id/channel/speech_id/text/terminal status。"""
+                          speech_id: int = 0) -> bool:
+        """P2：Conversation 存储保留 turn_id/channel/speech_id/text/terminal status。
+
+        R2.1.1 P0-4：Furina utterance 按 speech_id 去重（同一 utterance 事件/帧只记一次，
+        exactly-once；不同 speech_id 即使同文本也各记录）。返回 True 表示新记录。
+        """
+        if role == "Furina" and speech_id:
+            for u in self.utterances:
+                if u.get("role") == "Furina" and u.get("speech_id") == speech_id:
+                    return False
         self.utterances.append({
             "role": role, "text": text, "turn_id": turn_id,
             "channel": channel, "speech_id": speech_id,
             "terminal_status": "", "recorded_at": time.time(),
         })
         self.utterances = self.utterances[-200:]
+        return True
+
+    def _on_speech_surfaced(self, ev) -> None:
+        """R2.1.1 P0-4/P2：user-visible utterance 事件 → exactly-once 记录 + 聊天显示。
+
+        独立于 Frame 视觉快照（单一 _speech 槽不承担历史事件队列职责）。
+        P5：Furina utterance 绑定 DirectTurn（turn_id + terminal_status —— 终态可能先到，
+        晚到的 utterance 从 _turn_terminal 取状态）。
+        """
+        p = ev.payload or {}
+        text = p.get("text") or ""
+        if not text:
+            return
+        sid = int(p.get("speech_id") or 0)
+        tid = p.get("turn_id")
+        if self._record_utterance("Furina", text, turn_id=tid,
+                                  channel=p.get("channel", ""), speech_id=sid):
+            if tid in self._turn_terminal:
+                for u in self.utterances:
+                    if u.get("role") == "Furina" and u.get("speech_id") == sid:
+                        u["terminal_status"] = self._turn_terminal[tid]
+                        break
+            self.queue_chat("Furina", text)
 
     # -------------------------------------------------- R2.1 P0-2：Direct telemetry（真实 lifecycle）
     def _on_direct_turn_trace(self, ev) -> None:
@@ -126,6 +162,8 @@ class RuntimeHarness:
 
         badge 的最近一次 direct outcome 必须来自真实 DirectTurn lifecycle；
         ambient 只做单独诊断，不得覆盖 direct last outcome。
+        R2.1.1 P0-2：active 相位（DIRECT_INGRESS/QUEUED→QUEUED、GENERATION_STARTED→GENERATING）
+        也更新 badge（不得停留在旧 LAST_OK）。
         """
         p = ev.payload or {}
         phase = p.get("phase", "")
@@ -133,13 +171,27 @@ class RuntimeHarness:
         if phase == "DIRECT_INGRESS" and turn_id is not None:
             self._record_utterance("You", p.get("user_text", ""), turn_id=turn_id,
                                    channel=p.get("channel", "DIRECT_USER_TURN"))
+        # R2.1.1 P0-2：active state → badge RUNNING/PENDING
+        if phase in ("DIRECT_INGRESS", "QUEUED"):
+            self._direct_last.update({"status": "QUEUED", "turn_id": turn_id,
+                                      "ingress_seq": p.get("ingress_seq")})
+        elif phase == "GENERATION_STARTED":
+            self._direct_last.update({"status": "GENERATING", "turn_id": turn_id})
         if phase in ("REPLIED", "FAILED", "CANCELLED"):
             self._direct_last.update({
                 "status": phase, "turn_id": turn_id, "ingress_seq": p.get("ingress_seq"),
                 "failure_reason": p.get("failure_reason", ""),
-                "latency_ms": p.get("latency_ms", 0.0), "at": time.time()})
+                "latency_ms": p.get("latency_ms", 0.0), "at": time.time(),
+                # R2.1.1 P0-3：validation telemetry（为什么被拦/被放行）
+                "validation_issues": list(p.get("validation_issues") or []),
+                "hard_issues": list(p.get("hard_issues") or []),
+                "soft_issues": list(p.get("soft_issues") or [])})
+            # P2：同 turn 的所有 utterance（You + Furina SYSTEM_STATUS/回复）绑定 terminal
+            if turn_id is not None:
+                self._turn_terminal[turn_id] = phase
+                self._turn_terminal = dict(list(self._turn_terminal.items())[-200:])
             for u in self.utterances:
-                if u.get("turn_id") == turn_id and u.get("role") == "You":
+                if u.get("turn_id") == turn_id:
                     u["terminal_status"] = phase
         # trace：每个 direct turn 的 ingress / generation start / result / terminal 都可见
         try:
@@ -147,7 +199,8 @@ class RuntimeHarness:
                 trigger_type="DIRECT_TURN", trigger_source="dialogue_queue",
                 subsystem="dialogue", stage=f"DIRECT_{phase}",
                 input_summary=f"turn#{turn_id} seq={p.get('ingress_seq')} {p.get('user_text','')[:20]}",
-                output_summary=f"{phase} {p.get('failure_reason','')}")
+                output_summary=(f"{phase} {p.get('failure_reason','')} "
+                                f"hard={p.get('hard_issues') or []} soft={p.get('soft_issues') or []}"))
         except Exception:
             pass
 
@@ -368,29 +421,32 @@ class RuntimeHarness:
             self.spatial.accept(d, now=time.monotonic())
         except Exception:
             pass
-        # §8：Conversation 的最终语言真相 = CharacterRuntimeFrame.speech（按 speech_id 去重）
+        # §8/R2.1.1 P0-4：Frame 只负责当前视觉快照；Furina 台词记录以 SPEECH_SURFACED
+        # 事件为准（utterance 按 speech_id 去重；事件先到时帧跳过，帧先到时兜底记录）。
         try:
             sp = getattr(frame, "speech", None)
             if sp is not None and getattr(sp, "should_speak", False) and getattr(sp, "text", ""):
                 sid = int(getattr(sp, "speech_id", 0) or 0)
-                if sid and sid != self._last_speech_id:
-                    # R2.1 P0-1：不同 utterance（新 speech_id）即使文本相同也各显示一次
-                    self._last_speech_id = sid
-                    self._record_utterance("Furina", sp.text, speech_id=sid)
-                    self.queue_chat("Furina", sp.text)
-                    if self._last_root_id:
-                        self.recorder.child_to_root(self._last_root_id, subsystem="dialogue",
-                                                    stage="FRAME_SPEECH", output_summary=sp.text,
-                                                    trigger_type="USER_MESSAGE")
-                elif not sid and sp.text != self._last_speech_key:
+                if sid:
+                    if sid != self._last_speech_id:
+                        self._last_speech_id = sid
+                        if self._record_utterance("Furina", sp.text, speech_id=sid):
+                            self.queue_chat("Furina", sp.text)
+                            if self._last_root_id:
+                                self.recorder.child_to_root(
+                                    self._last_root_id, subsystem="dialogue",
+                                    stage="FRAME_SPEECH", output_summary=sp.text,
+                                    trigger_type="USER_MESSAGE")
+                elif sp.text != self._last_speech_key:
                     # 兼容旧帧（无 speech_id）：退回按文本去重
                     self._last_speech_key = sp.text
-                    self._record_utterance("Furina", sp.text, speech_id=0)
-                    self.queue_chat("Furina", sp.text)
-                    if self._last_root_id:
-                        self.recorder.child_to_root(self._last_root_id, subsystem="dialogue",
-                                                    stage="FRAME_SPEECH", output_summary=sp.text,
-                                                    trigger_type="USER_MESSAGE")
+                    if self._record_utterance("Furina", sp.text, speech_id=0):
+                        self.queue_chat("Furina", sp.text)
+                        if self._last_root_id:
+                            self.recorder.child_to_root(
+                                self._last_root_id, subsystem="dialogue",
+                                stage="FRAME_SPEECH", output_summary=sp.text,
+                                trigger_type="USER_MESSAGE")
             else:
                 self._last_speech_key = None
                 self._last_speech_id = 0

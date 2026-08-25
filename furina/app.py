@@ -477,7 +477,8 @@ class Furina:
             if speech:
                 self.bus.emit(EventType.BRAIN_SPOKE,
                               payload=type("_O", (), {"speech": speech,
-                                                      "emotion": snap.emotion_label})(),
+                                                      "emotion": snap.emotion_label,
+                                                      "channel": "FEED_REACTION"})(),
                               source="app")
         except Exception:
             pass
@@ -575,17 +576,24 @@ class Furina:
         """DirectDialogueQueue 处理器（worker 线程）：真实生产链 → 终态信息（speech/failure_reason）。
 
         R1.1-3：传 `deadline=turn.deadline`（本 turn 总预算，attempt+retry 共享）。
+        R2.1.1 P0-4/P2：BRAIN_SPOKE 载荷携带 channel/turn_id（speech 事件绑定 DirectTurn）。
         """
-        return self._brain_worker(snapshot.user_text, snapshot, deadline=turn.deadline)
+        return self._brain_worker(snapshot.user_text, snapshot, deadline=turn.deadline,
+                                  turn_id=turn.turn_id)
 
-    def _system_status_failure(self) -> None:
-        """B1：直接回合无法产生角色回复 → 可观察 SYSTEM_STATUS（非 Furina 台词，不进 Persona history）。"""
+    def _system_status_failure(self, turn_id=None) -> None:
+        """B1/R2.1.1：直接回合无法产生角色回复 → 可观察 SYSTEM_STATUS（非 Furina 台词，不进 Persona history）。
+
+        P0-4/P2：_say 绑定 turn_id + DIRECT_USER_TURN channel（SPEECH_SURFACED 事件），
+        使 FAILED 的 SYSTEM_STATUS 与对应 DirectTurn 关联。
+        """
         try:
             sched = getattr(self, "_sched", None)
             if sched is not None and hasattr(sched, "_say"):
                 # §3：SYSTEM_STATUS 也是域变更 → 经 dispatcher 回 owner 应用
                 self._rt_dispatcher().submit(
-                    lambda: sched._say("（系统状态：刚才的回复生成失败。）", dur=4.0))
+                    lambda: sched._say("（系统状态：刚才的回复生成失败。）", dur=4.0,
+                                       channel="DIRECT_USER_TURN", turn_id=turn_id))
         except Exception:
             pass
 
@@ -689,7 +697,8 @@ class Furina:
             memory_interp=freeze_flat(minterp),
         )
 
-    def _brain_worker(self, text: str, snapshot=None, deadline: float | None = None) -> dict:
+    def _brain_worker(self, text: str, snapshot=None, deadline: float | None = None,
+                      turn_id: int | None = None) -> dict:
         """用户直接对话 → DialogueBrain（worker 线程：只读**冻结快照**，不读 live 状态）。
 
         FINAL-R1 §3 + H1 §10：域变更（文本语义/关系/情绪）由 owner 在 submit_user_message 完成；
@@ -707,7 +716,7 @@ class Furina:
         if not db:
             # R1.1-1：dialogue_brain=None 也必须产生可观察终态 + SYSTEM_STATUS（不静默丢消息）
             out["failure_reason"] = "dialogue_brain_unavailable"
-            self._system_status_failure()
+            self._system_status_failure(turn_id=turn_id)
             return out
         log.info("avatar conversation: %s", text)
         if snapshot is None:
@@ -729,19 +738,21 @@ class Furina:
             except Exception:
                 pass
             out["failure_reason"] = f"worker_exception:{type(e).__name__}"
-            self._system_status_failure()
+            self._system_status_failure(turn_id=turn_id)
             return out
         if speech:
             self.bus.emit(EventType.BRAIN_SPOKE,
                           payload=type("_O", (), {"speech": speech, "intent": "talk",
-                                                  "emotion": snapshot.emotion_label})(),
+                                                  "emotion": snapshot.emotion_label,
+                                                  "channel": "DIRECT_USER_TURN",
+                                                  "turn_id": turn_id})(),
                           source="app")
             out["speech"] = speech
             out["failure_reason"] = ""
         else:
             # R1.1-1/B1：所有失败模式 → 可观察 SYSTEM_STATUS + 明确 failure_reason
             out["failure_reason"] = reason or "generation_empty"
-            self._system_status_failure()
+            self._system_status_failure(turn_id=turn_id)
         # C-R1.3.2：记忆候选观察放对话后；**记忆写入是域变更** → dispatcher 回 owner 执行
         self._rt_dispatcher().submit(lambda: self._maybe_observe_conversation(text))
         return out

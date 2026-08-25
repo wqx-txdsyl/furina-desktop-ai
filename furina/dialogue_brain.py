@@ -454,19 +454,25 @@ class DialogueBrain:
                     self.last_failure_reason = reason
                     return (None, reason, issues, list(v2.hard_issues), list(v2.soft_issues))
                 else:
-                    # 仅 SOFT 残留（或 retry 更差引入 HARD）→ 选较优候选 **surface**，不失败
+                    # R2.1.1 P0-1：HARD 候选**永不** surface —— 选择优先级：
+                    #   A. hard==0 永远优先于 hard>0（attempt=HARD+0soft 不得因 soft 更少被选回）
+                    #   B. 仅双方 hard==0 才按 soft 数量选更优
+                    #   C. 双方都有 HARD → 理论不可达（前面已 return FAILED）
                     if not v2.hard_issues:
-                        # retry 已无 HARD（attempt 的 hard 被解决）→ 优先 retry；仅 soft 时取 soft 更少者
-                        best = retry if len(v2.soft_issues) <= len(v.soft_issues) else speech
-                        soft_quality = list(v2.soft_issues) if best is retry else list(v.soft_issues)
+                        if not v.hard_issues:
+                            best = retry if len(v2.soft_issues) <= len(v.soft_issues) else speech
+                            soft_quality = list(v2.soft_issues) if best is retry else list(v.soft_issues)
+                        else:
+                            best = retry          # A：hard==0 优先（surface retry，绝不选回 HARD attempt）
+                            soft_quality = list(v2.soft_issues)
                     elif not v.hard_issues:
-                        # retry 引入 HARD 但 attempt 只有 SOFT → surface attempt（不失败）
-                        best = speech
+                        best = speech             # retry 引入 HARD 但 attempt 只有 SOFT → surface attempt
                         soft_quality = list(v.soft_issues)
                     else:
-                        best = speech   # 双方都有 HARD → 理论不可达（前面已 return）
+                        best = speech
                         soft_quality = list(v2.soft_issues)
                     speech = best
+                    v = v2 if best is retry else v   # 使 surface invariant 检查使用正确候选
             else:
                 # retry 生成失败（空/异常/超时）—— attempt 有 HARD 才失败；只有 SOFT → surface
                 if v.hard_issues:
@@ -477,17 +483,32 @@ class DialogueBrain:
                     return (None, reason, issues, list(v.hard_issues), list(v.soft_issues))
                 soft_quality = list(v.soft_issues)
 
+        # R2.1.1 P0-1 invariant：任何被 surface 的 speech，hard_issues MUST == []
+        if v.hard_issues:
+            reason = "validation_twice_invalid"
+            issues = list(v.issues)
+            self.last_validation_failure = issues
+            self.last_failure_reason = reason
+            return (None, reason, issues, list(v.hard_issues), list(v.soft_issues))
+
         # ================= Phase C：确定性收尾（锁内，快） =================
         with self._say_lock:
             self.last_validation_failure = []
             self.last_failure_reason = ""
-            # 5b) "本神" 校准 Gate（§21-25）：抑制语境出现"本神"或触发 cooldown → 软拦截
+            # 5b) "本神" 校准 Gate（§21-25）—— R2.1.1 P0-3：**direct 可用性优先**。
+            #     用户直接消息不得因 god style/cooldown 失败（god_gate_suppressed）；
+            #     抑制时确定性移除"本神"并记录 SOFT issue。ambient lane 保留 suppression 语义。
             gated = self.god_gate.gate_output(speech, cal=god_cal)
             if gated is None:
                 self.god_gate.note_spoke_god(speech)
-                self.last_failure_reason = "god_gate_suppressed"
-                return (None, "god_gate_suppressed", [], [], [])
-            speech = gated
+                if channel == "DIRECT_USER_TURN" and user_initiated:
+                    speech = speech.replace("本神", "我")
+                    soft_quality = list(soft_quality) + ["god_reference_suppressed"]
+                else:
+                    self.last_failure_reason = "god_gate_suppressed"
+                    return (None, "god_gate_suppressed", [], [], [])
+            else:
+                speech = gated
             # 6) 短期重复控制（§40）：**用户发起的直接对话必须收到回应**；
             #    重复控制只影响自主发言节奏，不影响给用户的回应。
             self._recent_acts.append(app.dialogue_act)
