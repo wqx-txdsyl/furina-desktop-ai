@@ -53,6 +53,7 @@ def test_state_intent_working_observes():
     bus = EventBus()
     se = StateEngine(bus)
     se.state.user_working = True
+    se.state.idle_available = True   # 机械兼容：生产 snapshot 恒携带可用性位；在场已知才可 observe
     cand = se.generate_intent(se.state)
     assert cand.intent.action == "observe_user"
 
@@ -64,7 +65,7 @@ def test_behavior_choose_respects_interruption_cost():
     be.register(BehaviorDefinition("talk_to_user", utility_fn=lambda s: 70, priority=3))
     be.register(BehaviorDefinition("observe_user", utility_fn=lambda s: 20, priority=3))
     # 用户忙 → talk 被打扰成本降权
-    state = {"user_working": True}
+    state = {"user_working": True, "idle_available": True}
     picked = be.choose(state)
     assert picked == "observe_user"
 
@@ -99,12 +100,12 @@ def test_behavior_step_hysteresis():
     be.register(BehaviorDefinition("observe_user", utility_fn=lambda s: 70, priority=3, duration=20))
     be.register(BehaviorDefinition("idle", base_utility=5, priority=5))
     now = 1000.0
-    a1 = be.step({"user_working": True}, now=now)
+    a1 = be.step({"user_working": True, "idle_available": True}, now=now)
     assert a1 == "observe_user"
     # 时长未到 → 保持（滞回）
-    assert be.step({"user_working": True}, now=now + 2.0) == "observe_user"
+    assert be.step({"user_working": True, "idle_available": True}, now=now + 2.0) == "observe_user"
     # 时长(20s)超过，但 observe 分数仍最高 → 继续 observe
-    assert be.step({"user_working": True}, now=now + 30.0) == "observe_user"
+    assert be.step({"user_working": True, "idle_available": True}, now=now + 30.0) == "observe_user"
 
 
 # ---------------------------------------------------------------- Director 仲裁

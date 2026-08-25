@@ -224,8 +224,11 @@ class StateEngine:
     def evaluate_attention(self) -> None:
         st = self.state
         att = st.attention
-        # Pre-Manual §10：OS idle 不可用（在场未知）→ 不假设用户在场/在工作（回退到 SELF）
-        if not getattr(st, "idle_available", True) and st.user_idle_seconds == 0:
+        # Pre-Manual §10 + FINAL Fallback §1：OS idle 不可用（在场未知）→ 回退 SELF，
+        # **无论保留的数值 user_idle_seconds 是什么**（0/10/42/300/600 都只是连续性/debug
+        # 数据，不是测量；临时 WinAPI 失效后 CharacterState 保留最后有效值，绝不能据此重建在场）。
+        # 缺失 idle_available（旧快照/未绑定）同样按未知处理，不得默认 True。
+        if not getattr(st, "idle_available", False):
             att.target = AttentionTarget.SELF
             return
         if st.user_idle_seconds > 180 or st.active_window_app in ("", "unknown"):
@@ -244,9 +247,11 @@ class StateEngine:
         hour = state.clock_hour
         idle = state.user_idle_seconds
         now = time.monotonic()
-        # Pre-Manual §10：本地回退（无 LifeBrain）也不得把未知当可用 ——
-        # OS idle 不可用 + 占位 0 → 不产生 proactive 用户定向社交（SELF/survival 保持）
-        presence_known = getattr(state, "idle_available", True) or bool(idle != 0 or state.user_working)
+        # Pre-Manual §10 + FINAL Fallback §1：**presence_known 只由可用性位决定**。
+        # 不得从陈旧数值 idle != 0 / user_working / window 进程/标题重建"已知在场"
+        # （临时传感器失效时这些字段都可能是最后有效值的残留；Window 上下文 ≠ 在场真相）。
+        # missing idle_available = 未知 = False（不得默认 True）。
+        presence_known = bool(getattr(state, "idle_available", False))
 
         cands: List[IntentCandidate] = []
         # 睡眠（survive, P_NEED）
@@ -277,8 +282,10 @@ class StateEngine:
         if n.boredom > 70 and n.energy > 30:
             cands.append(IntentCandidate(Intent(IntentCategory.SELF, "wander", priority=P_SELF,
                                                 reason=f"无聊{n.boredom:.0f}"), n.boredom))
-        # 长期目标偏置（plan/3 §23）：understand_user → 更愿意观察
-        if self.long_term_goal == "understand_user" and working:
+        # 长期目标偏置（plan/3 §23）：understand_user → 更愿意观察。
+        # FINAL Fallback §1：observe_user 是 user-directed —— 在场未知（presence_known=False）
+        # 时同样不产生（working 是 window 上下文，不是在场真相）。
+        if self.long_term_goal == "understand_user" and presence_known and working:
             cands.append(IntentCandidate(Intent(IntentCategory.USER, "observe_user", priority=P_SOCIAL,
                                                 reason="长期目标:了解用户/用户在忙"), 55))
 

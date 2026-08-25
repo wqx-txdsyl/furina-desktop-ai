@@ -57,6 +57,7 @@ def test_behavior_is_llm_independent():
     be.register(BehaviorDefinition("observe_user", utility_fn=lambda s: 70, priority=3))
     be.register(BehaviorDefinition("idle", base_utility=5))
     se.state.user_working = True
+    se.state.idle_available = True   # 机械兼容：生产 snapshot 恒携带可用性位；在场已知才可 observe
     act = be.step(se.state.snapshot())
     assert act == "observe_user"     # 无需任何 LLM 调用
 
