@@ -93,7 +93,7 @@ class Furina:
                          "click": EVENT_CLICK, "drag": EVENT_DRAG}
         self.bus.on(EventType.INTERACTION_INPUT,
                     lambda ev: self.emotion.apply(emotion_event.get(
-                        getattr(ev.payload.type, "value", ""), EVENT_CLICK)))
+                        getattr(ev.payload.type, "value", ""), None)) if ev.payload else None)
 
         # Director（唯一仲裁）
         self.director = Director(self.bus)
@@ -228,10 +228,12 @@ class Furina:
         st.life.activity = req.action
         st.intent.action = req.action
         st.life.reason = req.reason
-        # 从请求载荷补齐情绪/意图优先（LifeBrain 决策给的）
+        # Phase 13 终审 §4.5：**EmotionEngine 是情绪真相的唯一所有者**。
+        # LifeDecision 的 emotion 只是 LifeBrain 的表达/行为提示（非权威），
+        # 落到 Intent.emotion（结构化输出槽），**不得覆盖 EmotionState.label**。
         payload = getattr(req, "payload", {}) or {}
         if payload.get("emotion"):
-            st.emotion.label = payload["emotion"]
+            st.intent.emotion = payload["emotion"]
         st.intent.priority = 1.0 if req.action != "idle" else 0.2
         log.debug("director execute: %s -> %s", req.action, macro.value)
 

@@ -242,6 +242,12 @@ class Scheduler:
         if e is None:
             return
         kind = e.type.value
+        # Phase 13 终审 §7：**指针控制阶段 ≠ 有意义互动**。
+        # GRAB / 原始 RELEASE / HOVER / LEAVE 只是指针移动，不进入生命因果（不扣社交、不加接纳度、
+        # 不触发关系/情绪/记忆/打断）。只有定型的语义互动才允许：CLICK / PETTING / POKE / DRAG。
+        _POINTER_CONTROL = ("grab", "release", "hover", "leave", "approach", "double_click")
+        if kind in _POINTER_CONTROL:
+            return
         # 互动台词（FIX G）→ 走 DialogueBrain（非固定句池）。
         # Phase 13A §6：**Emotion state = EmotionEngine only；Relationship = RelationshipEngine.apply only**。
         # Scheduler._on_interaction **不再直接写 emotion/relationship**（App 的 EmotionEngine/Harness 路由负责），
@@ -319,7 +325,9 @@ class Scheduler:
         if time.monotonic() - self._last_window_poll >= self.clock.medium_interval:
             self.wa.poll()
             self._last_window_poll = time.monotonic()
-        self.se.update_clock(*time.localtime()[:2])
+        # Phase 13 终审 §2.1：localtime()[:2] 是 (year, month)，必须传 (hour, minute)。
+        lt = time.localtime()
+        self.se.update_clock(lt.tm_hour, lt.tm_min)
         # 世界感知：即使窗口不变也要随 idle/时间演化（activity/events/salience）
         try:
             info = getattr(self, "_last_info", None)
@@ -400,17 +408,16 @@ class Scheduler:
         """开发监控：检测过度安静/过度 idle/行为覆盖，输出警告（不强制干预，只诊断）。"""
         try:
             st = self.se.state
-            # 连续 idle/发呆检测（任务书 §27 AUTONOMY_STAGNATION）
+            # 连续 idle/发呆检测 —— Phase 13 终审 §5：**安静共处是合法的**，不再因 idle ~18s 强制唤醒
+            # LifeBrain（那是人工多样性）。只保留 KPI 日志（诊断），不再 _interrupt_life。
             self._kpi_activity.append(st.life.activity)
             self._kpi_activity = self._kpi_activity[-20:]
             if st.life.macro == st.MacroState.IDLE and st.life.activity == "idle":
                 self._idle_streak += 1
             else:
                 self._idle_streak = 0
-            if self._idle_streak >= 6:   # ~6 次 medium tick ≈ 18s 仍 idle
-                log.warning("KPI: AUTONOMY_STAGNATION — 连续 idle %d 段，Brain 该重新评估候选行为", self._idle_streak)
-                if self.life_brain is not None:
-                    self._interrupt_life("autonomy_stagnation")
+            if self._idle_streak >= 6:   # ~6 次 medium tick ≈ 18s 仍 idle（仅日志，不唤醒）
+                log.info("KPI: quiet idle 持续 %d 段（合法，不强制唤醒）", self._idle_streak)
                 self._idle_streak = 0
             # 沉默检测（任务书 §26）
             if time.monotonic() - self._last_speech_at > 900:   # 15min 无自主发言

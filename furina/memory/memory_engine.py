@@ -250,12 +250,20 @@ class MemoryEngine:
         # 用户偏好：不喜欢被打扰/需要安静（plan/6 §16 显式偏好）
         if "不" in used and any(k in used for k in ("打扰", "安静", "别吵", "不要说话", "别烦", "忙")):
             bias["social_penalty"] = 55      # 社交/打扰行为大幅降权
-        # 关系（plan/6 §18）：高舒适 → 更愿意靠近用户。C-R1.2：关系为 0..1 归一化，阈值用 0.6 而非 60。
+        # 关系（plan/6 §18）：高舒适 → 更愿意靠近用户。
+        # Phase 13 终审 §13：unit debt —— 不再直接读 RelationshipState 原始 principal(0..100)，
+        # 统一消费 canonical relationship_factors()（0..1 归一化），阈值保持 0.6。
         rel = self.relationship
-        if rel and rel.comfort > 0.6:
-            bias["approach_bonus"] = 20
-        if rel and rel.annoyance > 0.6:
-            bias["social_penalty"] = max(bias.get("social_penalty", 0), 70)
+        if rel is not None:
+            try:
+                from furina.relationship.engine import relationship_factors
+                f = relationship_factors(rel)
+            except Exception:
+                f = {}
+            if f.get("comfort", 0.0) > 0.6:
+                bias["approach_bonus"] = 20
+            if f.get("annoyance", 0.0) > 0.6:
+                bias["social_penalty"] = max(bias.get("social_penalty", 0), 70)
         return bias
 
 

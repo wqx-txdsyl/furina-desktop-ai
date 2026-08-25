@@ -79,11 +79,12 @@ def test_relationship_factors_exact_numeric():
 
 
 def test_annoyance_07_triggers_06_path():
-    """annoyance .7 能触发 >.6 的高烦路径（memory_engine 阈值）。"""
+    """annoyance .7 能触发 >.6 的高烦路径（memory_engine 阈值，canonical 0..1）。"""
     import furina.memory.memory_engine as ME
     src = open(ME.__file__, encoding="utf-8").read()
-    assert "annoyance > 0.6" in src, "memory_engine 应使用归一化 0.6 阈值"
+    assert 'f.get("annoyance", 0.0) > 0.6' in src, "memory_engine 应消费 canonical factors 的 0.6 阈值"
     assert "annoyance > 60" not in src, "不应再用 60"
+    assert "rel.annoyance > 0.6" not in src, "不应再直接读原始 principal 属性（unit debt）"
 
 
 def test_all_dialogue_callsites_normalized():

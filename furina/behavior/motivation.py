@@ -600,11 +600,14 @@ class BehaviorMotivation:
         if cat in (SOCIAL, ASSISTANCE):
             tol = _clamp((rel.get("interaction_tolerance", 0.5) - 0.4) / 0.4 + 0.6)
             base *= tol
-        # 反塌缩守卫（§5）→ 类别/活动惩罚（§4）
-        base *= self._observation_crush_guard(activity)
-        base *= self._category_penalty(activity)
-        base *= self._activity_penalty(activity)
-        # 近因：刚刚做过 → 再压一次（现有 recency）
+        # Phase 13 终审 §5：**禁用强制多样** —— 类别/活动惩罚与观察塌缩守卫不再参与生产打分
+        # （它们只因为"近期展示过某类/某活动"就改排名，属于人工多样性）。
+        # 多样性只能来自 Needs/Emotion/Personality/Identity/Relationship/World/Memory/可行性。
+        # base *= self._observation_crush_guard(activity)   # DISABLED
+        # base *= self._category_penalty(activity)          # DISABLED
+        # base *= self._activity_penalty(activity)          # DISABLED
+        # 近因：仅保留"字面意义上刚做完"的短物理/语义冷却（30s 内 ×0.4，90s 内 ×0.7），
+        # 代表"刚做过、不能立刻原样再来一次"，不是视觉多样惩罚。
         last = self._last_done.get(activity)
         if last is not None:
             since = now - last
