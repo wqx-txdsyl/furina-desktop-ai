@@ -39,14 +39,18 @@ class DirectTurn:
     def __init__(self, turn_id: int, ingress_seq: Optional[int], user_text: str,
                  channel: str = "DIRECT_USER_TURN") -> None:
         self.turn_id = turn_id
-        self.ingress_seq = ingress_seq
+        # R1.2-2：turn_id 是完整用户 ingress identity；未显式给 ingress_seq 时以 turn_id 充当
+        self.ingress_seq = ingress_seq if ingress_seq is not None else turn_id
         self.user_text = user_text
         self.channel = channel
         self.status = "QUEUED"          # QUEUED → GENERATING → 终态
         self.failure_reason: str = ""
         self.latency_ms: float = 0.0
         self.created_at = time.time()
-        self.deadline: float = 0.0      # R1.1-3：本 turn 总预算截止（worker 开工时设定）
+        # R1.2-1：deadline 在 **submit 时刻** 设定（ingress→terminal 全生命周期预算，
+        # 排队时间计入）；worker 绝不重置 —— 轮到 worker 时已过 deadline 必须快速 FAILED。
+        self.created_monotonic: float = 0.0
+        self.deadline: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -64,18 +68,19 @@ class DirectTurn:
 class DirectDialogueQueue:
     """专用直接对话串行队列（单 worker FIFO 消费；owner 线程 submit 立即返回）。
 
-    R1.1-3：`timeout` = **整个 Direct turn 的总生命周期预算**（不是单次生成超时）——
-    由 worker 在开工时为 turn 设 `deadline = now + timeout`，processor 把它传给
-    DialogueBrain（attempt + retry 共享同一 deadline，不重置）。
-    R1.1-2：`keep_outcomes` 只限制 **terminal 历史** 的保留条数；
-    QUEUED/GENERATING 的活跃 turn 永远保留（否则 worker 取到 None 会丢消息并造成
-    direct seq 永久缺口）。
+    R1.2-1：`timeout` = **从 ingress（submit 时刻）到 terminal 的整个直接回合总预算**
+    —— submit 时为 turn 设 `deadline = created_monotonic + timeout`，覆盖 queue wait +
+    生成 + retry；worker **绝不重置** deadline（排队时间计入预算；已过 deadline 的回合
+    快速 FAILED，不得再获得新预算）。processor 把它传给 DialogueBrain。
+    R1.1-2/R1.2-4：`keep_outcomes` 只限制 **terminal 历史** 的保留条数（submit 与
+    终态转换后都 trim）；QUEUED/GENERATING 的活跃 turn 永远保留。
+    R1.2-2：`turn_id` 是完整用户 ingress identity；未显式给 ingress_seq 时以 turn_id 充当。
     """
 
-    def __init__(self, bus=None, timeout: float = 150.0,
+    def __init__(self, bus=None, timeout: float = 30.0,
                  keep_outcomes: int = 100) -> None:
         self.bus = bus
-        self.timeout = timeout           # 单回合生成有界超时（秒）
+        self.timeout = timeout           # R1.2-1：整回合 ingress→terminal 总预算（submit 时定 deadline）
         self._q: "queue.Queue" = queue.Queue()
         self._turns: Dict[int, DirectTurn] = {}
         self._lock = threading.Lock()
@@ -107,11 +112,17 @@ class DirectDialogueQueue:
     # -------------------------------------------------- owner 入口
     def submit(self, snapshot, ingress_seq: Optional[int] = None,
                user_text: str = "") -> int:
-        """owner 线程：入队一个直接对话回合，立即返回 turn_id。"""
+        """owner 线程：入队一个直接对话回合，立即返回 turn_id。
+
+        R1.2-1：deadline 在此（ingress 时刻）设定 = created_monotonic + timeout，
+        覆盖 queue wait + 生成 + retry 的**整个**直接回合生命周期（用户可见总预算）。
+        """
         with self._lock:
             self._next_turn_id += 1
             turn_id = self._next_turn_id
             turn = DirectTurn(turn_id, ingress_seq, user_text)
+            turn.created_monotonic = time.monotonic()
+            turn.deadline = turn.created_monotonic + self.timeout
             self._turns[turn_id] = turn
             self._order.append(turn_id)
             self._trim_locked()
@@ -133,8 +144,6 @@ class DirectDialogueQueue:
                 turn = self._turns.get(turn_id)
             if turn is None:
                 continue   # R1.1-2：活跃 turn 永不 trim → 此分支实际不可达（防御）
-            # R1.1-3：**开工时**设定本 turn 总预算 deadline（attempt+retry 共享）
-            turn.deadline = time.monotonic() + self.timeout
             t0 = time.perf_counter()
             self._set_status(turn, "GENERATING")
             self._trace(turn, "GENERATION_STARTED")
@@ -142,6 +151,8 @@ class DirectDialogueQueue:
                 if self._processor is None:
                     out: dict = {"speech": None, "failure_reason": "no_processor"}
                 else:
+                    # R1.2-1：绝不重置 deadline —— processor/brain 用 turn.deadline 的
+                    # remaining（已过 deadline → 立即 generation_timeout，不给新预算）
                     out = self._processor(turn, snapshot) or {}
                 latency = (time.perf_counter() - t0) * 1000.0
                 speech = out.get("speech")
@@ -167,6 +178,9 @@ class DirectDialogueQueue:
             turn.status = status
             turn.failure_reason = reason
             turn.latency_ms = latency_ms
+            # R1.2-4：终态转换后立即 trim terminal history —— retained terminal ≤ keep_outcomes
+            # （活跃 turn 永不 trim；trim 只移除 registry，本 turn 局部引用仍可发 terminal trace）
+            self._trim_locked()
         self._trace(turn, status, latency_ms=latency_ms, failure_reason=reason)
 
     def _trim_locked(self) -> None:

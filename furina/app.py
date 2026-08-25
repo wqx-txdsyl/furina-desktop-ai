@@ -529,20 +529,17 @@ class Furina:
                 self.emotion.apply_event(EVENT_TALK, tired_hint=self._tired_hint())
             except Exception:
                 pass
-        # 2. H1-FINAL §2：**owner 入口预留 FIFO 序号**（用户输入顺序身份，不依赖 worker 执行时序）
-        ingress_seq = None
-        db = getattr(self, "dialogue_brain", None)
-        try:
-            if db is not None and hasattr(db, "reserve_turn"):
-                ingress_seq = db.reserve_turn()
-        except Exception:
-            pass
+        # 2. R1.2-2：**不再在入队前 reserve DialogueBrain seq** —— DirectDialogueQueue
+        #    是 DIRECT_USER_TURN 的唯一串行 authority（turn_id = 用户 ingress identity）；
+        #    brain seq 只在 worker 真正执行 DialogueBrain 时由 say() 内部分配
+        #    （_next_seq()），与执行顺序天然一致；提前 reserve 会在 job 失败时制造
+        #    seq hole（N 永远没人 release → N+1 永久等待）。
         # 3. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
-        snap = self._freeze_direct_snapshot(text, ingress_seq=ingress_seq)
-        # 4. R1.1-1：**无论 dialogue_brain 是否为 None**，都必须产生 DirectTurn + 可观察终态。
+        snap = self._freeze_direct_snapshot(text)   # ingress_seq=None
+        # 4. R1.1-1：无论 dialogue_brain 是否为 None，都必须产生 DirectTurn + 可观察终态。
         #    db=None → worker 立即 FAILED(reason=dialogue_brain_unavailable) + SYSTEM_STATUS，
         #    绝不让用户消息静默消失；db 恢复后下一条消息正常回复。
-        self._direct_dialogue_queue().submit(snap, ingress_seq=ingress_seq, user_text=text)
+        self._direct_dialogue_queue().submit(snap, user_text=text)
 
     # -------------------------------------------------- B1：DirectDialogueQueue（专用直接 lane）
     def _direct_dialogue_queue(self):
@@ -668,7 +665,8 @@ class Furina:
             user_present=True,
             solitude=False,
             channel="DIRECT_USER_TURN",
-            ingress_seq=ingress_seq,   # H1-FINAL §2：owner 入口预留的 FIFO 序号
+            # R1.2-2：生产路径不再预留（queue turn_id 是 ingress identity）；显式 seq 仅测试/外部直调
+            ingress_seq=ingress_seq,
             memories=tuple(mems),
             world=freeze_flat(wf),
             relationship=freeze_flat(rel),

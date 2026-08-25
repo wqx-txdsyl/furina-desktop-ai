@@ -104,7 +104,8 @@ def test_direct_message_brain_none_next_message_after_recovery_can_reply():
     assert dq.wait_idle(timeout=8.0)
     outs = dq.recent_outcomes(5)
     assert outs[0]["status"] == "REPLIED", f"恢复后必须可回复: {outs}"
-    assert outs[0]["ingress_seq"] == 1, "恢复后的第一条是第 2 条消息"
+    # R1.2-2：DirectTurn.ingress_seq = queue turn_id（未显式给 ingress_seq 时）
+    assert outs[0]["ingress_seq"] == 2, "恢复后的第一条是第 2 条消息（turn_id=2）"
 
 
 # ================================================================ R1.1-2 trim

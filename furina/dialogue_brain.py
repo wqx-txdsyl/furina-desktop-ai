@@ -267,10 +267,11 @@ class DialogueBrain:
                       deadline: Optional[float] = None) -> dict:
         """B1/R1.1-3 lane 分发：direct 与 ambient 独立序号 + 独立门；总预算 deadline 传递。
 
-        B1（评审基线 0402e7f）**通道分 lane**：
-          - DIRECT_USER_TURN：direct lane（owner 入口 reserve_turn → 严格 ingress FIFO；
-            直接历史成对提交；失败有可观察终态）。由 DirectDialogueQueue 串行 worker 调用，
-            也可由测试直接调用（仍受 direct gate 保序）。
+        B1/R1.2-2（评审基线）**通道分 lane**：
+          - DIRECT_USER_TURN：direct lane —— 生产路径由 DirectDialogueQueue 串行 authority
+            驱动（turn_id = 用户 ingress identity），brain seq 在真正执行时由 _next_seq()
+            分配（与执行顺序一致）；测试/外部直调可显式传 ingress_seq（仍受 direct gate 保序）。
+            直接历史成对提交；失败有可观察终态。
           - AMBIENT_AUTONOMOUS / FEED_REACTION / INTERACTION_REACTION / AGENT_REPORT：
             **独立 ambient lane**（独立序号 + 独立门）—— 慢/挂起的 ambient 回合
             **永不占用 direct 序号、永不阻塞 direct lane**；ambient 可被节流/丢弃。
@@ -371,8 +372,10 @@ class DialogueBrain:
         # ================= Phase B：有界 LLM 生成 + 确定性校验（**无锁**） =================
         speech, gen_reason = self._generate_bounded(prompt, timeout, deadline)
         if not speech:
-            self.last_failure_reason = gen_reason or "generation_empty"
-            return (None, self.last_failure_reason, [])   # 沉默优先于 Generic fallback（§39）
+            # R1.2-3：per-call result 只用局部变量；shared last_* 仅兼容诊断 mirror
+            reason = gen_reason or "generation_empty"
+            self.last_failure_reason = reason
+            return (None, reason, [])   # 沉默优先于 Generic fallback（§39）
         # 5) Deterministic Validation（§38）—— **invalid 绝不原样显示**
         v = self.validator.validate(speech, should_speak=True,
                                     example_phrases=[ex["speech"] for ex in examples],
@@ -394,13 +397,17 @@ class DialogueBrain:
                     v = v2
                 else:
                     # 仍 invalid → 不泄漏 invalid 角色输出；暴露可观察失败路径（调用方转 SYSTEM_STATUS）
-                    self.last_validation_failure = list(v2.issues)
-                    self.last_failure_reason = "validation_twice_invalid"
-                    return (None, "validation_twice_invalid", list(v2.issues))
+                    reason = "validation_twice_invalid"
+                    issues = list(v2.issues)
+                    self.last_validation_failure = issues
+                    self.last_failure_reason = reason
+                    return (None, reason, issues)
             else:
-                self.last_validation_failure = list(v.issues)
-                self.last_failure_reason = retry_reason or "validation_retry_empty"
-                return (None, self.last_failure_reason, list(v.issues))
+                reason = retry_reason or "validation_retry_empty"
+                issues = list(v.issues)
+                self.last_validation_failure = issues
+                self.last_failure_reason = reason
+                return (None, reason, issues)
 
         # ================= Phase C：确定性收尾（锁内，快） =================
         with self._say_lock:
