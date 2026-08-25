@@ -5,3 +5,6 @@ pillow>=10
 numpy>=1.26
 aiohttp>=3.9
 python-dotenv>=1.0
+python-docx>=1.1
+python-pptx>=0.6.23
+openpyxl>=3.1
