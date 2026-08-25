@@ -63,15 +63,26 @@ class Director:
     def drain(self) -> None:
         """仲裁：从队列取最高优先级请求执行。
 
-        若当前动作不可中断且优先级更高，则放回不抢占（plan/3 §18）。
+        优先级契约（数字越小越高；plan/3 §18 + Final Gate §1）：
+          - **严格更低优先级（req.priority > current.priority）永不替换更高优先级当前动作**
+            （与 interruptible 无关 —— 否则 active Agent 会被排队中的低优先级 mind 顶掉）。
+          - 同优先级：保留既有语义（current.interruptible=False 时不可替换；
+            Agent 阶段→阶段等 interruptible=True 的同级请求可继续替换）。
+          - 更高优先级（req.priority < current.priority）：按既有策略抢占。
         系统每 Medium Tick 调用一次（app/scheduler 注入）。
         """
         if not self._queue:
             return
         req = heapq.heappop(self._queue)[2]
-        if self._current and req.priority >= self._current.priority and self._current.interruptible is False:
-            heapq.heappush(self._queue, (req.priority, _seq(), req))
-            return
+        if self._current is not None:
+            if req.priority > self._current.priority:
+                # 严格更低优先级 → 放回队列等待（Agent 必须保持 current）
+                heapq.heappush(self._queue, (req.priority, _seq(), req))
+                return
+            if req.priority == self._current.priority and self._current.interruptible is False:
+                heapq.heappush(self._queue, (req.priority, _seq(), req))
+                return
+            # req.priority < current.priority → 更高优先级可抢占（既有策略）
         # H1 §8：真正发生**替换**（旧动作被新动作接管）→ 先通知回调（finalize 被抢占的活动）
         if self._current is not None and self._current is not req and self.on_before_replace is not None:
             try:

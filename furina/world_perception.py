@@ -62,7 +62,7 @@ class WorldState:
     user_present: bool = True
     user_active: bool = True           # 有近期输入（非 idle）
     user_idle_seconds: float = 0.0
-    idle_available: bool = True        # H1-FINAL §7：空闲真相可用性（False 且无有效样本 → 不制造活跃）
+    idle_available: bool = False       # Final Gate §2：**默认 False**（启动时尚无任何 OS 空闲样本）
     foreground_app: str = ""           # 窗口类名
     foreground_process: str = ""       # 进程名（近似 app）
     foreground_title: str = ""
@@ -87,6 +87,7 @@ class WorldState:
             "activity_duration": round(self.activity_duration, 1),
             "recent_events": self.recent_world_events[-6:],
             "interesting_context": self.interesting_context,
+            "idle_available": self.idle_available,   # Final Gate §2：空闲真相可用性
         }
 
 
@@ -195,12 +196,13 @@ class WorldPerception:
         w.idle_available = idle_available
         if idle_available:
             self._has_valid_idle = True
-        # H1-FINAL §7：**从未有有效空闲样本** → 不把默认 0 当作"用户刚互动"：
-        # user_activity=UNKNOWN、不发任何在场/活跃/离开转换、不制造事件。
+        # H1-FINAL §7 / Final Gate §2：**从未有有效空闲样本** → 不把默认 0 当作"用户刚互动"：
+        # user_activity=UNKNOWN、user_active=False、可用性 0、不发任何在场/活跃/离开转换、不制造事件。
         if not idle_available and not self._has_valid_idle:
-            w.user_idle_seconds = idle_seconds   # 原始值（诊断），但**不**据此分类
+            w.user_idle_seconds = idle_seconds   # 原始值（存储占位/诊断），但**不**据此分类
             w.user_activity = UserActivity.UNKNOWN
-            w.user_present = True     # 未知偏置，但不产生 USER_BECAME_ACTIVE/离开转换
+            w.user_active = False
+            w.user_present = True     # 保守的旧布尔（不参与"现在活跃"解释）；不产生 USER_BECAME_ACTIVE/离开转换
             w.user_focus_level = 0.0
             w.interaction_availability = 0.0
             w.interruption_cost = 0.0

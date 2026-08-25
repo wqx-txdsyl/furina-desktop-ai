@@ -157,8 +157,9 @@ class CharacterState:
     active_window_app: str = ""
     user_idle_seconds: float = 0.0
     user_working: bool = False
-    # H1-FINAL §7：空闲真相可用性 —— False 且从未有有效样本时，user_idle_seconds 默认 0 不得当作"用户刚互动"
-    idle_available: bool = True
+    # H1-FINAL §7 / Final Gate §2：空闲真相可用性 —— **默认 False**（进程启动时尚无任何 OS 空闲样本；
+    # False 时 user_idle_seconds=0.0 只是存储占位，不得被当作测量值"用户刚互动"）
+    idle_available: bool = False
 
     # ---- 时间 ----
     clock_hour: int = 0
@@ -189,6 +190,7 @@ class CharacterState:
                        "priority": round(self.intent.priority, 2), "reason": self.intent.reason},
             "active_window": {"app": self.active_window_app, "title": self.active_window_title},
             "user_idle": round(self.user_idle_seconds, 1),
+            "idle_available": self.idle_available,   # Final Gate §2：空闲真相可用性（False=未测量，user_idle 只是占位）
             "user_working": self.user_working,
             "clock_hour": self.clock_hour,
             "reason": reason,

@@ -376,8 +376,9 @@ class Scheduler:
         self.se.update_clock(lt.tm_hour, lt.tm_min)
         # §2.2/FINAL-R1 §1.1：**真实输入空闲秒**来自 WindowAwareness（GetLastInputInfo+GetTickCount64）。
         # 空闲真相不可用时（idle_available=False）保留上一有效值，**不假装 0**（那不是"用户一直活跃"）。
-        # H1-FINAL §7：availability 位跨运行时边界 —— 首样本不可用时，world 不得从默认 0 制造活跃转换。
-        idle_avail = bool(getattr(self.wa, "idle_available", True))
+        # H1-FINAL §7 / Final Gate §2：availability 位跨运行时边界；**回退必须保守（False）**——
+        # 缺属性/未绑定 = 未测量，不得默认 True。
+        idle_avail = bool(getattr(self.wa, "idle_available", False))
         self.se.state.idle_available = idle_avail
         if idle_avail:
             self.se.state.user_idle_seconds = float(getattr(self.wa, "last_idle", 0.0) or 0.0)
