@@ -1,4 +1,4 @@
-"""调度器（plan/7 §40-42）：驱动三档 Tick 的生命循环。
+"""调度器（legacy-plan/7 §40-42）：驱动三档 Tick 的生命循环。
 
 Fast ~60fps：渲染/动画（由 Qt 主循环驱动）
 Medium ~3s：状态更新 / 需求 / 意图 / 行为选择 / 窗口感知
@@ -84,7 +84,7 @@ def pose_for_activity(activity: str, emotion: str = "") -> tuple:
 
 
 def _macro_for(activity: str) -> "st.MacroState":
-    """Life 活动 → 宏观状态（plan/2 §四 Body State 由 Runtime 决定；这里是 Life→Macro）。"""
+    """Life 活动 → 宏观状态（legacy-plan/2 §四 Body State 由 Runtime 决定；这里是 Life→Macro）。"""
     mapping = {
         "sleep": "sleeping", "rest": "resting",
         "eat": "living", "drink": "living", "play": "living", "play_with_object": "living",
@@ -242,7 +242,7 @@ class Scheduler:
             self._say(out.speech,
                       channel=getattr(out, "channel", "") or "DIRECT_USER_TURN",
                       turn_id=getattr(out, "turn_id", None))
-            # 让大脑意图进入行为（表现层 plan/8 §5：LLM 只产出结构化意图/状态）
+            # 让大脑意图进入行为（表现层 legacy-plan/8 §5：LLM 只产出结构化意图/状态）
             intent = getattr(out, "intent", "")
             if intent:
                 self.se.state.intent.action = intent
@@ -414,7 +414,7 @@ class Scheduler:
                                  else "（系统状态：Agent 任务失败。）")
 
     def _on_interaction(self, ev) -> None:
-        # 即时层（plan/4 §27）：互动改变情绪/社交需求，→ 表现层选对应表情素材
+        # 即时层（legacy-plan/4 §27）：互动改变情绪/社交需求，→ 表现层选对应表情素材
         e = ev.payload
         if e is None:
             return
@@ -612,7 +612,7 @@ class Scheduler:
             # 无 LifeBrain（异常/未配置）→ 回退本地 Utility 意图
             self.se.generate_intent(self.se.state)
             self.be.step(self.se.state.snapshot())
-        # 记忆 → 行为偏置（plan/6 §28：记忆真实参与行为选择，而非只喂 LLM）
+        # 记忆 → 行为偏置（legacy-plan/6 §28：记忆真实参与行为选择，而非只喂 LLM）
         snap = self.se.state.snapshot()
         if self.me is not None:
             snap["memory_bias"] = self.me.behavior_hint(
@@ -622,7 +622,7 @@ class Scheduler:
         # Scheduler 不再直接设 _move_target / 改窗口位置（legacy 收敛为 no-op）。
         # Director 仲裁唯一当前动作（用户互动/Agent 任务可打断自主行为）
         self.director.drain()
-        # 决策轨迹日志（final test.md A-17：能回答“为什么做这个动作”）
+        # 决策轨迹日志（归档 FINAL_TEST_V1 A-17：能回答“为什么做这个动作”）
         try:
             log.info("decision=%s | state=mood:%.0f,needs:%s | intent=%s(pri%.2f) | action=%s",
                      self.se.state.life.activity,
@@ -760,7 +760,7 @@ class Scheduler:
         return raw
 
     def _apply_life_decision(self, d) -> None:
-        """LifeBrain 决策 → 交给 Director 仲裁/执行（plan/8 §3：Director 是唯一 resolver）。
+        """LifeBrain 决策 → 交给 Director 仲裁/执行（legacy-plan/8 §3：Director 是唯一 resolver）。
 
         LifeBrain 只产出 LifeDecision，**不直接写状态**；而是提交 ACTION_REQUEST，
         由 Director 决定谁执行（用户互动/Agent 任务可打断），再由 executor(app._on_execute) 落地。

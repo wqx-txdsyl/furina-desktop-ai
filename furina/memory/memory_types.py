@@ -1,6 +1,6 @@
-"""记忆类型（plan/6）。
+"""记忆类型（legacy-plan/6）。
 
-记忆不是聊天记录；观察 ≠ 记忆（plan/6 §38）。每条记忆有 source/importance/confidence。
+记忆不是聊天记录；观察 ≠ 记忆（legacy-plan/6 §38）。每条记忆有 source/importance/confidence。
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class MemorySource(str, enum.Enum):
 
 class MemoryStatus(str, enum.Enum):
     ACTIVE = "active"
-    SUPERSEDED = "superseded"     # 被纠正，仍保留历史（plan/6 §33）
+    SUPERSEDED = "superseded"     # 被纠正，仍保留历史（legacy-plan/6 §33）
     ARCHIVED = "archived"
 
 
@@ -43,19 +43,19 @@ class Memory:
     importance: float = 0.5
     confidence: float = 0.5
     timestamp: float = field(default_factory=time.time)
-    # 事件记忆附加字段（plan/6 §23）
+    # 事件记忆附加字段（legacy-plan/6 §23）
     context: str = ""
     outcome: str = ""
     participants: str = ""
-    # 生命周期（plan/6 §10-11）
+    # 生命周期（legacy-plan/6 §10-11）
     strength: float = 0.6
     last_recalled: float = 0.0
     last_reinforced: float = 0.0
-    # 时间有效性（plan/6 §34）
+    # 时间有效性（legacy-plan/6 §34）
     valid_from: float = 0.0
     valid_to: Optional[float] = None
     status: MemoryStatus = MemoryStatus.ACTIVE
-    # 关系维度影响（plan/6 §18）
+    # 关系维度影响（legacy-plan/6 §18）
     relationship_delta: Dict[str, float] = field(default_factory=dict)
     embedding: list = field(default_factory=list)
     mem_id: str = ""
@@ -76,7 +76,7 @@ class Memory:
 
 @dataclass
 class RelationshipState:
-    """关系是多维的，不是单一好感度（plan/6 §18）。
+    """关系是多维的，不是单一好感度（legacy-plan/6 §18）。
 
     Phase 04：区分**短期状态**（变化快、恢复快）与**长期关系**（变化慢、需积累）。
     - 短期：annoyance / interaction_tolerance / social_confidence

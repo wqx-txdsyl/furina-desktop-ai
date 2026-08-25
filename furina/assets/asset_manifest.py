@@ -1,7 +1,7 @@
-"""素材 Manifest 与 Resolver（plan/2 §19-21, §17-18）。
+"""素材 Manifest 与 Resolver（legacy-plan/2 §19-21, §17-18）。
 
 素材不是动画，身体能表达的语义单元。程序靠 metadata 找素材，
-从不靠文件名猜语义（plan/7 §31）。
+从不靠文件名猜语义（legacy-plan/7 §31）。
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ log = get_logger("assets.manifest")
 
 # ---------------------------------------------------------------- 命名
 def naming_for(posture: str, emotion: str, gaze: str, action: str, variant: int = 1) -> str:
-    """统一命名：furina_[posture]_[emotion]_[gaze]_[action]_[variant]（plan/2 §20）。"""
+    """统一命名：furina_[posture]_[emotion]_[gaze]_[action]_[variant]（legacy-plan/2 §20）。"""
     return f"furina_{posture}_{emotion}_{gaze}_{action}_{variant:02d}"
 
 
@@ -73,7 +73,7 @@ class AssetManifest(BaseModel):
     character: str = "furina"
     version: str = "v1"
     entries: List[AssetEntry] = Field(default_factory=list)
-    identity_anchor: str = "furina-base.png"
+    identity_anchor: str = "data/assets/reference/furina-base.png"
 
     def index(self) -> Dict[str, AssetEntry]:
         return {e.asset_id: e for e in self.entries}
@@ -100,14 +100,14 @@ class AssetQuery:
 
 
 class AssetResolver:
-    """按优先级匹配最合适素材（plan/2 §18）。
+    """按优先级匹配最合适素材（legacy-plan/2 §18）。
 
     Exact → Same Posture → Same Emotion → Same Action → Nearest Semantic → Neutral fallback。
     """
 
     def __init__(self, manifest: AssetManifest) -> None:
         self.manifest = manifest
-        self._missing: Dict[str, int] = {}   # 统计缺失语义（ASSET_MISSING，plan/2 §26）
+        self._missing: Dict[str, int] = {}   # 统计缺失语义（ASSET_MISSING，legacy-plan/2 §26）
 
     @property
     def missing(self) -> Dict[str, int]:

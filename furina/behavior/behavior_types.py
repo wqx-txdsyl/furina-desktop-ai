@@ -1,4 +1,4 @@
-"""行为类型定义（plan/3 §6-7）。
+"""行为类型定义（legacy-plan/3 §6-7）。
 
 行为不是动画，只是意图；动画只是行为的一个可能实现。
 """
@@ -37,7 +37,7 @@ class BehaviorDefinition:
     tags: List[str] = field(default_factory=list)
     # 可执行动画/姿态提示（表现层），由 Runtime 消费
     posture_hint: str = "standing"
-    # 行为链（plan/3 §22）：本行为结束后衔接到的下一个行为（若条件满足）
+    # 行为链（legacy-plan/3 §22）：本行为结束后衔接到的下一个行为（若条件满足）
     chain_to: Optional[str] = None
     chain_if: Optional[Callable[[dict], bool]] = None
 

@@ -1,7 +1,7 @@
-"""Furina Brain —— LLM Thought Loop（plan/8 §10, §13）。
+"""Furina Brain —— LLM Thought Loop（legacy-plan/8 §10, §13）。
 
 低频、高价值决策层：对话、复杂意图、关系判断、Agent 规划、回忆。
-职责边界（plan/8 §5-9）：
+职责边界（legacy-plan/8 §5-9）：
 - 只输出结构化 Intent（受限枚举），绝不自由文本控制应用。
 - 不做高频渲染/动画/输入检测/简单状态更新。
 """
@@ -17,7 +17,7 @@ from furina.state import CharacterState, Intent, IntentCategory
 
 log = get_logger("brain")
 
-# 允许的动作枚举（plan/8 §9）—— 与行为系统一致，防止 LLM 发明动作
+# 允许的动作枚举（legacy-plan/8 §9）—— 与行为系统一致，防止 LLM 发明动作
 ALLOWED_ACTIONS = [
     "idle", "observe_user", "approach_user", "talk", "play", "rest",
     "eat", "drink", "sleep", "help_user", "run_agent_task", "ask_permission",

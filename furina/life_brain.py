@@ -3,7 +3,7 @@
 职责（严格边界）：
 - 只回答：我现在是谁 / 我现在怎么样 / 我想干什么 / 下一步做什么。
 - 输出结构化 LifeDecision（activity/emotion/intent/duration/interruptible/exit_conditions/next_think_in/dialogue_needed/tool_needed）。
-- **绝不**直接控制渲染/动画/输入/每帧（plan/8 §5）；这些交给 Runtime 身体。
+- **绝不**直接控制渲染/动画/输入/每帧（legacy-plan/8 §5）；这些交给 Runtime 身体。
 - **绝不**决定“怎么说”（DialogueBrain）；**绝不**决定“怎么操作”（Tool Agent）。
 
 关键设计（修正“睡死/状态切换模糊”）：
@@ -24,7 +24,7 @@ from furina.persona import FURINA_PERSONA
 
 log = get_logger("life_brain")
 
-# Life State（她“在干什么”，plan/2 §四 —— Brain 管的是 Life）
+# Life State（她“在干什么”，legacy-plan/2 §四 —— Brain 管的是 Life）
 # 任务书 §3：自主生活行为池（日常/娱乐/社交/工作辅助）—— 给 Brain 足够的自主空间。
 LIFE_ACTIVITIES = [
     # 日常
@@ -169,7 +169,7 @@ class LifeBrain:
 
     # -------------------------------------------------- 世界快照
     def build_snapshot(self, state, memory_engine=None, recent_events: Optional[List[str]] = None) -> dict:
-        """把“世界”压缩成 Brain 能消费的快照（plan/2 §七 + 任务书 §21 互动机会评分）。"""
+        """把“世界”压缩成 Brain 能消费的快照（legacy-plan/2 §七 + 任务书 §21 互动机会评分）。"""
         snapshot = {
             "time": f"{state.clock_hour:02d}:{state.clock_minute:02d}",
             "day_phase": _day_phase(state.clock_hour),
@@ -612,7 +612,7 @@ def _day_phase(hour: int) -> str:
 
 
 def _life_prompt(snap: dict) -> str:
-    """把世界快照变成 Brain 的一次性提问（紧凑；plan/8 §10 拆 prompt，不塞巨型提示词）。
+    """把世界快照变成 Brain 的一次性提问（紧凑；legacy-plan/8 §10 拆 prompt，不塞巨型提示词）。
 
     任务书 §3/§9/§10：给 Brain 足够自主行为空间 + 主动语言机会 + 语言必须有理由（非 AI 套话）。
     """

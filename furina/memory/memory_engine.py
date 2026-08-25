@@ -1,4 +1,4 @@
-"""记忆引擎（plan/6）。
+"""记忆引擎（legacy-plan/6）。
 
 - 形成：记忆评分 importance/novelty/emotional/relationship/future/repetition（§9）。
 - 巩固：夜间回顾，短期→长期（§13, §12）。
@@ -18,7 +18,7 @@ from .memory_types import Memory, MemoryLevel, MemorySource, RelationshipState
 
 log = get_logger("memory")
 
-# 检索加权（plan/6 §27）
+# 检索加权（legacy-plan/6 §27）
 _WEIGHTS = {"semantic": 0.30, "relevance": 0.20, "recency": 0.15,
             "importance": 0.15, "relationship": 0.10, "emotional": 0.10}
 
@@ -242,7 +242,7 @@ class MemoryEngine:
         self.store.insert(m)
         return m
 
-    # -------------------------------------------------- 记忆 → 行为偏置（plan/6 §16, §28）
+    # -------------------------------------------------- 记忆 → 行为偏置（legacy-plan/6 §16, §28）
     def behavior_hint(self, *, context: str = "", user_context: Mapping[str, Any] | None = None) -> dict:
         """从近期/高重要记忆提炼对行为系统的偏置建议（不直接操控行为，只给偏置）。
 
@@ -254,10 +254,10 @@ class MemoryEngine:
         used = " ".join(f"{m.content} {m.context}" for m in mems)
         bias: dict = {}
 
-        # 用户偏好：不喜欢被打扰/需要安静（plan/6 §16 显式偏好）
+        # 用户偏好：不喜欢被打扰/需要安静（legacy-plan/6 §16 显式偏好）
         if "不" in used and any(k in used for k in ("打扰", "安静", "别吵", "不要说话", "别烦", "忙")):
             bias["social_penalty"] = 55      # 社交/打扰行为大幅降权
-        # 关系（plan/6 §18）：高舒适 → 更愿意靠近用户。
+        # 关系（legacy-plan/6 §18）：高舒适 → 更愿意靠近用户。
         # Phase 13 终审 §13：unit debt —— 不再直接读 RelationshipState 原始 principal(0..100)，
         # 统一消费 canonical relationship_factors()（0..1 归一化），阈值保持 0.6。
         rel = self.relationship

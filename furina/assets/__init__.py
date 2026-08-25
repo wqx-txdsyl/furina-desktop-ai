@@ -1,4 +1,4 @@
-"""素材引擎：Manifest 模型 + 命名规范 + Resolver + Agnes 生成（plan/2）。"""
+"""素材引擎：Manifest 模型 + 命名规范 + Resolver + Agnes 生成（legacy-plan/2）。"""
 from .asset_manifest import (
     AssetEntry,
     AssetManifest,

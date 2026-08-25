@@ -1,4 +1,4 @@
-"""窗口感知（plan/7 §6, plan/5 §7）。
+"""窗口感知（legacy-plan/7 §6, legacy-plan/5 §7）。
 
 用 ctypes 直接调 user32/kernel32 获取前台窗口（无需 pywin32）。
 Phase 13 终审 §2.2-2.4：补充**真实 Windows 感知边界**：

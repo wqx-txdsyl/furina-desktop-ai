@@ -1,4 +1,4 @@
-"""日志：统一 stdlib logging，便于决策轨迹追踪（plan/8 铁律#15）。"""
+"""日志：统一 stdlib logging，便于决策轨迹追踪（legacy-plan/8 铁律#15）。"""
 from __future__ import annotations
 
 import logging

@@ -11,10 +11,9 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 BLOCK_CIPHER = None
 
-# 素材 / 身份锚点数据
+# 素材 / 身份锚点数据（data/ 整体打包，基座图已在 data/assets/reference/ 内）
 datas = [
     ("data", "data"),
-    ("furina-base.png", "."),
 ]
 
 # PySide6：让 hook 收集 Qt DLL/插件；cv2/PIL/numpy/httpx/pydantic 走 hook。

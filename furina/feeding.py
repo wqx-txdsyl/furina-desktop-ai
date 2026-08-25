@@ -1,4 +1,4 @@
-"""喂食系统（plan/4 §17, §22-23，plan/1 §12 食物）。
+"""喂食系统（legacy-plan/4 §17, §22-23，legacy-plan/1 §12 食物）。
 
 食物不是图片，是“物体”，带 taste/营养/心情效应。用户喂食后：
 她按 饥饿/食物类型/心情/当前活动 决定反应；吃了则 饥饿↓ 满足↑，并形成记忆。
@@ -21,7 +21,7 @@ class Food:
     emoji: str = ""
 
 
-# 常见食物（plan/4 §17, §22）
+# 常见食物（legacy-plan/4 §17, §22）
 FOODS: Dict[str, Food] = {
     "cake": Food("蛋糕", hunger_delta=-35, satisfaction_delta=20, mood_delta=12, taste="sweet", emoji="🍰"),
     "tea": Food("茶", hunger_delta=-8, satisfaction_delta=12, mood_delta=8, taste="neutral", emoji="🍵"),

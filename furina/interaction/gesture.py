@@ -1,4 +1,4 @@
-"""手势识别（plan/4 §3, §6, §30）。
+"""手势识别（legacy-plan/4 §3, §6, §30）。
 
 把原始鼠标轨迹(坐标+按下状态)识别成语义事件：
 hover / touch / stroke(petting) / grab / drag / release / poke / tap / approach / leave。

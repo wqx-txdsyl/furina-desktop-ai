@@ -1,8 +1,8 @@
-"""互动引擎（plan/4）。
+"""互动引擎（legacy-plan/4）。
 
 职责：只负责“理解用户做了什么”，不负责“芙宁娜该怎么反应”
-（反应由 Behavior/Director 决定，plan/4 §26）。
-三层结果：即时(animation/speech) / 短期(状态) / 长期(关系/记忆)（plan/4 §27）。
+（反应由 Behavior/Director 决定，legacy-plan/4 §26）。
+三层结果：即时(animation/speech) / 短期(状态) / 长期(关系/记忆)（legacy-plan/4 §27）。
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class InteractionEngine:
         self.bus = bus
         self.recognizer = GestureRecognizer()
         self.hitboxes: Dict[InteractionZone, Hitbox] = {}
-        # 过度互动饱和（plan/4 §13）
+        # 过度互动饱和（legacy-plan/4 §13）
         self._counts: Dict[Tuple[TouchKind, InteractionZone], int] = {}
         self._saturation = 0.0
         # 关系/记忆接入点（由 app 注入，可选）
@@ -32,7 +32,7 @@ class InteractionEngine:
 
     # -------------------------------------------------- hitbox
     def set_hitboxes_from_anchor(self, anchors: Dict[str, List[float]], body_box: Tuple[float, float, float, float]) -> None:
-        """从素材锚点[归一化x,y]生成 hitbox（plan/4 §5）。
+        """从素材锚点[归一化x,y]生成 hitbox（legacy-plan/4 §5）。
 
         body_box = (cx, cy, half_w, half_h) 归一化。锚点值通常在 0..1。
         """
@@ -105,7 +105,7 @@ class InteractionEngine:
                 self.on_user_takeover(ev)
             except Exception:  # pragma: no cover
                 pass
-        # 2. owner Relationship + Memory（长期层，plan/4 §27）
+        # 2. owner Relationship + Memory（长期层，legacy-plan/4 §27）
         if self.on_meaningful_interaction and ev.type in (TouchKind.PETTING, TouchKind.POKE, TouchKind.DRAG):
             self.on_meaningful_interaction(ev)
         # 3. 广播给 Behavior / Director（Scheduler 在此消费：Needs/Life 立即效果 + 冻结快照 + worker 对话）

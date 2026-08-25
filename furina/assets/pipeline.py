@@ -1,4 +1,4 @@
-"""素材生成管线（plan/2 §十）。
+"""素材生成管线（legacy-plan/2 §十）。
 
 Base Reference → Prompt Template → Pose Spec → Image Generation →
 Consistency Check → Background Removal → Crop/Scale → Asset Metadata → Asset Library。
@@ -25,7 +25,7 @@ BASE_PROMPT = ("chibi Genshin Impact Furina, white and light-blue hair, blue top
                "cel shading only, NO gradients, NO soft painterly shading, NO dramatic lighting, crisp clean anime sprite, "
                "match the provided reference image exactly")
 
-# 生活姿态提示（plan/0：重心/行为/身体状态，避免“展示立绘感”）
+# 生活姿态提示（legacy-plan/0：重心/行为/身体状态，避免“展示立绘感”）
 POSTURE_HINT = {
     "standing": "standing naturally, relaxed weight, slight casual stance, hands at ease, NOT a rigid showcase pose",
     "sitting": "sitting with legs dangling and knees bent, torso leaning slightly forward, casual relaxed posture, weight settled",
@@ -47,7 +47,7 @@ GAZE_HINT = {
 
 
 def prompt_for(posture: str, emotion: str, gaze: str, action: str, prop: Optional[str] = None) -> str:
-    """plan/2 §23：一致性与“生活化姿态”要求放在同一条 prompt。
+    """legacy-plan/2 §23：一致性与“生活化姿态”要求放在同一条 prompt。
 
     强调自然重心/行为/视线，避免“游戏展示立绘”。用 img2img 以基座图为身份锚点。
     """
@@ -120,7 +120,7 @@ class AssetPipeline:
         out_file = self.out_dir / self._image_path(spec, variant)
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_bytes(data)
-        # 背景移除 + 裁剪（plan/2 §24 管线一步），可能改变尺寸/alpha
+        # 背景移除 + 裁剪（legacy-plan/2 §24 管线一步），可能改变尺寸/alpha
         try:
             from .postprocess import remove_background_and_crop
             remove_background_and_crop(out_file)

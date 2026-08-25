@@ -1,4 +1,4 @@
-"""Agent 工具层（plan/5 §10）。
+"""Agent 工具层（legacy-plan/5 §10）。
 
 所有工具遵循 Observe → Plan → Act → Verify → Reflect；重要操作必须 Verify（§5）。
 优先结构化，截图视觉为后备（§6）。

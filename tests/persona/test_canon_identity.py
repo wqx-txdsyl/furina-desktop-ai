@@ -20,9 +20,9 @@ from furina.persona.furina_canon import (
 )
 
 REPO = Path(__file__).resolve().parents[2]
-EVIDENCE_DOC = REPO / "docs" / "FURINA_CANON_EVIDENCE.md"
-MODEL_DOC = REPO / "docs" / "FURINA_PERSONA_MODEL.md"
-VOICE_DOC = REPO / "docs" / "FURINA_CN_VOICE_PROFILE.md"
+EVIDENCE_DOC = REPO / "docs" / "persona" / "FURINA_CANON_EVIDENCE.md"
+MODEL_DOC = REPO / "docs" / "persona" / "FURINA_PERSONA_MODEL.md"
+VOICE_DOC = REPO / "docs" / "persona" / "FURINA_CN_VOICE_PROFILE.md"
 
 
 # ================================================================ Canon Identity（>=5）

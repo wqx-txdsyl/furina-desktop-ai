@@ -1,4 +1,4 @@
-"""Action Request（plan/8 §2）。
+"""Action Request（legacy-plan/8 §2）。
 
 所有系统都不能直接控制身体，必须提交 ActionRequest 到 Director。
 """

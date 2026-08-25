@@ -1,4 +1,4 @@
-"""Director 仲裁测试（final test.md A-8 / plan/8）。"""
+"""Director 仲裁测试（FINAL_TEST_V1 (docs/archive/legacy) A-8 / legacy-plan/8）。"""
 from __future__ import annotations
 
 from furina.core import EventBus
@@ -78,7 +78,7 @@ def test_case5_sleep_woken_by_interaction():
 
 
 def test_director_is_only_resolver():
-    """各系统只能发 ActionRequest，由 Director 单一仲裁（plan/8 §3）。"""
+    """各系统只能发 ActionRequest，由 Director 单一仲裁（legacy-plan/8 §3）。"""
     bus = EventBus()
     d = Director(bus)
     d.set_executor(lambda req: None)

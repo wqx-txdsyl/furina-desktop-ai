@@ -1,4 +1,4 @@
-"""Runtime 包：把一切真正运行在 Windows 桌面上（plan/7）。"""
+"""Runtime 包：把一切真正运行在 Windows 桌面上（legacy-plan/7）。"""
 from .world import DesktopWorld, Surface, Vec2
 from .asset_manager import AssetManager
 from .furina_window import FurinaWindow

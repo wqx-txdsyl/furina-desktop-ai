@@ -1,4 +1,4 @@
-"""Agent Runtime（plan/5 §4, §25）。
+"""Agent Runtime（legacy-plan/5 §4, §25）。
 
 USER REQUEST → UNDERSTAND → CHECK PERMISSION → OBSERVE → PLAN → ACT
 → OBSERVE RESULT → VERIFY → (success/recoverable/blocked)。
@@ -33,7 +33,7 @@ class AgentRuntime:
         self.permission = permission
         self.planner = planner_factory(tools)
         self.context = AgentContext()
-        # 角色行为同步钩子（plan/5 §15），由 app 注入：如 approach/walk/report
+        # 角色行为同步钩子（legacy-plan/5 §15），由 app 注入：如 approach/walk/report
         self.on_body_sync: Optional[Callable[[str], None]] = None
         # FINAL-R1 §8.1：**显式生命周期状态**（Harness 只读此真相，不读不存在的字段）
         self.status = "IDLE"   # IDLE / RUNNING / COMPLETED_VERIFIED / FAILED / UNVERIFIED
@@ -51,7 +51,7 @@ class AgentRuntime:
         self._body("approach")           # 走向屏幕
         plan = self.planner.build_plan(user_request, task_ctx.vars)
         log.info("agent plan: goal=%s steps=%d status=%s", plan.goal, len(plan.steps), plan.status)
-        # 计划不可行（无法映射工具/缺参数）→ 如实失败，绝不假装成功（plan/5 §24）
+        # 计划不可行（无法映射工具/缺参数）→ 如实失败，绝不假装成功（legacy-plan/5 §24）
         if plan.status in ("unable", "failed"):
             reason = plan.constraints[-1] if plan.constraints else f"plan_status:{plan.status}"
             self.bus.emit(EventType.AGENT_FAILED, payload={"reason": reason}, source="agent")
@@ -62,7 +62,7 @@ class AgentRuntime:
 
         results: List[Dict[str, Any]] = []
         for i, step in enumerate(plan.steps):
-            # 未知工具 → 如实失败，绝不崩溃/假装成功（plan/5 §24）
+            # 未知工具 → 如实失败，绝不崩溃/假装成功（legacy-plan/5 §24）
             try:
                 tool = self.tools.get(step.tool)
             except Exception as e:
@@ -132,7 +132,7 @@ class AgentRuntime:
             return res.data is not None
         return True
 
-    # -------------------------------------------------- 身体同步（plan/5 §15）
+    # -------------------------------------------------- 身体同步（legacy-plan/5 §15）
     def _body(self, phase: str) -> None:
         if self.on_body_sync:
             self.on_body_sync(phase)

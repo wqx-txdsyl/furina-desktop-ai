@@ -1,4 +1,4 @@
-"""Interaction / Gesture 识别测试（plan/4，最终 test.md A-10）。
+"""Interaction / Gesture 识别测试（legacy-plan/4，FINAL_TEST_V1 (docs/archive/legacy) A-10）。
 
 覆盖：抓→摸头（且不重复补发 drag）、点击、戳、拖拽、长按、饱和度。
 """
@@ -60,7 +60,7 @@ def test_click_poke_drag_recognized():
 
 
 def test_saturation_increases_with_repeated():
-    """反复相同互动 → 饱和度上升（plan/4 §13，防无脑刷）。"""
+    """反复相同互动 → 饱和度上升（legacy-plan/4 §13，防无脑刷）。"""
     inter, bus, got = _engine()
     for _ in range(6):
         e = inter.on_pointer(time.time(), 0.5, 0.2, True, (0.0, 0.0, 1.0, 1.0))

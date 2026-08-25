@@ -1,7 +1,7 @@
 """LLM adapter 抽象接口（拔插层）。
 
 所有模型通过统一协议暴露：文本对话、结构化输出、图像输入。
-模块只依赖 ``LLMAdapter``，不依赖具体厂商（plan/8 §16 显式、可替换）。
+模块只依赖 ``LLMAdapter``，不依赖具体厂商（legacy-plan/8 §16 显式、可替换）。
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class LLMAdapter(ABC):
     @abstractmethod
     def structured(self, messages: List[LLMMessage], *, schema: Dict[str, Any],
                    temperature: Optional[float] = None) -> Dict[str, Any]:
-        """结构化输出：按 JSON Schema 约束返回 dict。禁止解析自由文本（plan/8 §8）。"""
+        """结构化输出：按 JSON Schema 约束返回 dict。禁止解析自由文本（legacy-plan/8 §8）。"""
 
     @abstractmethod
     def is_available(self) -> bool:

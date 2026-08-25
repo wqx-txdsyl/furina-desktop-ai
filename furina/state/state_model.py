@@ -1,11 +1,11 @@
-"""五维状态模型（plan/1 §13）。
+"""五维状态模型（legacy-plan/1 §13）。
 
 关键点：
 - **宏观状态(MacroState)** 是“她在做什么”，**不是情绪**（情绪不能进状态树）。
-- 情绪是连续变量，表现才是离散状态（plan/1 §9）。
-- Needs 是“推动它产生行为的内部动力”，不是状态本身（plan/1 §10）。
-- Attention 是“她现在注意谁”，是认知状态而非动画属性（plan/1 §11）。
-- Intent 是“她想做什么”（plan/1 §12）。
+- 情绪是连续变量，表现才是离散状态（legacy-plan/1 §9）。
+- Needs 是“推动它产生行为的内部动力”，不是状态本身（legacy-plan/1 §10）。
+- Attention 是“她现在注意谁”，是认知状态而非动画属性（legacy-plan/1 §11）。
+- Intent 是“她想做什么”（legacy-plan/1 §12）。
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ class MacroState(str, enum.Enum):
 # ---------------------------------------------------------------- Life
 @dataclass
 class LifeState:
-    """宏观生命状态（plan/1 §7）。"""
+    """宏观生命状态（legacy-plan/1 §7）。"""
 
     macro: MacroState = MacroState.IDLE
     # 细分活动，例如 observing_user_work / eating / reading ...
@@ -41,7 +41,7 @@ class LifeState:
 # ---------------------------------------------------------------- Emotion
 @dataclass
 class EmotionState:
-    """连续情绪变量（plan/1 §9）。
+    """连续情绪变量（legacy-plan/1 §9）。
 
     情绪本身是连续变量，表现才离散。用高频二维（valence/arousal）+ 命名标签。
     升级（Life Simulation P2）：扩展为**多维情绪模型**（确定性，不用 LLM），
@@ -81,7 +81,7 @@ class EmotionState:
 # ---------------------------------------------------------------- Needs
 @dataclass
 class NeedsState:
-    """内部动力（plan/1 §10）。"""
+    """内部动力（legacy-plan/1 §10）。"""
 
     energy: float = 80.0          # 精力
     hunger: float = 20.0          # 饥饿
@@ -114,7 +114,7 @@ class AttentionState:
     target: AttentionTarget = AttentionTarget.NONE
     subject: str = ""            # 如窗口标题 / 物体名
     gaze: str = "front"          # front/left/right/up/down/user
-    inertia: float = 0.0         # 视线惯性（plan/4 §18）
+    inertia: float = 0.0         # 视线惯性（legacy-plan/4 §18）
     delay: float = 0.0
 
 
@@ -130,10 +130,10 @@ class IntentCategory(str, enum.Enum):
 @dataclass
 class Intent:
     category: IntentCategory = IntentCategory.SELF
-    action: str = "wander"          # 受限枚举（plan/8 §9）
+    action: str = "wander"          # 受限枚举（legacy-plan/8 §9）
     priority: float = 0.0           # 0..1
     reason: str = ""
-    # 结构化输出字段（plan/8 §8）
+    # 结构化输出字段（legacy-plan/8 §8）
     emotion: str = ""
     speech: str = ""
     allowed: bool = True
@@ -165,7 +165,7 @@ class CharacterState:
     clock_hour: int = 0
     clock_minute: int = 0
 
-    # ---- 关系（plan/6 §18） ----
+    # ---- 关系（legacy-plan/6 §18） ----
     familiarity: float = 0.0
     trust: float = 0.0
     comfort: float = 0.0

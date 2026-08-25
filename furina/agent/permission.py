@@ -1,4 +1,4 @@
-"""权限系统（plan/5 §19-21）。
+"""权限系统（legacy-plan/5 §19-21）。
 
 四档：L0 只读(无需确认) / L1 低风险写入(默认允许或可设自动) /
 L2 高风险(需确认) / L3 敏感(必须确认)。
@@ -28,7 +28,7 @@ class PermissionDecision:
 class PermissionManager:
     """权限裁决 + 角色化确认钩子。
 
-    允许自动放行 L0/L1；L2/L3 走 character-confirm 回调（弹角色口吻，plan/5 §20）。
+    允许自动放行 L0/L1；L2/L3 走 character-confirm 回调（弹角色口吻，legacy-plan/5 §20）。
     """
 
     def __init__(self) -> None:

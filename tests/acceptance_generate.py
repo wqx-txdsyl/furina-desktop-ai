@@ -168,7 +168,7 @@ try:
     bus.on_any(lambda e: got.append(("any", e.type.value)))
     bus.emit(EventType.STATE_CHANGED, payload=1, source="state")
     rec("A-9", "Event Bus(schema/消费)", "PASS",
-        f"{got}；全部 13 个 plan/8 事件枚举齐全；未知 event publish 不崩",
+        f"{got}；全部 13 个 legacy-plan/8 事件枚举齐全；未知 event publish 不崩",
         "无重复消费由 on() 单次 handler 保证")
 except Exception as e:
     rec("A-9", "Event Bus", "FAIL", f"{e}")
@@ -315,7 +315,7 @@ n_nt = sum(1 for v in verdicts if v == "NOT TESTED")
 out_json = ROOT / "_acceptance_report.json"
 out_json.write_text(json.dumps(R, ensure_ascii=False, indent=2), encoding="utf-8")
 
-lines = ["# 芙宁娜桌面伙伴 —— final test.md A. 自测验收报告\n",
+lines = ["# 芙宁娜桌面伙伴 —— FINAL_TEST_V1 (docs/archive/legacy) A. 自测验收报告\n",
          f"> 自动化生成。PASS={n_pass} PARTIAL={n_part} FAIL={n_fail} NOT_TESTED={n_nt}\n"]
 for k, v in R.items():
     lines.append(f"## {k} — {v['label']}\n")

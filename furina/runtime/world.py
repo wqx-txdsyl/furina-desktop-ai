@@ -1,4 +1,4 @@
-"""桌面世界（plan/7 §3-6, §36）。
+"""桌面世界（legacy-plan/7 §3-6, §36）。
 
 角色存在于桌面坐标系 (logical pixel)，多显示器/DPI 用 logical pixel。
 世界提供边界、表面(桌面/任务栏/窗口边缘/屏幕边缘)。
@@ -42,7 +42,7 @@ class Rect:
 class DesktopWorld:
     """逻辑坐标系世界；物理像素由 Qt/DPI 换算。
 
-    坐标约定：逻辑像素。多显示器支持预留 bounds 列表（plan/7 §4）。
+    坐标约定：逻辑像素。多显示器支持预留 bounds 列表（legacy-plan/7 §4）。
     """
 
     def __init__(self, screen_w: float, screen_h: float) -> None:

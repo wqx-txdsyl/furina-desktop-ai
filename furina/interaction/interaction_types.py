@@ -1,6 +1,6 @@
-"""互动类型（plan/4 §4-6, §26）。
+"""互动类型（legacy-plan/4 §4-6, §26）。
 
-Hitbox 跟随当前素材锚点，不能写死（plan/4 §5）。
+Hitbox 跟随当前素材锚点，不能写死（legacy-plan/4 §5）。
 InteractionEvent 是核心语义单元，Behavior 只收到这个，不接收原始鼠标像素。
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ class Hitbox:
 
 @dataclass
 class InteractionEvent:
-    """用户对芙宁娜做的事，已识别为一个语义事件（plan/4 §26）。"""
+    """用户对芙宁娜做的事，已识别为一个语义事件（legacy-plan/4 §26）。"""
 
     type: TouchKind
     target: InteractionZone

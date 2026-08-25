@@ -1,9 +1,9 @@
-"""状态引擎：在 Medium Tick 更新需求、评估注意力、生成意图（plan/1, plan/3）。
+"""状态引擎：在 Medium Tick 更新需求、评估注意力、生成意图（legacy-plan/1, legacy-plan/3）。
 
-“本地规则/Utility”部分（plan/3 §15 本地环路）：
+“本地规则/Utility”部分（legacy-plan/3 §15 本地环路）：
 Needs → Attention → Evaluate Needs → Intent candidates(utility+priority) → 选一。
 真正复杂意图留给 LLM（Thought Loop）。本层**不决定行为**，只产出意图候选，
-交由 Behavior/Director 裁决（plan/8 §3）。
+交由 Behavior/Director 裁决（legacy-plan/8 §3）。
 """
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def _recharge(n, field: str, baseline: float, rate_per_sec: float, dt: float) ->
 
 
 # ---------------------------------------------------------------- 优先级
-# plan/3 §18 —— 行为优先级（常量，非枚举，避免过度抽象）
+# legacy-plan/3 §18 —— 行为优先级（常量，非枚举，避免过度抽象）
 P_CRITICAL = 0      # 生存 / Runtime
 P_USER_REQUEST = 1  # 用户明确请求
 P_IMPORTANT = 2     # 重要提醒
@@ -125,7 +125,7 @@ class IntentCandidate:
     utility: float = 0.0
 
 
-# 常见开发/办公应用 → 用户是否在工作（plan/1 §21 感知）
+# 常见开发/办公应用 → 用户是否在工作（legacy-plan/1 §21 感知）
 # Phase 13 终审 §2.4：只接受**进程可执行名**（精确/整词），绝不做短 token 子串匹配
 # （"et" 匹配 "Chrome_WidgetWin_1" 之类的类名会造成假 office/表格误判）。
 _WORK_APPS = ("code", "vscode", "winword", "excel", "powerpnt", "pycharm", "idea",
@@ -141,7 +141,7 @@ def _proc_name(app: str) -> str:
 
 
 def classify_activity(app: str, title: str = "") -> dict:
-    """把窗口进程分类为用户活动（plan/1 §21，§4 感知）。输入必须是进程名，不是窗口类名。"""
+    """把窗口进程分类为用户活动（legacy-plan/1 §21，§4 感知）。输入必须是进程名，不是窗口类名。"""
     a = _proc_name(app)
     t = (title or "").lower()
     if a in ("code", "vscode", "pycharm", "idea", "terminal", "conhost", "cmd", "powershell", "wt"):
@@ -166,7 +166,7 @@ class StateEngine:
         self.bus = bus
         self.state = CharacterState()
         self._cooldowns: Dict[str, float] = {}   # 意图 -> 下次允许时间
-        self.long_term_goal = "understand_user"  # plan/3 §23 长期目标偏置
+        self.long_term_goal = "understand_user"  # legacy-plan/3 §23 长期目标偏置
 
     # ---- 需求漂移（被动，本地，无需 LLM） ----
     def update_needs(self, dt: float, user_working: bool, user_idle: float) -> None:
@@ -220,7 +220,7 @@ class StateEngine:
         self.state.user_idle_seconds = user_idle
         self.bus.emit(EventType.NEEDS_UPDATED, source="state")
 
-    # ---- 注意力（plan/1 §11）：不是动画属性，是认知状态 ----
+    # ---- 注意力（legacy-plan/1 §11）：不是动画属性，是认知状态 ----
     def evaluate_attention(self) -> None:
         st = self.state
         att = st.attention
@@ -268,7 +268,7 @@ class StateEngine:
         if n.fatigue > 70 and n.sleepiness < 60:
             cands.append(IntentCandidate(Intent(IntentCategory.SELF, "rest", priority=P_SELF,
                                                 reason=f"疲劳{n.fatigue:.0f}"), n.fatigue * 0.8))
-        # 陪伴/搭话（social, 考虑打扰成本 plan/3 §10）
+        # 陪伴/搭话（social, 考虑打扰成本 legacy-plan/3 §10）
         # Pre-Manual §10：在场未知时**不**仅凭 social_need 产生 proactive 用户定向社交
         if n.social_need > 65 and presence_known:
             u = n.social_need
@@ -282,14 +282,14 @@ class StateEngine:
         if n.boredom > 70 and n.energy > 30:
             cands.append(IntentCandidate(Intent(IntentCategory.SELF, "wander", priority=P_SELF,
                                                 reason=f"无聊{n.boredom:.0f}"), n.boredom))
-        # 长期目标偏置（plan/3 §23）：understand_user → 更愿意观察。
+        # 长期目标偏置（legacy-plan/3 §23）：understand_user → 更愿意观察。
         # FINAL Fallback §1：observe_user 是 user-directed —— 在场未知（presence_known=False）
         # 时同样不产生（working 是 window 上下文，不是在场真相）。
         if self.long_term_goal == "understand_user" and presence_known and working:
             cands.append(IntentCandidate(Intent(IntentCategory.USER, "observe_user", priority=P_SOCIAL,
                                                 reason="长期目标:了解用户/用户在忙"), 55))
 
-        # cooldown 抑制（plan/3 §20）
+        # cooldown 抑制（legacy-plan/3 §20）
         for c in cands:
             last = self._cooldowns.get(c.intent.action, 0)
             if now < last:
@@ -321,6 +321,6 @@ class StateEngine:
 
 
 def _cooldown_for(action: str) -> float:
-    """各意图的最小冷却（plan/3 §20）。"""
+    """各意图的最小冷却（legacy-plan/3 §20）。"""
     return {"sleep": 240, "eat": 300, "rest": 90, "approach_user": 120,
             "wander": 60, "observe_user": 45}.get(action, 30)

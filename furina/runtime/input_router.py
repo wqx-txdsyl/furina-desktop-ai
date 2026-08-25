@@ -1,8 +1,8 @@
-"""输入路由（plan/4 §3, §29, plan/7 §17）。
+"""输入路由（legacy-plan/4 §3, §29, legacy-plan/7 §17）。
 
 把 Qt 鼠标事件 → InteractionEngine（识别的语义事件）。
 角色包围盒由桌面窗口提供（get_char_rect）。
-互动优先级高于自主行为（plan/4 §29）。
+互动优先级高于自主行为（legacy-plan/4 §29）。
 """
 from __future__ import annotations
 

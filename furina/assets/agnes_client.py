@@ -1,8 +1,8 @@
-"""Agnes AI 客户端 —— 资产生成（plan/2 §十 素材生成管线）。
+"""Agnes AI 客户端 —— 资产生成（legacy-plan/2 §十 素材生成管线）。
 
-基于教程：
-- gen_img_course.md → agnes-image-2.1-flash（文生图 / 图生图 / 多图合成）
-- gen_gif_course.md  → agnes-video-v2.0（文生视频 / 图生视频 / 关键帧）
+基于教程（归档于 docs/assets/generation/）：
+- IMAGE_GENERATION_GUIDE.md → agnes-image-2.1-flash（文生图 / 图生图 / 多图合成）
+- ANIMATION_GENERATION_GUIDE.md → agnes-video-v2.0（文生视频 / 图生视频 / 关键帧）
 
 当前价格 $0，可先低成本批量生成素材。
 """

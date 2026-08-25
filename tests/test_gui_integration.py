@@ -2,7 +2,7 @@
 
 验证：QApplication 创建、FurinaWindow 创建、Frame 接收、consumer 调用、
 AnimationRuntime tick 推进、present 调用、paint 发生、Qt 线程正确、无异常/崩溃。
-**只验证程序化技术链路**；视觉质量属人工验收（scripts/manual_gui_phase12.py）。
+**只验证程序化技术链路**；视觉质量属人工验收（见 docs/testing/）。
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""互动包：把用户输入翻译成“芙宁娜经历的事情”（plan/4 §34）。"""
+"""互动包：把用户输入翻译成“芙宁娜经历的事情”（legacy-plan/4 §34）。"""
 from .interaction_types import (
     Hitbox,
     HitboxShape,

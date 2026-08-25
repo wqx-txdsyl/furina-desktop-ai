@@ -243,7 +243,7 @@ def test_browser_open_and_search():
 
 
 def test_agent_no_fake_success_on_failure():
-    """Agent 失败必须如实返回 failed（不假装成功，final test.md A-14/15）。"""
+    """Agent 失败必须如实返回 failed（不假装成功，FINAL_TEST_V1 (docs/archive/legacy) A-14/15）。"""
     from furina.agent.tools.filesystem import ListDirTool
     bus = EventBus()
     tools = ToolRegistry()

@@ -2,7 +2,7 @@
 
 OpenAI 兼容端点：open.bigmodel.cn/api/paas/v4/chat/completions。
 - 图片以 ``image_url`` + data URI 传递，已验证可用。
-- 结构化输出用 ``response_format.json_schema`` 约束（plan/8 §8 禁自由文本控制）。
+- 结构化输出用 ``response_format.json_schema`` 约束（legacy-plan/8 §8 禁自由文本控制）。
 """
 from __future__ import annotations
 

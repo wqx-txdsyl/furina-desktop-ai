@@ -1,4 +1,4 @@
-"""Planner（plan/5 §4, §12, §26）。
+"""Planner（legacy-plan/5 §4, §12, §26）。
 
 Agent 遵循 Observe → Plan → Act → Verify → Reflect。
 用户请求先形成 Goal，再定 Plan，再执行；禁止“LLM 乱动”。
@@ -33,7 +33,7 @@ class AgentPlan:
 class Planner:
     """骨架：由 LLM 生成结构化计划，Runtime 逐条执行并验证。
 
-    LLM 只产 Goal/Plan，不直接调工具（plan/5 §3）。
+    LLM 只产 Goal/Plan，不直接调工具（legacy-plan/5 §3）。
     """
 
     def __init__(self, tools: ToolRegistry) -> None:
@@ -57,7 +57,7 @@ class Planner:
                           expect="分类目录存在"),
                 AgentStep(tool="fs.organize", args={"base": base_path, "dry_run": True},
                           expect="文件归类预览（先干跑，不破坏）"),
-                # 干跑通过后再真正移动（plan/5 §24：动作必须真实发生并在完成后验证，绝不假装成功）。
+                # 干跑通过后再真正移动（legacy-plan/5 §24：动作必须真实发生并在完成后验证，绝不假装成功）。
                 # 真实移动属于 L2 高风险，由权限层在用户主动触发的任务中放行。
                 AgentStep(tool="fs.organize", args={"base": base_path, "dry_run": False},
                           expect="文件已实际归类"),
@@ -78,7 +78,7 @@ class Planner:
             plan.steps = [AgentStep(tool="computer.screenshot", args={}, expect="屏幕截图")]
         else:
             # 未识别的任务：不生成会导致崩溃的伪步骤（旧版引用不存在的 computer.observe_screen）。
-            # 转为 seek 澄清/先观察屏幕，交由上层通过 LLM 理解（plan/5 §3: LLM 只产 Goal/Plan）。
+            # 转为 seek 澄清/先观察屏幕，交由上层通过 LLM 理解（legacy-plan/5 §3: LLM 只产 Goal/Plan）。
             plan.status = "unable"
             plan.constraints.append("无法将请求映射到现有工具，避免调用工具崩溃；请用户澄清或配置对应工具")
         return plan

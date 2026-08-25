@@ -1,4 +1,4 @@
-"""状态系统健壮性测试（final test.md A-6）。"""
+"""状态系统健壮性测试（FINAL_TEST_V1 (docs/archive/legacy) A-6）。"""
 from __future__ import annotations
 
 import math

@@ -1,4 +1,4 @@
-"""素材管理器（plan/7 §29-31）。
+"""素材管理器（legacy-plan/7 §29-31）。
 
 负责 load / cache / unload / preload / stream；不靠文件名猜语义。
 按语义 resolve；并为角色生成 whale-girl 式**淡 drop-shadow**（沿 alpha 剪影）。
@@ -134,7 +134,7 @@ class AssetManager:
         return QRectF(pos.x, pos.y, base_w, base_h)
 
     def set_reference_size(self, w: float, h: float) -> None:
-        """设定参考角色尺寸（默认按屏幕高度的比例，plan/7 §35）。"""
+        """设定参考角色尺寸（默认按屏幕高度的比例，legacy-plan/7 §35）。"""
         self._ref_w = w
         self._ref_h = h
 

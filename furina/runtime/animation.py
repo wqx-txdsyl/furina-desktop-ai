@@ -1,8 +1,8 @@
-"""动画控制器（plan/7 §19-23）。
+"""动画控制器（legacy-plan/7 §19-23）。
 
 - 帧序列播放：frames + fps + loop + interruptible + priority（与 AssetEntry 对齐）。
 - 跨帧过渡：两个姿态间按 t 混合（crossfade），做出“站→坐”等流动过渡。
-- 微动作叠加：呼吸轻微缩放/眨眼等作为 Idle overlay（plan/7 §25）。
+- 微动作叠加：呼吸轻微缩放/眨眼等作为 Idle overlay（legacy-plan/7 §25）。
 
 本层只管“怎么动”，不管“为何选哪些帧”（由 Behavior/State 决定）。
 """
@@ -126,7 +126,7 @@ class AnimationController:
                 return _blend(self._from_img, self._to_img, t)
             self._from_img = None
             self._to_img = None
-        # 呼吸：轻微上下缩放（微动作 overlay，plan/7 §25）
+        # 呼吸：轻微上下缩放（微动作 overlay，legacy-plan/7 §25）
         if breath != 0.0:
             return _breath(img, breath)
         return img

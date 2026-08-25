@@ -1,4 +1,4 @@
-"""Director 包：唯一仲裁层（plan/8）。"""
+"""Director 包：唯一仲裁层（legacy-plan/8）。"""
 from .action_queue import ActionRequest
 from .director import Director
 

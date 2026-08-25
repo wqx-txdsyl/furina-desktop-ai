@@ -1,8 +1,8 @@
-"""行为引擎（plan/3 §8-9, §15-19）。
+"""行为引擎（legacy-plan/3 §8-9, §15-19）。
 
 - Utility AI：对候选行为打分（不止需求，含 context/cooldown/interruption）。
 - LLM 只赐高价值决策；本地环路处理日常。
-- 行为最终通过 ActionRequest 提交 Director，本层**不直接驱动渲染**（plan/8 §3）。
+- 行为最终通过 ActionRequest 提交 Director，本层**不直接驱动渲染**（legacy-plan/8 §3）。
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from .behavior_types import BehaviorDefinition, BehaviorResult, BehaviorState
 
 log = get_logger("behavior")
 
-# plan/8 §9 —— LLM 只能在这些枚举里选
+# legacy-plan/8 §9 —— LLM 只能在这些枚举里选
 ALLOWED_INTENTS: Dict[IntentCategory, List[str]] = {
     IntentCategory.SURVIVE: ["eat", "drink", "sleep"],
     IntentCategory.INTERACT: ["greet", "talk", "play", "seek_attention"],
@@ -83,7 +83,7 @@ class BehaviorEngine:
             done = self.current
             self.complete(done)                 # 时长到，结束
             defn = self.behaviors[done]
-            # 行为链（plan/3 §22）：若定义了衔接且条件满足，直接进入，而不是重新 utility 选。
+            # 行为链（legacy-plan/3 §22）：若定义了衔接且条件满足，直接进入，而不是重新 utility 选。
             # §3.3：链目标在**转场时重查 fallback 可行性** —— 未知在场不得因 chain_if 读到
             # 旧/原始字段（user_working/user_idle）而 observe_user→approach_user。
             if (defn.chain_to and defn.chain_to in self.behaviors
@@ -107,19 +107,19 @@ class BehaviorEngine:
         base = defn.base_utility
         if defn.utility_fn:
             base += defn.utility_fn(state)
-        # 近期行为抑制（plan/3 §20）：刚刚做过的降权，避免机械重复
+        # 近期行为抑制（legacy-plan/3 §20）：刚刚做过的降权，避免机械重复
         rec = self._recent.get(defn.action)
         if rec:
             since = time.monotonic() - rec.at
             base -= max(0.0, 30.0 - since) * 0.5
             if rec.count >= 3:
                 base -= 10
-        # 打扰成本（plan/3 §10）：用户忙碌时,主动打扰类行为降权
+        # 打扰成本（legacy-plan/3 §10）：用户忙碌时,主动打扰类行为降权
         user_working = state.get("user_working", False)
         interrupting = ("talk", "play", "seek", "greet", "call", "ask")
         if user_working and any(k in defn.action.lower() for k in interrupting):
             base -= 60
-        # 记忆偏置（plan/6 §28：记忆参与行为，而非只注入 prompt）
+        # 记忆偏置（legacy-plan/6 §28：记忆参与行为，而非只注入 prompt）
         bias = state.get("memory_bias") or {}
         if bias.get("social_penalty"):
             if any(k in defn.action.lower() for k in ("talk", "play", "seek", "greet", "call", "ask", "approach")):
@@ -153,7 +153,7 @@ class BehaviorEngine:
         rec.count += 1
         self.bus.emit(EventType.BEHAVIOR_STARTED, payload={"action": action, "reason": reason},
                       source="behavior")
-        # 只发 ActionRequest，不由本层驱动渲染（plan/8 §3）
+        # 只发 ActionRequest，不由本层驱动渲染（legacy-plan/8 §3）
         self.bus.emit(EventType.ACTION_REQUEST,
                       payload={"source": "behavior", "action": action, "priority": priority,
                                "interruptible": self.behaviors[action].interruptible if action in self.behaviors else True},

@@ -1,10 +1,10 @@
-"""Director（plan/8）—— 唯一允许解决“谁拥有行动控制权”的模块。
+"""Director（legacy-plan/8）—— 唯一允许解决“谁拥有行动控制权”的模块。
 
-优先级（plan/8 §1）：
+优先级（legacy-plan/8 §1）：
 Safety/User Control > Direct User Interaction > Active Agent Task
 > Important Internal Need > Autonomous Behavior > Idle/Micro。
 
-铁律：只有 Director 能把动作路由到 Character Runtime（plan/8 §3）。
+铁律：只有 Director 能把动作路由到 Character Runtime（legacy-plan/8 §3）。
 其它模块只发 ActionRequest。
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ from .action_queue import ActionRequest
 
 log = get_logger("director")
 
-# plan/8 §1 优先级（数字越小越高）
+# legacy-plan/8 §1 优先级（数字越小越高）
 P_SAFETY = 0
 P_USER_INTERACTION = 1
 P_AGENT_TASK = 2
@@ -51,7 +51,7 @@ class Director:
         self._on_execute = fn
 
     def submit(self, req: ActionRequest) -> None:
-        # 只入队，不立即执行；真正的竞态仲裁在 drain()（plan/8 §2-3）
+        # 只入队，不立即执行；真正的竞态仲裁在 drain()（legacy-plan/8 §2-3）
         heapq.heappush(self._queue, (req.priority, _seq(), req))
 
     def cancel(self, source: str | None = None) -> None:
@@ -63,7 +63,7 @@ class Director:
     def drain(self) -> None:
         """仲裁：从队列取最高优先级请求执行。
 
-        优先级契约（数字越小越高；plan/3 §18 + Final Gate §1）：
+        优先级契约（数字越小越高；legacy-plan/3 §18 + Final Gate §1）：
           - **严格更低优先级（req.priority > current.priority）永不替换更高优先级当前动作**
             （与 interruptible 无关 —— 否则 active Agent 会被排队中的低优先级 mind 顶掉）。
           - 同优先级：保留既有语义（current.interruptible=False 时不可替换；

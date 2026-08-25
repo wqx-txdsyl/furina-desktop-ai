@@ -1,4 +1,4 @@
-"""三脑架构测试（plan/8 修正：LifeBrain 决策 / DialogueBrain 语言 / ToolAgent 双手 严格隔离）。
+"""三脑架构测试（legacy-plan/8 修正：LifeBrain 决策 / DialogueBrain 语言 / ToolAgent 双手 严格隔离）。
 
 核心回归：sleep 是**行为**不是终态 —— LifeBrain 决策必须带 next_think_in + exit_conditions，
 且可返回 continue（避免翻车），以及 LLM 不可用时能本地 fallback（A-13）。

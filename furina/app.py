@@ -2,7 +2,7 @@
 
 骨架阶段：
 - 组装各子系统与 EventBus，注册最小行为集。
-- Director 作为唯一动作仲裁（plan/8 §3）；Agent 与行为共享 BehaviorEngine。
+- Director 作为唯一动作仲裁（legacy-plan/8 §3）；Agent 与行为共享 BehaviorEngine。
 - 无真实素材时用占位图渲染，保证可运行、可看生命循环。
 """
 from __future__ import annotations
@@ -103,12 +103,12 @@ class Furina:
         for tool_cls in ALL_TOOLS:
             self.tools.register(tool_cls())  # type: ignore[arg-type]
         self.permission = PermissionManager()
-        # 用户主动在右键菜单里点的“随手帮忙”任务 → 视为用户已授权（plan/5 §20），
+        # 用户主动在右键菜单里点的“随手帮忙”任务 → 视为用户已授权（legacy-plan/5 §20），
         # 角色化确认由 confirm 回调表现（弹台词），并放行 L2/L3。
         self.permission.on_confirm = self._confirm_agent_permission
         self.agent = AgentRuntime(self.bus, self.tools, self.permission)
 
-        # 三脑架构（plan/8 修正）：LifeBrain 状态决策 + DialogueBrain 语言 + ToolAgent 双手。
+        # 三脑架构（legacy-plan/8 修正）：LifeBrain 状态决策 + DialogueBrain 语言 + ToolAgent 双手。
         # 用配置的 provider（默认 zhipu glm-4v-flash；.env 可切 openai_compat 更快模型）。
         self.life_brain = None
         self.dialogue_brain = None
@@ -141,7 +141,7 @@ class Furina:
         self.interaction.on_user_takeover = self._on_user_takeover_interaction
         self.interaction.on_meaningful_interaction = self._on_meaningful_interaction
         self.agent.on_body_sync = self._on_agent_body
-        # 互动 hitbox：由素材锚点定义（plan/4 §5），否则摸头/拖拽/点击都无法识别
+        # 互动 hitbox：由素材锚点定义（legacy-plan/4 §5），否则摸头/拖拽/点击都无法识别
         self.interaction.set_hitboxes_from_anchor(
             {"head": [0.5, 0.18], "body": [0.5, 0.52], "hand": [0.72, 0.45],
              "foot": [0.5, 0.9], "item": [0.5, 0.7]},
@@ -335,7 +335,7 @@ class Furina:
         except Exception:
             pass
 
-    # -------------------------------------------------- 互动 → 记忆/关系（plan/4 §27）
+    # -------------------------------------------------- 互动 → 记忆/关系（legacy-plan/4 §27）
     def _on_meaningful_interaction(self, ev) -> None:
         kind = ev.type.value
         # 关系：唯一写入口 = RelationshipEngine.apply(event)（§12：Relationship → RelationshipEngine owns）。
@@ -354,14 +354,14 @@ class Furina:
                 self.memory.store.save_relationship(self.relationship.state)
             except Exception:
                 pass
-        # 形成生活记忆（重要互动才记，plan/6 §9）—— 记忆引擎只负责记忆，不写关系
+        # 形成生活记忆（重要互动才记，legacy-plan/6 §9）—— 记忆引擎只负责记忆，不写关系
         if ev.count == 1 and kind in ("petting", "drag", "poke"):
             self.memory.observe(
                 f"用户对我{({'petting':'摸头','drag':'拖拽','poke':'戳'}.get(kind,'互动'))}",
                 level=MemoryLevel.EPISODIC, source=MemorySource.INTERACTION,
                 importance=0.45, context=f"互动类型={kind}")
 
-    # -------------------------------------------------- Agent → 角色身体同步（plan/5 §15）
+    # -------------------------------------------------- Agent → 角色身体同步（legacy-plan/5 §15）
     def _on_agent_body(self, phase: str) -> None:
         # Phase 13 终审 §10.5 + FINAL-R1 §3：Agent 身体/动作所有权必须经 Director
         # （source=agent, P_AGENT_TASK）。**Director 队列变更只能在 owner 线程** ——
@@ -414,7 +414,7 @@ class Furina:
             self.emotion.apply_event(EVENT_FEED, tired_hint=self._tired_hint())
         except Exception:
             pass
-        # 生活记忆（plan/6）
+        # 生活记忆（legacy-plan/6）
         self.memory.observe(f"用户喂了我{food.name}", level=MemoryLevel.EPISODIC,
                             source=MemorySource.INTERACTION, importance=0.4,
                             outcome=f"饥饿={res['hunger']} 满足={res['satisfaction']}")
@@ -689,7 +689,7 @@ class Furina:
             pass
 
     def _confirm_agent_permission(self, description: str, level) -> bool:
-        """角色化权限确认（plan/5 §20）：用户主动点的菜单任务直接放行，给出认可台词。"""
+        """角色化权限确认（legacy-plan/5 §20）：用户主动点的菜单任务直接放行，给出认可台词。"""
         log.info("agent 授权: %s (level=%s)", description, getattr(level, "name", level))
         return True
 

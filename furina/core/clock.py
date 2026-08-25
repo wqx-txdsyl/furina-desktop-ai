@@ -1,4 +1,4 @@
-"""时钟与三档 Tick（plan/7 §42）。
+"""时钟与三档 Tick（legacy-plan/7 §42）。
 
 - Fast   ~60 FPS：render / animation / input
 - Medium ~1-5s：state update / idle behavior / window awareness

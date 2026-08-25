@@ -1,4 +1,4 @@
-"""韧性测试（final test.md A-13：LLM 不可用时核心仍运行）。
+"""韧性测试（FINAL_TEST_V1 (docs/archive/legacy) A-13：LLM 不可用时核心仍运行）。
 
 当 Zhipu 不可用时：芙宁娜仍能构造、状态系统仍工作、配置无 key 不崩。
 （真实桌宠在无 LLM 时仍能走/睡/被摸/观察 —— 本测试验证“大脑缺失不拖垮核心”。）
@@ -63,7 +63,7 @@ def test_behavior_is_llm_independent():
 
 
 def test_memory_hint_influences_behavior():
-    """plan/6 §28：记忆偏置真实参与行为选择，而非只喂 LLM prompt。"""
+    """legacy-plan/6 §28：记忆偏置真实参与行为选择，而非只喂 LLM prompt。"""
     bus = EventBus()
     from furina.behavior import BehaviorEngine, BehaviorDefinition
     from furina.state import StateEngine
