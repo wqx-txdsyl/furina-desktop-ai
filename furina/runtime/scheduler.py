@@ -273,8 +273,25 @@ class Scheduler:
         DIRECT > AGENT_REPORT > INTERACTION_REACTION > AMBIENT 的优先顺序在启动侧实现：
           - `start_autonomous_dialogue`（AMBIENT 唯一入口）在 direct active / grace 内被节流；
           - 高价值 IMPORTANT ambient 台词 defer 到 grace 结束后再做 freshness 检查（stale drop）。
+
+        R2.2.1 FINAL §3（owner boundary）：EventBus 是同步总线，DIRECT_TURN_TRACE 可能由
+        DirectDialogueQueue **worker 线程** emit。`_direct_active` / `_direct_grace_until` /
+        `_ambient_deferred` 是 Scheduler runtime state，**只允许 owner 线程修改**（不依赖 GIL）：
+          - handler 在 owner 线程 → 立即 apply；
+          - handler 在非 owner（worker emit）→ 经 RuntimeDispatcher.submit 提交回 owner drain。
         """
-        p = ev.payload or {}
+        # 记录原始 payload 供 owner 侧 apply（不引用可能被复用的可变 ev 对象）
+        payload = dict((ev.payload or {}) or {})
+        if self.dispatcher.is_owner():
+            self._apply_direct_trace(payload)
+        else:
+            try:
+                self.dispatcher.submit(lambda p=payload: self._apply_direct_trace(p))
+            except Exception:
+                pass
+
+    def _apply_direct_trace(self, p: dict) -> None:
+        """owner 线程：根据 DIRECT_TURN_TRACE 相位更新前台所有权状态（唯一修改点）。"""
         phase = p.get("phase", "")
         status = p.get("status", "")
         now = time.monotonic()

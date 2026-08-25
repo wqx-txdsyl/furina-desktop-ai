@@ -179,4 +179,4 @@
 | vulnerability fragmentation（脆弱句法） | FUR-037, FUR-039 |
 | sincerity = longer sentences + ellipsis（真诚句法） | FUR-016, FUR-018 |
 
-> 共 47 个 evidence units（FUR-001 ~ FUR-047）。
+> 共 56 个 evidence units（FUR-001 ~ FUR-056）。

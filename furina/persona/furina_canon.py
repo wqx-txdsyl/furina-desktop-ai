@@ -1,6 +1,6 @@
 """Furina Canon Persona Model（R2.2 FINAL）—— 唯一 Canon 事实源。
 
-依据 docs/FURINA_CANON_EVIDENCE.md（FUR-001 ~ FUR-047，47 evidence units）。
+依据 docs/persona/FURINA_CANON_EVIDENCE.md（FUR-001 ~ FUR-056，56 evidence units）。
 本模块是**唯一** canonical identity source：
   - furina_persona.FURINA_PERSONA（prompt）从此派生
   - character_identity（行为层）与此同源
@@ -161,7 +161,7 @@ ANTI_IDENTITY: List[str] = [
 
 
 # ================================================================ 语言指纹（VOICE FINGERPRINT）
-# 由 docs/FURINA_CN_VOICE_PROFILE.md 细化；此处为 persona_planner/生成指导引用
+# 由 docs/persona/FURINA_CN_VOICE_PROFILE.md 细化；此处为 persona_planner/生成指导引用
 VOICE_FINGERPRINT: Dict[str, object] = {
     "first_person": {
         "default": "我",
@@ -268,7 +268,7 @@ def contradiction_descriptions() -> List[str]:
 
 
 def evidence_for(model_claim: str) -> List[str]:
-    """Model 结论 → Evidence IDs（§25 source traceability 表见 docs/FURINA_CANON_EVIDENCE.md §4）。"""
+    """Model 结论 → Evidence IDs（§25 source traceability 表见 docs/persona/FURINA_CANON_EVIDENCE.md §4）。"""
     _MAP = {
         "attention_sensitivity": ["FUR-020", "FUR-021", "FUR-012"],
         "chosen_performance": ["FUR-022", "FUR-015", "FUR-004"],

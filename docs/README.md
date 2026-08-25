@@ -17,9 +17,14 @@
 
 ## persona/ — 人格（当前有效）
 
-- `FURINA_CANON_EVIDENCE.md` — Canon 证据矩阵（56 units，唯一 Canon 事实源）
-- `FURINA_PERSONA_MODEL.md` — Canon Persona Model
+- `FURINA_CANON_EVIDENCE.md` — Canon evidence / provenance（56 units，角色行为的原作证据来源）
+- `FURINA_PERSONA_MODEL.md` — Canon Persona Model（从 Evidence 派生的统一模型）
 - `FURINA_CN_VOICE_PROFILE.md` — 中文语音画像
+
+> 区分：
+> - `docs/persona/FURINA_CANON_EVIDENCE.md` = **Canon evidence / provenance**（"证据来自哪里"）
+> - `furina/persona/furina_canon.py` = **Runtime canonical truth source**（"运行时唯一事实源"，
+>   从 Evidence 派生；所有 Runtime Persona 必须依赖它，不得维护平行 identity truth）
 
 > 旧 `FURINA_CHARACTER_EVIDENCE.md` 已被 Canon Evidence 完全 supersede，归档于 `archive/legacy/`。
 

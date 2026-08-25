@@ -304,6 +304,8 @@ def _make_sched():
     bus = EventBus()
     se = StateEngine(bus)
     sched = Scheduler(bus, se, None, None, None, None, None)
+    # 测试线程 = owner：bus.emit(DIRECT_TURN_TRACE) 在 owner 线程立即 apply
+    sched.dispatcher.bind_owner()
     return sched, bus
 
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import List
 
@@ -36,6 +37,10 @@ from furina.runtime import (
 from furina.runtime.scheduler import Scheduler
 
 log = get_logger("app")
+
+# R2.2.1 FINAL §2：recent activity 可视为"刚才"的最大秒数（明确常量，随快照冻结）。
+# 超过此秒数的 recent activity 不得用"刚才"表述（stale → 不冒充）。
+RECENT_ACTIVITY_FRESHNESS_SECONDS = 120.0
 
 
 class Furina:
@@ -592,11 +597,13 @@ class Furina:
                                   turn_id=turn.turn_id)
 
     def _grounded_fact_recovery(self, snapshot, res: dict, turn_id=None) -> str:
-        """R2.2 FINAL §17：LLM 两次因 ungrounded_activity 失败 → authoritative facts 恢复。
+        """R2.2 FINAL §17 + R2.2.1 FINAL §2：LLM 两次因 ungrounded_activity 失败 → authoritative facts 恢复。
 
         只有 hard_issues 明确含 ungrounded_activity（且无其它 HARD）时才恢复：
-        - 用 snapshot 的权威 current activity + 事实描述构造确定性回复（persona wrapping 简短）；
-        - 其余 HARD 失败仍走 SYSTEM_STATUS（不绕过 validator 的其它约束）。
+        - **只读 snapshot**（owner ingress 冻结的 current/recent activity truth），**不读 live runtime state**；
+        - "现在/正在/你在干嘛" → current activity，文案表达"现在"（如"嗯，我现在在看书。"）；
+        - "刚才/刚刚" → ingress 冻结的 recent activity，文案表达"刚才"；recent 超过 freshness
+          秒数（快照携带）→ 不得冒充"刚才"（回落 current 或返回空）。
         返回恢复文本或 ""（不恢复）。
         """
         try:
@@ -609,21 +616,32 @@ class Furina:
             if not activity:
                 return ""
             user_text = str(getattr(snapshot, "user_text", "") or "")
-            # R2.2.1 §8：问"刚才…"优先 recent activity；问"现在…"优先 current。
-            # recent activity 是确定性事实（_on_execute 在 activity 变化时记录），不来自旧 Memory。
-            asks_recent = any(k in user_text for k in ("刚才", "之前", "刚刚", "刚才有", "刚才在做"))
+            # R2.2.1 FINAL：问"刚才…"优先 snapshot.recent_activity；问"现在…"优先 current。
+            asks_recent = any(k in user_text for k in ("刚才", "刚刚", "刚才有", "刚才在做"))
             asks_current = any(k in user_text for k in ("现在", "正在", "你现在", "在干嘛", "在做", "现在在"))
-            recent_act = getattr(self, "_recent_activity", "") or ""
+            now = time.monotonic()
+            recent_act = str(getattr(snapshot, "recent_activity", "") or "")
+            recent_fin = float(getattr(snapshot, "recent_activity_finished_at", 0.0) or 0.0)
+            freshness = float(getattr(snapshot, "recent_activity_freshness", 0.0) or 0.0)
+            recent_fresh = bool(recent_act and recent_fin > 0 and (now - recent_fin) <= freshness)
             picked = activity
-            if asks_recent and recent_act and recent_act != activity:
+            temporal = "现在"
+            if asks_recent and recent_act and recent_act != activity and recent_fresh:
                 picked = recent_act
+                temporal = "刚才"
+            elif asks_recent:
+                # 用户问"刚才"但 recent 缺失/过期 → 回落 current（stale 不冒充"刚才"）
+                picked = activity
+                temporal = "刚才"
             # authoritative activity → 事实描述（确定性，不依赖 LLM）
             desc = self._activity_fact_line(picked)
             if not desc:
                 return ""
-            if asks_recent:
+            if asks_recent and temporal == "刚才":
                 return f"嗯，刚才我在{desc}。怎么，你好奇呀？"
-            return f"嗯，我刚才在{desc}。怎么，你好奇呀？"
+            if asks_current:
+                return f"嗯，我现在在{desc}。怎么，你好奇呀？"
+            return f"嗯，我现在在{desc}。怎么，你好奇呀？"
         except Exception:
             return ""
 
@@ -768,6 +786,12 @@ class Furina:
             pass
         idle = float(getattr(self.state.state, "user_idle_seconds", 0.0))
         agent_state, agent_task = self._agent_facts()   # R2.1 P1-1
+        # R2.2.1 FINAL §2：owner ingress 冻结 current/recent activity truth（worker 只读快照，不读 live）。
+        # recent_activity / recent_activity_finished_at 来自 owner 在 activity 变化时维护的确定性事实；
+        # recent_activity_freshness 是本轮冻结的"刚才"语义最大秒数（常量，随快照携带）。
+        recent_act = str(getattr(self, "_recent_activity", "") or "")
+        recent_fin = float(getattr(self, "_recent_activity_finished_at", 0.0) or 0.0)
+        from furina.app import RECENT_ACTIVITY_FRESHNESS_SECONDS
         return DialogueContextSnapshot(
             intent="talk",
             emotion_label=self.state.state.emotion.label,
@@ -786,6 +810,9 @@ class Furina:
             world=freeze_flat(wf),
             relationship=freeze_flat(rel),
             memory_interp=freeze_flat(minterp),
+            recent_activity=recent_act,
+            recent_activity_finished_at=recent_fin,
+            recent_activity_freshness=RECENT_ACTIVITY_FRESHNESS_SECONDS,
         )
 
     def _brain_worker(self, text: str, snapshot=None, deadline: float | None = None,

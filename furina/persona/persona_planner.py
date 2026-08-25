@@ -266,21 +266,14 @@ def plan_for(user_text: str, *, mode_hint: str = "", emotion: str = "calm",
     if f.seriousness >= 0.8 and trust >= 0.55 and plan.mode in ("CASUAL", "PLAYFUL"):
         plan.mode = "SINCERE"
     # ============ R2.2.1 §1：关系只作 modifier，不 blanket override ============
-    # 受关系影响的社交 mode 集合（低 trust / 高 annoyance 允许压成 GUARDED）
+    # R2.2.1 FINAL：低 trust（如新用户 trust=0）**不得**把 COMMENT/ANSWER/PRAISE 压成 GUARDED；
+    # 低 trust 只降 intimacy / vulnerability disclosure / autobiography explicitness（下方关系微调段）。
+    # 只有语义本身适合保留距离的 act（CHALLENGE/ABSENCE/ATTENTION_PROBE）在低 trust 下保持 GUARDED；
+    # high annoyance 防御语义保留（高烦可压社交 mode 为 GUARDED）。
     _REL_AFFECTED = {"CASUAL", "PLAYFUL", "PROUD", "TEASE", "PERFORMATIVE"}
-    # 关系保护 mode：不得被关系覆盖（serious/listening/quiet/confide/RESPONSIBLE/self）
-    _REL_PROTECTED = {"SINCERE", "RESPONSIBLE", "VULNERABLE", "GUARDED"}
     if plan.mode in _REL_AFFECTED:
         if annoyance >= 0.6:
             plan.mode = "GUARDED"
-        elif trust < 0.25:
-            # 低信任不无条件 GUARDED：仅当该 act 的语义适合保留距离时才压；
-            # 普通闲聊（COMMENT/ANSWER）低信任 → GUARDED（新用户保持分寸）
-            if f.act in ("CHALLENGE", "ABSENCE", "ATTENTION_PROBE") or f.act in ("COMMENT", "ANSWER", "PRAISE"):
-                plan.mode = "GUARDED"
-            # PLAYFUL/TEASE 在低信任下也可保留（玩闹不需要信任）
-            elif plan.mode == "PROUD":
-                plan.mode = "GUARDED" if f.act == "PRAISE" else plan.mode
     # correction 保护：即使上面误改，correction 恒 SINCERE
     if f.correction:
         plan.mode = "SINCERE"

@@ -28,7 +28,7 @@ tests/               pytest 测试套件
 furina/
 ├─ app.py              应用总装（Director executor / 生产入口）
 ├─ dialogue_brain.py   三脑：语言（DialogueBrain）
-├─ scheduler.py        运行时调度器
+├─ runtime/scheduler.py 运行时调度器（furina/runtime/scheduler.py）
 ├─ brain.py            LifeBrain 决策脑
 ├─ life_brain.py       生命决策
 ├─ feeding.py          喂食系统
@@ -49,7 +49,7 @@ furina/
 └─ world_perception.py 世界感知
 ```
 
-> 禁止为"目录漂亮"移动 production modules。`app.py` / `dialogue_brain.py` / `scheduler.py`
+> 禁止为"目录漂亮"移动 production modules。`app.py` / `dialogue_brain.py` / `runtime/scheduler.py`
 > 等重构在各自独立 Phase 处理，不在此次整理范围。
 
 ## docs/（唯一索引：docs/README.md）

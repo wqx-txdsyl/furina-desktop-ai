@@ -34,6 +34,10 @@ class DialogueContextSnapshot:
     memory_interp: Tuple[Tuple[str, Any], ...] = ()    # 浅拷贝 dict 副本
     ambient_recent: Tuple[str, ...] = ()
     agent_facts: Tuple[Tuple[str, Any], ...] = ()      # R2.2.1 §5：AgentReportFacts 确定性事实核心（flat）
+    # R2.2.1 FINAL §2：current/recent activity snapshot truth（owner ingress 冻结，worker 只读）
+    recent_activity: str = ""                          # ingress 时刻冻结的 recent activity（上一 current）
+    recent_activity_finished_at: float = 0.0           # ingress 时刻冻结的 recent 结束时间（monotonic）
+    recent_activity_freshness: float = 0.0             # recent 可视为"刚才"的最大秒数（快照携带常量）
 
     # -------------------------------------------------- 只读辅助（副本 → 调用参数）
     def memories_list(self) -> List[str]:

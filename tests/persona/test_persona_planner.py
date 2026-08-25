@@ -261,23 +261,19 @@ def _real_new_user_factors():
 
 
 def test_r221_real_relationship_initial_not_all_guarded():
-    """R2.2.1 §1：真实 RelationshipState 初值不得让所有 act 都 GUARDED。"""
+    """R2.2.1 FINAL：真实初值（trust=0）逐案断言——普通/回答/夸奖不得被低 trust 压 GUARDED。"""
     t, fam, ann = _real_new_user_factors()
     assert t == 0.0 and fam == 0.0 and ann == 0.0, "新用户关系初值应为 0"
-    cases = {
-        "correction": "我是认真问的，没人看你你会怎么办？",
-        "confide": "我担心自己做的没人喜欢。",
-        "quiet": "不用说什么特别的。",
-        "action": "帮我打开记事本。",
-        "tease": "怎么，不服？",
-    }
-    modes = {label: plan_for(text, trust=t, familiarity=fam, annoyance=ann).mode
-             for label, text in cases.items()}
-    assert modes["correction"] == "SINCERE", f"correction 不得被低 trust 覆盖: {modes}"
-    assert modes["confide"] == "SINCERE", f"confide 不得被低 trust 覆盖: {modes}"
-    assert modes["quiet"] == "SINCERE", f"quiet 不得被低 trust 覆盖: {modes}"
-    assert modes["action"] == "RESPONSIBLE", f"RESPONSIBLE 不得被关系覆盖: {modes}"
-    assert len({m for m in modes.values()}) >= 3, f"mode 应多样化: {modes}"
+    # 逐案（弃用 distinct_modes>=3 证明）
+    assert plan_for("今天有点热", trust=t, familiarity=fam, annoyance=ann).mode == "CASUAL"
+    assert plan_for("你在干嘛？", trust=t, familiarity=fam, annoyance=ann).mode == "CASUAL"
+    assert plan_for("你今天很好看", trust=t, familiarity=fam, annoyance=ann).mode == "PROUD"
+    assert plan_for("你是不是在装？", trust=t, familiarity=fam, annoyance=ann).mode == "GUARDED"
+    assert plan_for("我是认真问的，没人看你你会怎么办？",
+                    trust=t, familiarity=fam, annoyance=ann).mode == "SINCERE"
+    assert plan_for("帮我打开记事本", trust=t, familiarity=fam, annoyance=ann).mode == "RESPONSIBLE"
+    # 低 trust 仍降 intimacy
+    assert plan_for("今天有点热", trust=t, familiarity=fam, annoyance=ann).intimacy_level <= 0.35
 
 
 def test_r221_low_trust_reduces_intimacy_vuln_auto():

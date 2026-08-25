@@ -1,6 +1,6 @@
 # Furina Canon Persona Model（R2.2 FINAL）
 
-> 从 docs/FURINA_CANON_EVIDENCE.md（FUR-001 ~ FUR-056）派生的统一人格模型。
+> 从 docs/persona/FURINA_CANON_EVIDENCE.md（FUR-001 ~ FUR-056）派生的统一人格模型。
 > 所有 Runtime Persona 必须从此 Model 派生，禁止模块间出现多个互相不同的 identity truth。
 > 每个重大结论标注 Evidence IDs（§25 source traceability）。
 
