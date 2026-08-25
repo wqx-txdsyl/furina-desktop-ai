@@ -34,7 +34,7 @@ TERMINAL_STATUSES = ("REPLIED", "FAILED", "CANCELLED")
 
 
 class DirectTurn:
-    """单个直接回合的可观测记录（bounded 保留）。"""
+    """单个直接回合的可观测记录（terminal 历史 bounded 保留；活跃 turn 绝不丢弃）。"""
 
     def __init__(self, turn_id: int, ingress_seq: Optional[int], user_text: str,
                  channel: str = "DIRECT_USER_TURN") -> None:
@@ -46,6 +46,7 @@ class DirectTurn:
         self.failure_reason: str = ""
         self.latency_ms: float = 0.0
         self.created_at = time.time()
+        self.deadline: float = 0.0      # R1.1-3：本 turn 总预算截止（worker 开工时设定）
 
     def to_dict(self) -> dict:
         return {
@@ -61,7 +62,15 @@ class DirectTurn:
 
 
 class DirectDialogueQueue:
-    """专用直接对话串行队列（单 worker FIFO 消费；owner 线程 submit 立即返回）。"""
+    """专用直接对话串行队列（单 worker FIFO 消费；owner 线程 submit 立即返回）。
+
+    R1.1-3：`timeout` = **整个 Direct turn 的总生命周期预算**（不是单次生成超时）——
+    由 worker 在开工时为 turn 设 `deadline = now + timeout`，processor 把它传给
+    DialogueBrain（attempt + retry 共享同一 deadline，不重置）。
+    R1.1-2：`keep_outcomes` 只限制 **terminal 历史** 的保留条数；
+    QUEUED/GENERATING 的活跃 turn 永远保留（否则 worker 取到 None 会丢消息并造成
+    direct seq 永久缺口）。
+    """
 
     def __init__(self, bus=None, timeout: float = 150.0,
                  keep_outcomes: int = 100) -> None:
@@ -105,7 +114,7 @@ class DirectDialogueQueue:
             turn = DirectTurn(turn_id, ingress_seq, user_text)
             self._turns[turn_id] = turn
             self._order.append(turn_id)
-            self._trim()
+            self._trim_locked()
         self._trace(turn, "DIRECT_INGRESS")
         self._trace(turn, "QUEUED")
         self._ensure_started()
@@ -123,7 +132,9 @@ class DirectDialogueQueue:
             with self._lock:
                 turn = self._turns.get(turn_id)
             if turn is None:
-                continue
+                continue   # R1.1-2：活跃 turn 永不 trim → 此分支实际不可达（防御）
+            # R1.1-3：**开工时**设定本 turn 总预算 deadline（attempt+retry 共享）
+            turn.deadline = time.monotonic() + self.timeout
             t0 = time.perf_counter()
             self._set_status(turn, "GENERATING")
             self._trace(turn, "GENERATION_STARTED")
@@ -158,10 +169,26 @@ class DirectDialogueQueue:
             turn.latency_ms = latency_ms
         self._trace(turn, status, latency_ms=latency_ms, failure_reason=reason)
 
-    def _trim(self) -> None:
-        while len(self._order) > self._keep:
-            old = self._order.pop(0)
-            self._turns.pop(old, None)
+    def _trim_locked(self) -> None:
+        """R1.1-2：只清理 **terminal** 历史观测；QUEUED/GENERATING 活跃 turn 绝不删除。
+
+        单 worker 串行消费 → 终态按入队顺序形成前缀；从最旧开始移除超出 keep_outcomes
+        的 terminal 记录，遇到活跃 turn（或已删除）立即停止。keep_outcomes 只限
+        terminal history 条数，不影响活跃 turn（否则 worker 取到 None → 丢消息 +
+        direct seq 永久缺口）。
+        """
+        if len(self._order) <= self._keep:
+            return
+        removed = 0
+        while removed < len(self._order) and len(self._order) - removed > self._keep:
+            tid = self._order[removed]
+            t = self._turns.get(tid)
+            if t is None or t.status not in TERMINAL_STATUSES:
+                break
+            self._turns.pop(tid, None)
+            removed += 1
+        if removed:
+            self._order = self._order[removed:]
 
     # -------------------------------------------------- 可观测性
     def _trace(self, turn: DirectTurn, phase: str, latency_ms: float = 0.0,

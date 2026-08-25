@@ -50,6 +50,9 @@ class AppConfig:
     llm: LLMProfile = field(default_factory=LLMProfile)
     # 调试
     debug: bool = False
+    # R1.1-3：直接对话回合的总体验预算（用户可见：从入队到 terminal 的整回合上限，
+    # attempt+retry 共享同一 deadline）。独立于 LLM transport timeout（LifeBrain/Agent 不变）。
+    direct_turn_timeout: float = 30.0
     # 素材 / 数据目录
     assets_dir: Path = field(default_factory=Path)
     data_dir: Path = field(default_factory=Path)

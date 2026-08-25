@@ -86,17 +86,19 @@ def _snap(text, seq=None, channel="DIRECT_USER_TURN"):
 
 
 def _make_queue(brain, bus=None, timeout=5.0) -> DirectDialogueQueue:
-    """真实 DirectDialogueQueue + 生产等价处理器（say → BRAIN_SPOKE/终态信息）。"""
+    """真实 DirectDialogueQueue + 生产等价处理器（say_with_result → BRAIN_SPOKE/终态信息）。"""
     q = DirectDialogueQueue(bus=bus, timeout=timeout)
 
     def proc(turn, snap):
-        speech = brain.say(**snap.say_kwargs(), timeout=q.timeout)
+        # R1.1-3：processor 用 turn.deadline（总预算，attempt+retry 共享）
+        res = brain.say_with_result(**snap.say_kwargs(), deadline=turn.deadline)
+        speech = res.get("speech")
         if speech:
             if bus is not None:
                 bus.emit(EventType.BRAIN_SPOKE,
                          payload=type("_O", (), {"speech": speech})(), source="app")
             return {"speech": speech, "failure_reason": ""}
-        reason = str(getattr(brain, "last_failure_reason", "") or "") or "generation_empty"
+        reason = str(res.get("failure_reason") or "") or "generation_empty"
         return {"speech": None, "failure_reason": reason}
 
     q.set_processor(proc)

@@ -46,14 +46,48 @@ _NONHUMAN_USER_FRAMING = [
     r"你们人类",
     r"你们(这些|那些)?人类",
 ]
-# B3：stationary 活动却声称在探索/走动（activity grounding 硬约束；PERSONA-L5/L6）
-# 只拘"探索类走动声称"，不要求出现活动名（PERSONA-L6：合法自然描述应通过）。
-_STATIONARY_ACTIVITIES = {
-    "read", "rest", "sleep", "nap", "eat", "drink", "think", "daydream",
-    "tidy", "stretch", "idle", "groom", "write", "sit",
+# R1.1-5：通用 activity-claim ontology —— 确定性行为语义组 + 互斥当前行为声称检测。
+# 不要求回复出现活动名（PERSONA-L6）；但如果回复**明确声称**了与真实 activity 互斥的
+# **当前**行为 → ungrounded_activity。只拘"正在/在/边"式的现在时声称，不误伤愿望/回忆。
+_ACTIVITY_GROUP = {
+    "read": "READ", "study": "READ", "book": "READ",
+    "eat": "EAT", "food": "EAT",
+    "drink": "DRINK", "tea": "DRINK",
+    "rest": "REST", "nap": "REST",
+    "sleep": "SLEEP",
+    "explore": "EXPLORE", "wander": "EXPLORE", "walk": "EXPLORE",
+    "look_around": "EXPLORE", "stroll": "EXPLORE",
+    "play": "PLAY", "play_with_object": "PLAY",
+    "work": "WORK", "assist_user": "WORK", "offer_help": "WORK",
+    "help": "WORK", "agent": "WORK",
+    "think": "THINK", "daydream": "THINK",
+    "idle": "IDLE",
 }
-_EXPLORE_CLAIM = re.compile(
-    r"探索|探索新事物|四处(看看|逛逛|走动|溜达)|到处(逛逛|走走|溜达|看看)|闲逛|正在?散步|出门逛逛|出去走走")
+_CLAIM_PATTERNS = {
+    "READ": [re.compile(r"正?在看书|正?在读(书|文|小说|论文)|在看(书|小说|文档|论文)")],
+    "EAT": [re.compile(r"正?在吃(饭|蛋糕|东西|零食|苹果)|在吃东西|边吃")],
+    "DRINK": [re.compile(r"正?在喝(茶|水|咖啡|饮料)|在喝茶")],
+    "REST": [re.compile(r"正(在|躺)着(休息|发呆)|在休息|躺(着|下)|打个盹|发会儿呆|休息一下")],
+    "SLEEP": [re.compile(r"正?在睡(觉)?|睡着了|在睡觉|闭目养神")],
+    "EXPLORE": [re.compile(r"正?在探索|探索新事物|四处(看看|逛逛|走动|溜达)|到处(逛逛|走走|溜达|看看)|闲逛|在散步|出门走走")],
+    "PLAY": [re.compile(r"正?在玩|在玩(游戏|玩具)?|玩(一下|会儿)")],
+    "WORK": [re.compile(r"正?在(帮|处理|整理|写|干活)|在帮|在整理|在写(代码|报告|文档|东西)|处理(文件|任务)")],
+    "THINK": [re.compile(r"正?在想(事情|什么)?|在想|思考")],
+    "IDLE": [re.compile(r"什么也没做|无所事事")],
+}
+# 与"当前在做 X"**互斥**的其它行为声称（保守：只列明显互斥的现在时组合）
+_CONFLICTS = {
+    "READ": {"EXPLORE", "EAT", "DRINK", "SLEEP", "PLAY", "WORK"},
+    "EAT": {"READ", "EXPLORE", "REST", "SLEEP", "WORK", "THINK"},
+    "DRINK": {"READ", "EXPLORE", "SLEEP", "PLAY", "WORK"},
+    "REST": {"EXPLORE", "EAT", "DRINK", "WORK", "PLAY"},
+    "SLEEP": {"READ", "EAT", "DRINK", "EXPLORE", "PLAY", "WORK", "THINK", "REST"},
+    "EXPLORE": {"READ", "REST", "SLEEP", "EAT", "DRINK", "THINK", "WORK", "IDLE"},
+    "PLAY": {"READ", "SLEEP", "REST", "EAT", "DRINK", "WORK"},
+    "WORK": {"READ", "EXPLORE", "REST", "SLEEP", "PLAY", "THINK", "IDLE"},
+    "THINK": {"EXPLORE", "SLEEP", "WORK", "EAT", "DRINK"},
+    "IDLE": {"EXPLORE", "WORK"},
+}
 # 舞台动作描写（§35 禁止）
 _STAGE_DIRECTION = [r"\*.*?\*", r"（.*?(叹气|笑|移|叉腰|眨眼|低头|沉默|看)）", r"\[.*?\]"]
 # 历史 lore 泄漏（§19 普通场景禁）
@@ -112,6 +146,8 @@ class DialogueValidator:
         self._stage = [re.compile(p) for p in _STAGE_DIRECTION]
         self._lore = [re.compile(p) for p in _LORE_LEAK]
         self._god = [re.compile(p) for p in _GOD_REF]
+        # R1.1-5：activity-claim ontology（每个语义组一组现在时声称 pattern）
+        self._claims = {g: [re.compile(p) for p in pats] for g, pats in _CLAIM_PATTERNS.items()}
 
     @staticmethod
     def _opening_marker(s: str) -> str:
@@ -142,9 +178,19 @@ class DialogueValidator:
         for p in self._nonhuman:
             if p.search(s):
                 r.valid = False; r.issues.append("nonhuman_user_framing"); break
-        # B3：stationary 活动却声称在探索/走动（semantic grounding，非 exact substring）
-        if activity in _STATIONARY_ACTIVITIES and _EXPLORE_CLAIM.search(s):
-            r.valid = False; r.issues.append("ungrounded_activity")
+        # B3/R1.1-5：activity grounding 通用矛盾检查（语义组 ontology，非单一特例）
+        # 不要求出现活动名；只拘"明确声称了与真实 activity 互斥的当前行为"。
+        grp = _ACTIVITY_GROUP.get(activity or "")
+        if grp is not None and grp in _CONFLICTS:
+            for claimed_group, pats in self._claims.items():
+                if claimed_group == grp:
+                    continue          # 声称与自己同组 → 一致，合法
+                if claimed_group not in _CONFLICTS[grp]:
+                    continue          # 非互斥 → 不误伤
+                if any(p.search(s) for p in pats):
+                    r.valid = False
+                    r.issues.append("ungrounded_activity")
+                    break
         # B3：同一显著开场词连续塌缩（"哎呀"×3）—— 允许一次，禁止模板化
         if recent_surface:
             cur = self._opening_marker(s)

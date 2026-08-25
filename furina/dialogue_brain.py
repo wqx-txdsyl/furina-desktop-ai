@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from furina.core import get_logger
@@ -111,19 +112,6 @@ class DialogueBrain:
             self._ambient_done_seq = seq
             self._ambient_fifo_cond.notify_all()
 
-    # -------------------------------------------------- H1 §5：turn FIFO 门（ticket/Condition）
-    def _gate_wait(self, seq: int) -> None:
-        """进入生成前等待：必须等到所有前序 turn（seq-1）完成。"""
-        with self._fifo_cond:
-            while seq != self._last_done_seq + 1:
-                self._fifo_cond.wait(timeout=1.0)
-
-    def _gate_release(self, seq: int) -> None:
-        """本 turn 完成（含失败/沉默/校验失败）→ 放行下一个 turn。"""
-        with self._fifo_cond:
-            self._last_done_seq = seq
-            self._fifo_cond.notify_all()
-
     # -------------------------------------------------- FINAL-R1 §4.1：显式 FIFO 入口
     def _next_seq(self) -> int:
         with self._ingress_lock:
@@ -223,8 +211,61 @@ class DialogueBrain:
             presence_known: bool = True,   # Pre-Manual §8：接受 canonical 在场（快照携带）
             channel: str = "DIRECT_USER_TURN",
             ingress_seq: Optional[int] = None,
-            timeout: Optional[float] = None) -> Optional[str]:
+            timeout: Optional[float] = None,
+            deadline: Optional[float] = None) -> Optional[str]:
         """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
+
+        R1.1-6：公开 consumer API 保持不变（返回 speech 或 None）；
+        需要逐调用失败原因请用 `say_with_result()`（内部 result API）。
+        R1.1-3：`deadline`（monotonic 绝对时刻）= **整个 turn 的总预算**（attempt+retry 共享）；
+        `timeout` = 单次生成的上界（向后兼容）；两者都未给 → 默认 self._timeout。
+        """
+        return self._say_dispatch(intent=intent, emotion=emotion, user_text=user_text,
+                                  context=context, memories=memories, world=world,
+                                  activity=activity, relationship=relationship,
+                                  memory_interp=memory_interp, user_initiated=user_initiated,
+                                  task_mode=task_mode, solitude=solitude, user_present=user_present,
+                                  presence_known=presence_known, channel=channel,
+                                  ingress_seq=ingress_seq, timeout=timeout,
+                                  deadline=deadline)["speech"]
+
+    def say_with_result(self, *, intent: str = "", emotion: str = "", user_text: str = "",
+                        context: Optional[str] = "", memories: Optional[List[str]] = None,
+                        world: Optional[dict] = None, activity: str = "",
+                        relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
+                        user_initiated: bool = False, task_mode: bool = False,
+                        solitude: bool = False, user_present: bool = True,
+                        presence_known: bool = True,
+                        channel: str = "DIRECT_USER_TURN",
+                        ingress_seq: Optional[int] = None,
+                        timeout: Optional[float] = None,
+                        deadline: Optional[float] = None) -> dict:
+        """内部 result API（R1.1-6）：返回 {"speech", "failure_reason", "validation_issues"}。
+
+        每个调用返回**自己回合**的失败原因（per-call result），不依赖可能被并发 ambient
+        回合改写的共享 last_failure_reason/last_validation_failure（后者保留为诊断/兼容）。
+        """
+        return self._say_dispatch(intent=intent, emotion=emotion, user_text=user_text,
+                                  context=context, memories=memories, world=world,
+                                  activity=activity, relationship=relationship,
+                                  memory_interp=memory_interp, user_initiated=user_initiated,
+                                  task_mode=task_mode, solitude=solitude, user_present=user_present,
+                                  presence_known=presence_known, channel=channel,
+                                  ingress_seq=ingress_seq, timeout=timeout,
+                                  deadline=deadline)
+
+    def _say_dispatch(self, *, intent: str = "", emotion: str = "", user_text: str = "",
+                      context: Optional[str] = "", memories: Optional[List[str]] = None,
+                      world: Optional[dict] = None, activity: str = "",
+                      relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
+                      user_initiated: bool = False, task_mode: bool = False,
+                      solitude: bool = False, user_present: bool = True,
+                      presence_known: bool = True,
+                      channel: str = "DIRECT_USER_TURN",
+                      ingress_seq: Optional[int] = None,
+                      timeout: Optional[float] = None,
+                      deadline: Optional[float] = None) -> dict:
+        """B1/R1.1-3 lane 分发：direct 与 ambient 独立序号 + 独立门；总预算 deadline 传递。
 
         B1（评审基线 0402e7f）**通道分 lane**：
           - DIRECT_USER_TURN：direct lane（owner 入口 reserve_turn → 严格 ingress FIFO；
@@ -233,21 +274,23 @@ class DialogueBrain:
           - AMBIENT_AUTONOMOUS / FEED_REACTION / INTERACTION_REACTION / AGENT_REPORT：
             **独立 ambient lane**（独立序号 + 独立门）—— 慢/挂起的 ambient 回合
             **永不占用 direct 序号、永不阻塞 direct lane**；ambient 可被节流/丢弃。
-        B1 有界生命周期：timeout（默认 self._timeout，测试可注入小值）内完成生成；
-        任何失败（LLM 不可用/异常/超时/空输出/双重校验失败/god gate 抑制）都释放本回合并推进 FIFO。
+        R1.1-3：deadline 是**整个 turn**（attempt + 至多一次 retry）共享的总预算，
+        validator/retry 不重置预算；任何失败都释放本回合并推进 FIFO。
         """
         eff_timeout = timeout if timeout is not None else self._timeout
         if channel == "DIRECT_USER_TURN":
             seq = ingress_seq if ingress_seq is not None else self._next_seq()
             self._gate_wait(seq)            # direct 门 —— 前序 direct turn 完成前不进入生成
             try:
-                return self._say_impl(intent=intent, emotion=emotion, user_text=user_text,
-                                      context=context, memories=memories, world=world,
-                                      activity=activity, relationship=relationship,
-                                      memory_interp=memory_interp, user_initiated=user_initiated,
-                                      task_mode=task_mode, solitude=solitude, user_present=user_present,
-                                      presence_known=presence_known, channel=channel, _seq=seq,
-                                      _lane="direct", timeout=eff_timeout)
+                speech, reason, issues = self._say_impl(
+                    intent=intent, emotion=emotion, user_text=user_text,
+                    context=context, memories=memories, world=world,
+                    activity=activity, relationship=relationship,
+                    memory_interp=memory_interp, user_initiated=user_initiated,
+                    task_mode=task_mode, solitude=solitude, user_present=user_present,
+                    presence_known=presence_known, channel=channel, _seq=seq,
+                    _lane="direct", timeout=eff_timeout, deadline=deadline)
+                return {"speech": speech, "failure_reason": reason, "validation_issues": issues}
             finally:
                 # 无论成功/沉默/校验失败，本回合槽位（2s-1, 2s）必须推进，
                 # 否则后续 direct 回合会死锁等待不存在的 seq（幂等：已消费的槽自动跳过）。
@@ -259,13 +302,15 @@ class DialogueBrain:
         aseq = self._ambient_next_seq()
         self._ambient_gate_wait(aseq)
         try:
-            return self._say_impl(intent=intent, emotion=emotion, user_text=user_text,
-                                  context=context, memories=memories, world=world,
-                                  activity=activity, relationship=relationship,
-                                  memory_interp=memory_interp, user_initiated=user_initiated,
-                                  task_mode=task_mode, solitude=solitude, user_present=user_present,
-                                  presence_known=presence_known, channel=channel, _aseq=aseq,
-                                  _lane="ambient", timeout=eff_timeout)
+            speech, reason, issues = self._say_impl(
+                intent=intent, emotion=emotion, user_text=user_text,
+                context=context, memories=memories, world=world,
+                activity=activity, relationship=relationship,
+                memory_interp=memory_interp, user_initiated=user_initiated,
+                task_mode=task_mode, solitude=solitude, user_present=user_present,
+                presence_known=presence_known, channel=channel, _aseq=aseq,
+                _lane="ambient", timeout=eff_timeout, deadline=deadline)
+            return {"speech": speech, "failure_reason": reason, "validation_issues": issues}
         finally:
             self._ambient_gate_release(aseq)
 
@@ -278,15 +323,17 @@ class DialogueBrain:
                   presence_known: bool = True,
                   channel: str = "DIRECT_USER_TURN", _seq: Optional[int] = None,
                   _aseq: Optional[int] = None, _lane: str = "direct",
-                  timeout: Optional[float] = None) -> Optional[str]:
-        """say() 的实现体（由 lane 入口包裹；_seq/_aseq 为 lane 序号）。
+                  timeout: Optional[float] = None,
+                  deadline: Optional[float] = None) -> tuple:
+        """say() 的实现体（由 lane 入口包裹）→ (speech, failure_reason, validation_issues)。
 
         B1（评审基线 0402e7f）三阶段：
           A. 锁内确定性准备（appraise / act 路由 / god 校准 / examples / prompt / 暂存 user）
           B. **无锁**有界 LLM 生成 + 确定性校验 + 至多一次 retry（带校验反馈）
           C. 锁内确定性收尾（god gate / 表面语言跟踪 / 历史成对提交）
         LLM 调用**不持 _say_lock** —— ambient 回合慢/挂起时，direct 回合无需等锁即可生成；
-        每个回合的生成都有界（adapter timeout + 可选 per-turn timeout），失败必释放本回合。
+        R1.1-3：`deadline` = 本 turn 总预算（attempt + retry 共享，不重置）；
+        R1.1-6：失败原因**随本调用返回**（per-call result），共享 last_failure_reason 仅诊断。
         """
         # ================= Phase A：确定性表达准备（锁内，快） =================
         with self._say_lock:
@@ -300,7 +347,7 @@ class DialogueBrain:
                 recent_dialogue=self._recent_acts)
             # 2) Should Speak? —— Silence 是正式行为（§5）
             if not app.should_speak:
-                return None
+                return (None, "should_speak_false", [])
             # Phase 13C §19-20：用户发起的对话用确定性 act 路由覆盖
             if user_text:
                 app.dialogue_act = self.classify_act(user_text)
@@ -322,21 +369,21 @@ class DialogueBrain:
             prompt += "\n" + self.god_gate.prompt_advice(god_cal)
 
         # ================= Phase B：有界 LLM 生成 + 确定性校验（**无锁**） =================
-        speech, gen_reason = self._generate_bounded(prompt, timeout)
+        speech, gen_reason = self._generate_bounded(prompt, timeout, deadline)
         if not speech:
             self.last_failure_reason = gen_reason or "generation_empty"
-            return None   # 沉默优先于 Generic fallback（§39）
+            return (None, self.last_failure_reason, [])   # 沉默优先于 Generic fallback（§39）
         # 5) Deterministic Validation（§38）—— **invalid 绝不原样显示**
         v = self.validator.validate(speech, should_speak=True,
                                     example_phrases=[ex["speech"] for ex in examples],
                                     activity=activity, context=app.mode.lower(),
                                     recent_surface=list(self._recent_surfaced[-3:]))
         if not v.valid:
-            # 有界恢复：至多再生成一次（确定性校验反馈 → retry 知道哪里错了）
+            # 有界恢复：至多再生成一次（**同一 deadline，不重置预算**；确定性校验反馈）
             feedback = v.describe()
             retry, retry_reason = self._generate_bounded(
                 prompt + f"\n（上一版未通过人格校验：{feedback}。请重写，禁止上述问题，保持角色口吻。）",
-                timeout)
+                timeout, deadline)
             if retry:
                 v2 = self.validator.validate(retry, should_speak=True,
                                              example_phrases=[ex["speech"] for ex in examples],
@@ -349,11 +396,11 @@ class DialogueBrain:
                     # 仍 invalid → 不泄漏 invalid 角色输出；暴露可观察失败路径（调用方转 SYSTEM_STATUS）
                     self.last_validation_failure = list(v2.issues)
                     self.last_failure_reason = "validation_twice_invalid"
-                    return None
+                    return (None, "validation_twice_invalid", list(v2.issues))
             else:
                 self.last_validation_failure = list(v.issues)
                 self.last_failure_reason = retry_reason or "validation_retry_empty"
-                return None
+                return (None, self.last_failure_reason, list(v.issues))
 
         # ================= Phase C：确定性收尾（锁内，快） =================
         with self._say_lock:
@@ -364,14 +411,14 @@ class DialogueBrain:
             if gated is None:
                 self.god_gate.note_spoke_god(speech)
                 self.last_failure_reason = "god_gate_suppressed"
-                return None
+                return (None, "god_gate_suppressed", [])
             speech = gated
             # 6) 短期重复控制（§40）：**用户发起的直接对话必须收到回应**；
             #    重复控制只影响自主发言节奏，不影响给用户的回应。
             self._recent_acts.append(app.dialogue_act)
             self._recent_acts = self._recent_acts[-3:]
             if not user_initiated and len(self._recent_acts) >= 3 and len(set(self._recent_acts)) == 1:
-                return None
+                return (None, "repeated_act_suppressed", [])
             # B3：direct **已展示**回复 → 表面语言跟踪（repetitive-opening guard 用）
             if channel == "DIRECT_USER_TURN":
                 self._recent_surfaced.append(speech)
@@ -391,7 +438,7 @@ class DialogueBrain:
                 if speech:
                     self.push_ambient(channel, speech)
             self._pending_direct_user = None
-        return speech
+        return (speech, "", [])
 
     # -------------------------------------------------- B1：有界生成（adapter timeout + per-turn timeout）
     def _generate(self, p: str) -> tuple:
@@ -410,14 +457,23 @@ class DialogueBrain:
             log.warning("DialogueBrain 失败: %s", e)
             return "", "generation_exception"
 
-    def _generate_bounded(self, prompt: str, timeout: Optional[float]) -> tuple:
+    def _generate_bounded(self, prompt: str, timeout: Optional[float],
+                          deadline: Optional[float] = None) -> tuple:
         """有界生成 → (speech, failure_reason)。
 
-        timeout 未设 → 直接调 adapter（adapter 自带 httpx 有界超时）。
-        timeout 设置 → 生成跑在独立 daemon 线程，join(timeout)；超时按 generation_timeout
-        失败并继续后续回合（挂起线程不再碰任何共享状态，只跑纯 _generate）。
+        R1.1-3：`deadline`（monotonic 绝对时刻）= **整个 turn 的总预算**（attempt+retry 共享）。
+        每次生成取 `remaining = deadline - now`；remaining<=0 立即 generation_timeout；
+        retry/validator **不重置预算**。`timeout` = 单次生成上界（向后兼容），
+        与 remaining 取较小者。两者都未设 → 直接调 adapter（adapter 自带 httpx 有界超时）。
+        超时后挂起线程不再碰任何共享状态（只跑纯 _generate）。
         """
-        if timeout is None or timeout <= 0:
+        eff = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "", "generation_timeout"
+            eff = remaining if eff is None else min(eff, remaining)
+        if eff is None or eff <= 0:
             return self._generate(prompt)
         out: Dict[str, tuple] = {}
 
@@ -427,9 +483,9 @@ class DialogueBrain:
         import threading
         t = threading.Thread(target=_run, daemon=True, name="dialogue-llm")
         t.start()
-        t.join(timeout)
+        t.join(eff)
         if t.is_alive():
-            log.warning("DialogueBrain 生成超时(%.1fs)，本回合按失败处理", timeout)
+            log.warning("DialogueBrain 生成超时(%.1fs)，本回合按失败处理", eff)
             return "", "generation_timeout"
         return out.get("r", ("", "generation_exception"))
 

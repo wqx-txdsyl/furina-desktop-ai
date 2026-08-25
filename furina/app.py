@@ -539,9 +539,10 @@ class Furina:
             pass
         # 3. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
         snap = self._freeze_direct_snapshot(text, ingress_seq=ingress_seq)
-        # 4. B1：入队专用直接对话串行队列（owner 立即返回）
-        if db is not None:
-            self._direct_dialogue_queue().submit(snap, ingress_seq=ingress_seq, user_text=text)
+        # 4. R1.1-1：**无论 dialogue_brain 是否为 None**，都必须产生 DirectTurn + 可观察终态。
+        #    db=None → worker 立即 FAILED(reason=dialogue_brain_unavailable) + SYSTEM_STATUS，
+        #    绝不让用户消息静默消失；db 恢复后下一条消息正常回复。
+        self._direct_dialogue_queue().submit(snap, ingress_seq=ingress_seq, user_text=text)
 
     # -------------------------------------------------- B1：DirectDialogueQueue（专用直接 lane）
     def _direct_dialogue_queue(self):
@@ -556,20 +557,27 @@ class Furina:
         return q
 
     def _direct_turn_timeout(self) -> float:
-        """B1：直接回合生成超时 = LLM adapter profile.timeout + 30s 余量（有界，可测试注入）。"""
+        """R1.1-3：直接对话回合的总体验预算（独立配置 direct_turn_timeout，默认 30s）。
+
+        这是**用户可见**的总上限（attempt+retry 共享 deadline），不再是 transport
+        timeout + 余量；LLM transport 有界性由 adapter 的 profile.timeout 负责，
+        LifeBrain/Agent 的 timeout 语义不变。
+        """
         try:
-            db = getattr(self, "dialogue_brain", None)
-            llm = getattr(db, "llm", None)
-            profile = getattr(llm, "profile", None)
-            if profile is not None and float(getattr(profile, "timeout", 0) or 0) > 0:
-                return float(profile.timeout) + 30.0
+            cfg = getattr(self, "cfg", None)
+            v = float(getattr(cfg, "direct_turn_timeout", 0.0) or 0.0)
+            if v > 0:
+                return v
         except Exception:
             pass
-        return 150.0
+        return 30.0
 
     def _direct_job(self, turn, snapshot) -> dict:
-        """DirectDialogueQueue 处理器（worker 线程）：真实生产链 → 终态信息（speech/failure_reason）。"""
-        return self._brain_worker(snapshot.user_text, snapshot)
+        """DirectDialogueQueue 处理器（worker 线程）：真实生产链 → 终态信息（speech/failure_reason）。
+
+        R1.1-3：传 `deadline=turn.deadline`（本 turn 总预算，attempt+retry 共享）。
+        """
+        return self._brain_worker(snapshot.user_text, snapshot, deadline=turn.deadline)
 
     def _system_status_failure(self) -> None:
         """B1：直接回合无法产生角色回复 → 可观察 SYSTEM_STATUS（非 Furina 台词，不进 Persona history）。"""
@@ -667,30 +675,37 @@ class Furina:
             memory_interp=freeze_flat(minterp),
         )
 
-    def _brain_worker(self, text: str, snapshot=None) -> dict:
+    def _brain_worker(self, text: str, snapshot=None, deadline: float | None = None) -> dict:
         """用户直接对话 → DialogueBrain（worker 线程：只读**冻结快照**，不读 live 状态）。
 
         FINAL-R1 §3 + H1 §10：域变更（文本语义/关系/情绪）由 owner 在 submit_user_message 完成；
         owner 冻结 DialogueContextSnapshot；本 worker 只调 say(快照)。对话后记忆提交经 dispatcher 回 owner。
-        B1（评审基线 0402e7f）：返回 {"speech": ..., "failure_reason": ...} 供 DirectDialogueQueue
-        记录终态；**任何**无法产生角色回复的失败（LLM 不可用/异常/超时/空输出/双重校验失败/
-        god gate 抑制/worker 异常）→ 可观察 SYSTEM_STATUS（不是 Furina 台词，不进 Persona history）。
+        B1/R1.1：返回 {"speech": ..., "failure_reason": ...} 供 DirectDialogueQueue 记录终态；
+        **任何**无法产生角色回复的情况（dialogue_brain=None / LLM 不可用 / 异常 / 超时 /
+        空输出 / 双重校验失败 / god gate 抑制 / worker 异常）→ 可观察 SYSTEM_STATUS
+        （不是 Furina 台词，不进 Persona history）。
+        R1.1-6：failure_reason 来自 **本调用** 的 say_with_result（per-call result），
+        不依赖可能被并发 ambient 改写的共享 last_failure_reason。
+        R1.1-3：deadline = 本 turn 总预算（attempt+retry 共享）。
         """
         out = {"speech": None, "failure_reason": ""}
-        if not self.dialogue_brain:
+        db = getattr(self, "dialogue_brain", None)
+        if not db:
+            # R1.1-1：dialogue_brain=None 也必须产生可观察终态 + SYSTEM_STATUS（不静默丢消息）
             out["failure_reason"] = "dialogue_brain_unavailable"
+            self._system_status_failure()
             return out
         log.info("avatar conversation: %s", text)
         if snapshot is None:
             # 兼容旧直调（非生产路径）：worker 内冻结（生产一律经 submit_user_message 在 owner 冻结）
             snapshot = self._freeze_direct_snapshot(text)
         try:
-            speech = self.dialogue_brain.say(**snapshot.say_kwargs(),
-                                             timeout=self._direct_turn_timeout())
+            res = db.say_with_result(**snapshot.say_kwargs(), deadline=deadline)
+            speech = res.get("speech")
+            reason = str(res.get("failure_reason") or "")
         except Exception as e:
             # worker 异常兜底：回合不得遗留 pending（终态 FAILED/CANCELLED + SYSTEM_STATUS）
             try:
-                db = getattr(self, "dialogue_brain", None)
                 if db is not None:
                     db.last_failure_reason = f"worker_exception:{type(e).__name__}"
             except Exception:
@@ -706,16 +721,7 @@ class Furina:
             out["speech"] = speech
             out["failure_reason"] = ""
         else:
-            # B1：所有失败模式 → 可观察 SYSTEM_STATUS + 明确 failure_reason
-            reason = ""
-            try:
-                db = getattr(self, "dialogue_brain", None)
-                if db is not None:
-                    reason = str(getattr(db, "last_failure_reason", "") or "")
-                    if not reason and getattr(db, "last_validation_failure", None):
-                        reason = "validation_twice_invalid"
-            except Exception:
-                pass
+            # R1.1-1/B1：所有失败模式 → 可观察 SYSTEM_STATUS + 明确 failure_reason
             out["failure_reason"] = reason or "generation_empty"
             self._system_status_failure()
         # C-R1.3.2：记忆候选观察放对话后；**记忆写入是域变更** → dispatcher 回 owner 执行
