@@ -109,10 +109,44 @@ _ISSUE_FEEDBACK = {
     "over_exclamation": "感叹号过多，语气自然一些",
     "example_copy": "不要照抄语气范例的句子",
     "activity_contradiction": "行为与活动不符",
+    "interaction_contradiction": "互动事实不符（对方是正面触碰，不得说成被戳/被袭击）",
+    "explicit_user_constraint_violation": "用户明确要求了回答格式/选项，必须严格照做（如'只能回答会或者不会'）",
+    "recent_repetition": "与刚才说过的内容几乎一样，换一种说法",
+    "generic_self_analysis": "不要用'乐观/爱交流/完美主义'这类模板化自我描述，说具体、属于你的东西",
     "possible_lore_leak": "普通闲聊不要自动提五百年/水神往事",
     "god_overuse": "'本神'用得太多，收着点",
     "god_overuse_ordinary": "普通情境不要端'本神'架子",
 }
+
+
+# R2.1 P0-3：issue severity —— HARD（不可展示：身份/事实/结构）vs SOFT（仅风格质量）。
+# “一句话不够漂亮”不得变成系统错误/沉默；HARD 才会失败 DirectTurn。
+_HARD_ISSUES = frozenset({
+    "empty_when_should_speak", "too_long", "generic_assistant_identity",
+    "nonhuman_user_framing", "ungrounded_activity", "activity_contradiction",
+    "stage_direction", "example_copy", "interaction_contradiction",
+    "explicit_user_constraint_violation",
+})
+
+# R2.1 P1-2：interaction 事实 grounding —— petting（正面触碰）回复不得声称被戳/被袭
+_ATTACK_CLAIM = re.compile(r"偷袭|袭击|戳我|掐我|抓我|咬我|打我|捅我")
+# R2.1 P1-6：generic interview self-analysis（模板化自我描述，非具体芙宁娜）
+_GENERIC_SELF_ANALYSIS = [
+    r"最大的优点就是(能够)?(保持)?(一颗)?乐观(的)?心态",
+    r"善于(与人)?(交流|倾听|沟通)",
+    r"最大的缺点(就)?是(有时候|总是|确实)?太(过于)?(追求)?完美",
+    r"追求完美主义",
+]
+
+# R2.1 P1-1：production activities 覆盖（talk/idle/approach/agent_* 等）
+_ACTIVITY_GROUP.update({
+    "talk": "TALK", "chat": "TALK", "conversation": "TALK",
+    "approach_user": "SOCIAL", "greet": "SOCIAL", "invite_user": "SOCIAL",
+    "agent_planning": "WORK", "agent_work": "WORK", "agent_report": "WORK",
+    "assist": "WORK", "helping": "WORK",
+})
+_CONFLICTS["TALK"] = {"WORK", "EXPLORE", "SLEEP", "EAT", "DRINK"}
+_CONFLICTS["SOCIAL"] = {"WORK", "SLEEP", "EXPLORE", "EAT", "DRINK"}
 
 
 @dataclass
@@ -121,14 +155,22 @@ class ValidationResult:
     issues: List[str] = field(default_factory=list)
     god_reference_count: int = 0
     god_overuse_ordinary: bool = False   # 普通情境 god 自指过度（§6-7）
+    # R2.1 P0-3：severity 分类（HARD 失败 DirectTurn；SOFT 只记录/retry 质量）
+    hard_issues: List[str] = field(default_factory=list)
+    soft_issues: List[str] = field(default_factory=list)
+
+    def _classify(self) -> None:
+        self.hard_issues = [i for i in self.issues if i in _HARD_ISSUES]
+        self.soft_issues = [i for i in self.issues if i not in _HARD_ISSUES]
 
     def as_dict(self) -> dict:
         return {"valid": self.valid, "issues": self.issues,
+                "hard_issues": self.hard_issues, "soft_issues": self.soft_issues,
                 "god_reference_count": self.god_reference_count,
                 "god_overuse_ordinary": self.god_overuse_ordinary}
 
     def describe(self) -> str:
-        """B3：可解释反馈（retry 生成器知道**哪里错了**，而非只有 invalid=True）。"""
+        """B3/R2.1：可解释反馈（retry 生成器知道**哪里错了**，而非只有 invalid=True）。"""
         return "；".join(_ISSUE_FEEDBACK.get(i, i) for i in self.issues[:3])
 
 
@@ -146,6 +188,7 @@ class DialogueValidator:
         self._stage = [re.compile(p) for p in _STAGE_DIRECTION]
         self._lore = [re.compile(p) for p in _LORE_LEAK]
         self._god = [re.compile(p) for p in _GOD_REF]
+        self._generic_self = [re.compile(p) for p in _GENERIC_SELF_ANALYSIS]
         # R1.1-5：activity-claim ontology（每个语义组一组现在时声称 pattern）
         self._claims = {g: [re.compile(p) for p in pats] for g, pats in _CLAIM_PATTERNS.items()}
 
@@ -158,12 +201,15 @@ class DialogueValidator:
     def validate(self, speech: str, *, should_speak: bool = True,
                  length_cap: int = 120, example_phrases: Optional[List[str]] = None,
                  activity: str = "", context: str = "casual",
-                 recent_surface: Optional[List[str]] = None) -> ValidationResult:
+                 recent_surface: Optional[List[str]] = None,
+                 interaction: str = "",
+                 constraint: Optional[tuple] = None) -> ValidationResult:
         r = ValidationResult()
         s = (speech or "").strip()
         if should_speak and not s:
             r.valid = False; r.issues.append("empty_when_should_speak")
         if not s or not should_speak:
+            r._classify()
             return r
         if len(s) > length_cap:
             r.valid = False; r.issues.append("too_long")
@@ -191,12 +237,24 @@ class DialogueValidator:
                     r.valid = False
                     r.issues.append("ungrounded_activity")
                     break
+        # R2.1 P1-2：interaction 事实 grounding（petting=正面触碰；不得声称被戳/被袭）
+        if interaction == "petting" and _ATTACK_CLAIM.search(s):
+            r.valid = False; r.issues.append("interaction_contradiction")
+        # R2.1 P1-5：用户显式格式/回答约束（优先级高于 persona style）
+        if constraint:
+            norm = re.sub(r"[\s，。！？,.!?～~、：:；;\"'“”‘’]", "", s)
+            if norm not in constraint:
+                r.valid = False; r.issues.append("explicit_user_constraint_violation")
         # B3：同一显著开场词连续塌缩（"哎呀"×3）—— 允许一次，禁止模板化
         if recent_surface:
             cur = self._opening_marker(s)
             prev = [self._opening_marker(x) for x in recent_surface[-3:]]
             if len(cur) >= 2 and prev.count(cur) >= 2:
                 r.valid = False; r.issues.append("repetitive_opening")
+            # R2.1 P1-6：近期逐字重复（P21 逐字重复 P19 属 context failure）
+            if any(self._normalize(s) and self._normalize(s) == self._normalize(x)
+                   for x in recent_surface[-4:]):
+                r.valid = False; r.issues.append("recent_repetition")
         for p in self._stage:
             if p.search(s):
                 r.valid = False; r.issues.append("stage_direction"); break
@@ -213,6 +271,9 @@ class DialogueValidator:
         # 活动矛盾（§26）
         if activity == "offer_help" and not any(w in s for w in ("帮", "我来", "搭把", "交给")):
             r.issues.append("activity_contradiction")
+        # R2.1 P1-6：generic interview self-analysis（模板化自我描述）
+        if any(p.search(s) for p in self._generic_self):
+            r.valid = False; r.issues.append("generic_self_analysis")
         # lore 泄漏（§19）
         if any(p.search(s) for p in self._lore):
             r.issues.append("possible_lore_leak")
@@ -229,4 +290,9 @@ class DialogueValidator:
                 r.god_overuse_ordinary = True
                 if gc >= 2:
                     r.valid = False; r.issues.append("god_overuse_ordinary")
+        r._classify()
         return r
+
+    @staticmethod
+    def _normalize(s: str) -> str:
+        return re.sub(r"[\s，。！？,.!?～~、：:；;\"'“”‘’]", "", (s or ""))

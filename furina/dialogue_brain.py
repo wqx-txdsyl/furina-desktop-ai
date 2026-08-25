@@ -212,7 +212,10 @@ class DialogueBrain:
             channel: str = "DIRECT_USER_TURN",
             ingress_seq: Optional[int] = None,
             timeout: Optional[float] = None,
-            deadline: Optional[float] = None) -> Optional[str]:
+            deadline: Optional[float] = None,
+            interaction: str = "",         # R2.1 P1-2：互动事实 kind（petting/poke/drag/click）
+            agent_state: str = "",         # R2.1 P1-1：当前 Agent 生命周期状态
+            agent_task: str = "") -> Optional[str]:
         """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
 
         R1.1-6：公开 consumer API 保持不变（返回 speech 或 None）；
@@ -227,7 +230,8 @@ class DialogueBrain:
                                   task_mode=task_mode, solitude=solitude, user_present=user_present,
                                   presence_known=presence_known, channel=channel,
                                   ingress_seq=ingress_seq, timeout=timeout,
-                                  deadline=deadline)["speech"]
+                                  deadline=deadline, interaction=interaction,
+                                  agent_state=agent_state, agent_task=agent_task)["speech"]
 
     def say_with_result(self, *, intent: str = "", emotion: str = "", user_text: str = "",
                         context: Optional[str] = "", memories: Optional[List[str]] = None,
@@ -239,8 +243,12 @@ class DialogueBrain:
                         channel: str = "DIRECT_USER_TURN",
                         ingress_seq: Optional[int] = None,
                         timeout: Optional[float] = None,
-                        deadline: Optional[float] = None) -> dict:
-        """内部 result API（R1.1-6）：返回 {"speech", "failure_reason", "validation_issues"}。
+                        deadline: Optional[float] = None,
+                        interaction: str = "",
+                        agent_state: str = "",
+                        agent_task: str = "") -> dict:
+        """内部 result API（R1.1-6/R2.1 P0-3）：返回 {"speech","failure_reason",
+        "validation_issues","hard_issues","soft_issues"}。
 
         每个调用返回**自己回合**的失败原因（per-call result），不依赖可能被并发 ambient
         回合改写的共享 last_failure_reason/last_validation_failure（后者保留为诊断/兼容）。
@@ -252,7 +260,8 @@ class DialogueBrain:
                                   task_mode=task_mode, solitude=solitude, user_present=user_present,
                                   presence_known=presence_known, channel=channel,
                                   ingress_seq=ingress_seq, timeout=timeout,
-                                  deadline=deadline)
+                                  deadline=deadline, interaction=interaction,
+                                  agent_state=agent_state, agent_task=agent_task)
 
     def _say_dispatch(self, *, intent: str = "", emotion: str = "", user_text: str = "",
                       context: Optional[str] = "", memories: Optional[List[str]] = None,
@@ -264,7 +273,10 @@ class DialogueBrain:
                       channel: str = "DIRECT_USER_TURN",
                       ingress_seq: Optional[int] = None,
                       timeout: Optional[float] = None,
-                      deadline: Optional[float] = None) -> dict:
+                      deadline: Optional[float] = None,
+                      interaction: str = "",
+                      agent_state: str = "",
+                      agent_task: str = "") -> dict:
         """B1/R1.1-3 lane 分发：direct 与 ambient 独立序号 + 独立门；总预算 deadline 传递。
 
         B1/R1.2-2（评审基线）**通道分 lane**：
@@ -283,15 +295,17 @@ class DialogueBrain:
             seq = ingress_seq if ingress_seq is not None else self._next_seq()
             self._gate_wait(seq)            # direct 门 —— 前序 direct turn 完成前不进入生成
             try:
-                speech, reason, issues = self._say_impl(
+                speech, reason, issues, hard, soft = self._say_impl(
                     intent=intent, emotion=emotion, user_text=user_text,
                     context=context, memories=memories, world=world,
                     activity=activity, relationship=relationship,
                     memory_interp=memory_interp, user_initiated=user_initiated,
                     task_mode=task_mode, solitude=solitude, user_present=user_present,
                     presence_known=presence_known, channel=channel, _seq=seq,
-                    _lane="direct", timeout=eff_timeout, deadline=deadline)
-                return {"speech": speech, "failure_reason": reason, "validation_issues": issues}
+                    _lane="direct", timeout=eff_timeout, deadline=deadline,
+                    interaction=interaction, agent_state=agent_state, agent_task=agent_task)
+                return {"speech": speech, "failure_reason": reason,
+                        "validation_issues": issues, "hard_issues": hard, "soft_issues": soft}
             finally:
                 # 无论成功/沉默/校验失败，本回合槽位（2s-1, 2s）必须推进，
                 # 否则后续 direct 回合会死锁等待不存在的 seq（幂等：已消费的槽自动跳过）。
@@ -303,15 +317,17 @@ class DialogueBrain:
         aseq = self._ambient_next_seq()
         self._ambient_gate_wait(aseq)
         try:
-            speech, reason, issues = self._say_impl(
+            speech, reason, issues, hard, soft = self._say_impl(
                 intent=intent, emotion=emotion, user_text=user_text,
                 context=context, memories=memories, world=world,
                 activity=activity, relationship=relationship,
                 memory_interp=memory_interp, user_initiated=user_initiated,
                 task_mode=task_mode, solitude=solitude, user_present=user_present,
                 presence_known=presence_known, channel=channel, _aseq=aseq,
-                _lane="ambient", timeout=eff_timeout, deadline=deadline)
-            return {"speech": speech, "failure_reason": reason, "validation_issues": issues}
+                _lane="ambient", timeout=eff_timeout, deadline=deadline,
+                interaction=interaction, agent_state=agent_state, agent_task=agent_task)
+            return {"speech": speech, "failure_reason": reason,
+                    "validation_issues": issues, "hard_issues": hard, "soft_issues": soft}
         finally:
             self._ambient_gate_release(aseq)
 
@@ -325,8 +341,12 @@ class DialogueBrain:
                   channel: str = "DIRECT_USER_TURN", _seq: Optional[int] = None,
                   _aseq: Optional[int] = None, _lane: str = "direct",
                   timeout: Optional[float] = None,
-                  deadline: Optional[float] = None) -> tuple:
-        """say() 的实现体（由 lane 入口包裹）→ (speech, failure_reason, validation_issues)。
+                  deadline: Optional[float] = None,
+                  interaction: str = "",
+                  agent_state: str = "",
+                  agent_task: str = "") -> tuple:
+        """say() 的实现体（由 lane 入口包裹）→
+        (speech, failure_reason, validation_issues, hard_issues, soft_issues)。
 
         B1（评审基线 0402e7f）三阶段：
           A. 锁内确定性准备（appraise / act 路由 / god 校准 / examples / prompt / 暂存 user）
@@ -335,8 +355,11 @@ class DialogueBrain:
         LLM 调用**不持 _say_lock** —— ambient 回合慢/挂起时，direct 回合无需等锁即可生成；
         R1.1-3：`deadline` = 本 turn 总预算（attempt + retry 共享，不重置）；
         R1.1-6：失败原因**随本调用返回**（per-call result），共享 last_failure_reason 仅诊断。
+        R2.1 P0-3：HARD（身份/事实/结构）失败 DirectTurn；仅 SOFT（风格）→ retry 质量后
+        **surface**（soft_quality 记录，不失败）——“一句话不够漂亮”不得变成系统错误/沉默。
         """
         # ================= Phase A：确定性表达准备（锁内，快） =================
+        constraint = None
         with self._say_lock:
             # 1) Expression Appraisal（确定性）：ShouldSpeak / Mode / Intent / Strategy
             app = self.expression.appraise(
@@ -348,7 +371,7 @@ class DialogueBrain:
                 recent_dialogue=self._recent_acts)
             # 2) Should Speak? —— Silence 是正式行为（§5）
             if not app.should_speak:
-                return (None, "should_speak_false", [])
+                return (None, "should_speak_false", [], [], [])
             # Phase 13C §19-20：用户发起的对话用确定性 act 路由覆盖
             if user_text:
                 app.dialogue_act = self.classify_act(user_text)
@@ -363,7 +386,16 @@ class DialogueBrain:
                                          user_text=user_text, context=context,
                                          memories=memories, world=world,
                                          examples=examples, person=self.persona,
-                                         activity=activity, history=hist)
+                                         activity=activity, history=hist,
+                                         interaction=interaction,
+                                         agent_state=agent_state, agent_task=agent_task)
+            # R2.1 P1-5：用户显式格式/回答约束（优先级高于 persona style，保守确定性提取）
+            if user_text:
+                m = re.search(r"只能回答([^或，,。！？\s]{1,6})(?:或者|或)([^。！？\s]{1,6})", user_text)
+                if m:
+                    constraint = (m.group(1).strip(), m.group(2).strip())
+                    prompt += (f"\n（用户明确格式约束：只能回答“{constraint[0]}”或"
+                               f"“{constraint[1]}”。严格只输出这两个字之一，不要任何解释。）")
             if user_text and channel == "DIRECT_USER_TURN":
                 # H1 §6：不立即提交 user 槽 —— 先暂存，等存在可显示的回复时才原子成对提交
                 self._pending_direct_user = (user_text, (_seq or 1) * 2 - 1)
@@ -375,39 +407,75 @@ class DialogueBrain:
             # R1.2-3：per-call result 只用局部变量；shared last_* 仅兼容诊断 mirror
             reason = gen_reason or "generation_empty"
             self.last_failure_reason = reason
-            return (None, reason, [])   # 沉默优先于 Generic fallback（§39）
-        # 5) Deterministic Validation（§38）—— **invalid 绝不原样显示**
+            return (None, reason, [], [], [])   # 沉默优先于 Generic fallback（§39）
+        # R2.1 P1-5：确定性约束提取（选项词在输出里就提取，绝不编造）
+        if constraint:
+            norm = self.validator._normalize(speech)
+            if norm not in constraint:
+                picked = next((c for c in sorted(constraint, key=len, reverse=True)
+                               if c in speech), None)
+                if picked is not None:
+                    speech = picked
+        # 5) Deterministic Validation（§38）—— **HARD invalid 绝不原样显示；SOFT 只记质量**
         v = self.validator.validate(speech, should_speak=True,
                                     example_phrases=[ex["speech"] for ex in examples],
                                     activity=activity, context=app.mode.lower(),
-                                    recent_surface=list(self._recent_surfaced[-3:]))
+                                    recent_surface=list(self._recent_surfaced[-3:]),
+                                    interaction=interaction, constraint=constraint)
+        soft_quality: List[str] = []
         if not v.valid:
             # 有界恢复：至多再生成一次（**同一 deadline，不重置预算**；确定性校验反馈）
             feedback = v.describe()
             retry, retry_reason = self._generate_bounded(
-                prompt + f"\n（上一版未通过人格校验：{feedback}。请重写，禁止上述问题，保持角色口吻。）",
+                prompt + f"\n（上一版未通过校验：{feedback}。请重写，禁止上述问题，保持角色口吻。）",
                 timeout, deadline)
             if retry:
+                if constraint:
+                    norm = self.validator._normalize(retry)
+                    if norm not in constraint:
+                        picked = next((c for c in sorted(constraint, key=len, reverse=True)
+                                       if c in retry), None)
+                        if picked is not None:
+                            retry = picked
                 v2 = self.validator.validate(retry, should_speak=True,
                                              example_phrases=[ex["speech"] for ex in examples],
                                              activity=activity, context=app.mode.lower(),
-                                             recent_surface=list(self._recent_surfaced[-3:]))
+                                             recent_surface=list(self._recent_surfaced[-3:]),
+                                             interaction=interaction, constraint=constraint)
                 if v2.valid:
                     speech = retry
                     v = v2
-                else:
-                    # 仍 invalid → 不泄漏 invalid 角色输出；暴露可观察失败路径（调用方转 SYSTEM_STATUS）
+                elif v2.hard_issues and v.hard_issues:
+                    # retry 仍有 HARD 且 attempt 也有 HARD → 明确失败（显式 outcome）
+                    # reason 保持既有契约名 validation_twice_invalid（hard_issues 给出明细）
                     reason = "validation_twice_invalid"
                     issues = list(v2.issues)
                     self.last_validation_failure = issues
                     self.last_failure_reason = reason
-                    return (None, reason, issues)
+                    return (None, reason, issues, list(v2.hard_issues), list(v2.soft_issues))
+                else:
+                    # 仅 SOFT 残留（或 retry 更差引入 HARD）→ 选较优候选 **surface**，不失败
+                    if not v2.hard_issues:
+                        # retry 已无 HARD（attempt 的 hard 被解决）→ 优先 retry；仅 soft 时取 soft 更少者
+                        best = retry if len(v2.soft_issues) <= len(v.soft_issues) else speech
+                        soft_quality = list(v2.soft_issues) if best is retry else list(v.soft_issues)
+                    elif not v.hard_issues:
+                        # retry 引入 HARD 但 attempt 只有 SOFT → surface attempt（不失败）
+                        best = speech
+                        soft_quality = list(v.soft_issues)
+                    else:
+                        best = speech   # 双方都有 HARD → 理论不可达（前面已 return）
+                        soft_quality = list(v2.soft_issues)
+                    speech = best
             else:
-                reason = retry_reason or "validation_retry_empty"
-                issues = list(v.issues)
-                self.last_validation_failure = issues
-                self.last_failure_reason = reason
-                return (None, reason, issues)
+                # retry 生成失败（空/异常/超时）—— attempt 有 HARD 才失败；只有 SOFT → surface
+                if v.hard_issues:
+                    reason = retry_reason or "validation_retry_empty"
+                    issues = list(v.issues)
+                    self.last_validation_failure = issues
+                    self.last_failure_reason = reason
+                    return (None, reason, issues, list(v.hard_issues), list(v.soft_issues))
+                soft_quality = list(v.soft_issues)
 
         # ================= Phase C：确定性收尾（锁内，快） =================
         with self._say_lock:
@@ -418,18 +486,17 @@ class DialogueBrain:
             if gated is None:
                 self.god_gate.note_spoke_god(speech)
                 self.last_failure_reason = "god_gate_suppressed"
-                return (None, "god_gate_suppressed", [])
+                return (None, "god_gate_suppressed", [], [], [])
             speech = gated
             # 6) 短期重复控制（§40）：**用户发起的直接对话必须收到回应**；
             #    重复控制只影响自主发言节奏，不影响给用户的回应。
             self._recent_acts.append(app.dialogue_act)
             self._recent_acts = self._recent_acts[-3:]
             if not user_initiated and len(self._recent_acts) >= 3 and len(set(self._recent_acts)) == 1:
-                return (None, "repeated_act_suppressed", [])
-            # B3：direct **已展示**回复 → 表面语言跟踪（repetitive-opening guard 用）
-            if channel == "DIRECT_USER_TURN":
-                self._recent_surfaced.append(speech)
-                self._recent_surfaced = self._recent_surfaced[-self._recent_surfaced_limit:]
+                return (None, "repeated_act_suppressed", [], [], [])
+            # R2.1 P1-6：surface 跟踪跨 **所有 user-visible 通道**（direct/interaction/feed/agent）
+            self._recent_surfaced.append(speech)
+            self._recent_surfaced = self._recent_surfaced[-self._recent_surfaced_limit:]
             # H1 §6：原子成对提交 —— 只有存在可显示回复（DIRECT）才提交 user+furina 成对；
             # 失败/沉默/校验失败的回合**不产生孤儿 User 回合**（槽位由 say() finally 跳过）。
             if channel == "DIRECT_USER_TURN":
@@ -445,7 +512,7 @@ class DialogueBrain:
                 if speech:
                     self.push_ambient(channel, speech)
             self._pending_direct_user = None
-        return (speech, "", [])
+        return (speech, "", [], [], soft_quality)
 
     # -------------------------------------------------- B1：有界生成（adapter timeout + per-turn timeout）
     def _generate(self, p: str) -> tuple:
@@ -607,9 +674,16 @@ def _dialogue_prompt(*, intent: str, emotion: str, user_text: str, context: str,
 def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, context: str,
                         memories: Optional[List[str]], world: Optional[dict],
                         examples: list, person: str, activity: str = "",
-                        history: Optional[List[dict]] = None) -> str:
+                        history: Optional[List[dict]] = None,
+                        interaction: str = "",
+                        agent_state: str = "",
+                        agent_task: str = "") -> str:
     """Phase 08B 结构化 prompt：Compact Contract + Mode + Intent + Strategy + Context + Examples + Constraints。
-    Phase 13C：加"说话机制"引导（§43-44）与短期对话上下文（§24-26）。"""
+
+    Phase 13C：加"说话机制"引导（§43-44）与短期对话上下文（§24-26）。
+    R2.1 P1-1/P1-2/P1-6：**事实分层**（CURRENT_FACTS 权威 vs PAST_MEMORY 过去≠正在发生）、
+    互动事实、agent 状态事实、具体芙宁娜 trait anchors。
+    """
     ap = app.to_prompt()
     parts = []
     parts.append("【你的角色（精简）】\n你是一个已经卸下'水神'职责、正在以普通人身份重新生活的芙宁娜。"
@@ -628,15 +702,45 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
         "5. 公开自信 vs 私下真诚的对照：认真/帮助时收住表演，不是简单降低'俏皮'。\n"
         "6. 具体社交节奏：可以转移、打折扣、自我更正、先夸大再弱化、或假装某句本是有意。\n"
         "7. 卸任后的默认：不总演旧神职；表演是选择，不是必须戴的面具。")
-    # B3（评审基线 0402e7f）：FACTS（不可发明）vs STYLE（可自由）硬区分 + 身份/开场/语气约束
+    # R2.1 P1-6：具体芙宁娜 trait anchors（不是口头禅计数，是行为锚点）
+    parts.append(
+        "【你这个人（具体，不是模板）】\n"
+        "- 你有尊严：被看穿/被无视时先撑住姿态，再慢慢找回，而不是嘴硬到底。\n"
+        "- 表演欲来自'想要被认真对待'，不是每轮都要演。\n"
+        "- 卸任后你在过普通日子：会无聊、会偷懒、会认真帮人、会嘴硬心软。\n"
+        "- 你注意别人怎么看你：被夸会暗自高兴，被敷衍会失落，但不会直说。\n"
+        "- 认真/安慰/脆弱时刻你会收住舞台腔。\n"
+        "- 自我描述要具体、属于你（比如'面子比天大但认错也快'），不要'乐观/爱倾听/完美主义'这类通用模板。")
+    # R2.1 P1-5：事实 vs 风格（FACTS 不可发明，STYLE 可自由）
     parts.append(
         "【事实 vs 风格（必须遵守）】\n"
         "事实（**不可发明，先如实回应**）：当前正在做的事、用户是否在场/在忙、最近互动、关系、记忆。"
-        "用户问'你在干嘛'必须回答真实 activity（如 read/rest/explore），不能编造成别的活动。\n"
+        "用户问'你在干嘛'必须回答真实 activity（如 read/rest/explore/talk/agent_work），不能编造成别的活动。\n"
         "风格（可自由）：怎么描述、语气、修辞、是否俏皮。\n"
         "- 你不是 AI 助手，也不觉得自己是'旁观人类'的异类——禁止'你们人类''作为AI''我的功能是''我可以协助你'这类话；\n"
         "- 同一开场词（如'哎呀'）不要连续多轮用；先回答用户的问题，再考虑表演；\n"
         "- 不要为了'更像角色'堆砌口癖/感叹号/波浪号——辨识度来自内容与转折，不是口头禅。")
+    # R2.1 P1-1：事实分层 —— CURRENT_FACTS 权威 / PAST_MEMORY 过去≠正在发生
+    facts: List[str] = [f"- 当前活动: {activity or 'idle'}"]
+    if interaction:
+        facts.append(f"- 用户刚才的互动: {interaction}")
+    facts.append(f"- Agent 状态: {agent_state or 'IDLE'}"
+                 + (f"（正在执行: {agent_task}）" if agent_task else "（当前无进行中的任务）"))
+    if world:
+        facts.append(f"- 世界: 用户{'正在'+world.get('user_activity','') if world.get('user_activity') else ''}"
+                     f"{'（专注工作，不该打扰）' if world.get('interruption_cost',0)>0.6 else ''}")
+        if world.get("recent_events"):
+            facts.append("- 最近事件: " + "；".join(world["recent_events"][-3:]))
+    parts.append("【CURRENT_FACTS - AUTHORITATIVE（不可发明，先如实回应）】\n" + "\n".join(facts))
+    parts.append("【RECENT_EVENT】\n" + (context or "（无特别事件）"))
+    if memories:
+        parts.append("【PAST_MEMORY - 过去的事，不代表现在正在发生】\n"
+                     + "；".join(memories[:3])
+                     + "\n（记忆里的'帮用户整理…/打开…'是**过去完成**的事；除非 CURRENT_FACTS 显示"
+                       "当前 Agent 任务正活跃，否则不得说成'我现在正在…'）")
+    if activity == "agent_report" or (agent_state or "").startswith("COMPLETED"):
+        parts.append("【Agent 报告要求】先明确报告任务结果事实（做了什么/完成/验证结果/具体证据），"
+                     "再允许角色口吻；不得只答'小事一桩''你越来越依赖我'而缺失事实层。")
     parts.append(f"【当前表达姿态】mode={ap['mode']}" +
                  (f" (次级 {ap['secondary_mode']})" if ap["secondary_mode"] else "") +
                  f" | dialogue_act={ap['dialogue_act']}")

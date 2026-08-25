@@ -451,6 +451,7 @@ class Furina:
                 minterp = self.memory.interpret(mem_objs, context=food_name)
         except Exception:
             pass
+        agent_state, agent_task = self._agent_facts()   # R2.1 P1-1
         return DialogueContextSnapshot(
             intent="eat",
             emotion_label=self.state.state.emotion.label,
@@ -462,6 +463,7 @@ class Furina:
             user_present=True,
             solitude=False,
             channel="FEED_REACTION",   # FINAL-R1 §4.2：喂食台词不进直接对话历史
+            agent_state=agent_state, agent_task=agent_task,   # R2.1 P1-1
             memories=tuple(mems),
             world=freeze_flat(wf),
             relationship=freeze_flat(rel),
@@ -632,6 +634,18 @@ class Furina:
         except Exception as e:
             log.warning("agent worker err: %s", e)
 
+    def _agent_facts(self) -> tuple:
+        """R2.1 P1-1：CURRENT_FACTS 权威 —— 当前 Agent 生命周期状态 + 活跃任务（只读真相）。"""
+        try:
+            agent = getattr(self, "agent", None)
+            if agent is None:
+                return "", ""
+            state = str(getattr(agent, "status", "IDLE") or "IDLE")
+            task = str(getattr(agent, "current_task", "") or "")
+            return state, task
+        except Exception:
+            return "", ""
+
     def _freeze_direct_snapshot(self, text: str, ingress_seq=None):
         """H1 §10：owner 线程冻结直接对话上下文（只读事实副本，不引用 live 可变运行时对象）。"""
         from furina.runtime.dialogue_snapshot import DialogueContextSnapshot, freeze_flat
@@ -654,6 +668,7 @@ class Furina:
         except Exception:
             pass
         idle = float(getattr(self.state.state, "user_idle_seconds", 0.0))
+        agent_state, agent_task = self._agent_facts()   # R2.1 P1-1
         return DialogueContextSnapshot(
             intent="talk",
             emotion_label=self.state.state.emotion.label,
@@ -667,6 +682,7 @@ class Furina:
             channel="DIRECT_USER_TURN",
             # R1.2-2：生产路径不再预留（queue turn_id 是 ingress identity）；显式 seq 仅测试/外部直调
             ingress_seq=ingress_seq,
+            agent_state=agent_state, agent_task=agent_task,   # R2.1 P1-1
             memories=tuple(mems),
             world=freeze_flat(wf),
             relationship=freeze_flat(rel),
@@ -701,6 +717,10 @@ class Furina:
             res = db.say_with_result(**snapshot.say_kwargs(), deadline=deadline)
             speech = res.get("speech")
             reason = str(res.get("failure_reason") or "")
+            # R2.1 P0-3：validation telemetry（为什么被拦/被放行）
+            out["validation_issues"] = list(res.get("validation_issues") or [])
+            out["hard_issues"] = list(res.get("hard_issues") or [])
+            out["soft_issues"] = list(res.get("soft_issues") or [])
         except Exception as e:
             # worker 异常兜底：回合不得遗留 pending（终态 FAILED/CANCELLED + SYSTEM_STATUS）
             try:
@@ -816,17 +836,41 @@ class Furina:
 
     # -------------------------------------------------- Phase 13C §28-31：对话→记忆（conservative）
     def _maybe_observe_conversation(self, text: str) -> None:
-        """只对高置信"用户信息/计划/偏好/承诺"做记忆候选（不盲存所有闲聊；无新 LLM）。"""
+        """只对高置信"用户信息/计划/偏好/承诺"做记忆候选（不盲存所有闲聊；无新 LLM）。
+
+        R2.1 P1-3：plan 确定性提取扩展（我今天准备/我今天打算/我明天准备/我今晚打算/
+        我这周计划…）+ follow-up（做完以后…）挂到最近一条 user plan 记忆（context 联动），
+        让"今天准备做什么？/做完以后会怎么样？"能被检索到事实。
+        """
         import re
         t = (text or "").strip()
         if not t or len(t) < 8:
             return
-        if re.search(r"我(今晚|明天|这周|准备|打算|计划|要|想|正在)|我(喜欢|不喜欢|最怕|讨厌|最爱|习惯)|我(最近|这两天|这几|从今天起)", t):
-            try:
-                self.memory.observe(t, level=MemoryLevel.EPISODIC, source=MemorySource.CONVERSATION,
+        try:
+            # 1) 计划（高置信）：我今天准备… / 我明天打算… / 我这周计划…
+            plan_m = re.search(r"我(今天|明天|今晚|这周|这两天|这个月)?(准备|打算|计划)", t)
+            if plan_m:
+                self._last_user_plan = t
+                self.memory.observe(t, level=MemoryLevel.EPISODIC,
+                                    source=MemorySource.CONVERSATION,
+                                    importance=0.5, context="user_plan")
+                return
+            # 2) 计划 follow-up（做完以后应该…）→ 联动最近一条 user plan
+            follow_m = re.search(r"(做完|弄完|搞定|完成后|忙完)(以后|之后|了)?(应该|就会|可以|大概)?", t)
+            if follow_m and getattr(self, "_last_user_plan", None):
+                self.memory.observe(
+                    f"{t}（关于：{self._last_user_plan}）",
+                    level=MemoryLevel.EPISODIC, source=MemorySource.CONVERSATION,
+                    importance=0.45, context="user_plan_followup",
+                    outcome=self._last_user_plan)
+                return
+            # 3) 一般用户信息/偏好/承诺（保守，保持原语义）
+            if re.search(r"我(今晚|明天|这周|准备|打算|计划|要|想|正在)|我(喜欢|不喜欢|最怕|讨厌|最爱|习惯)|我(最近|这两天|这几|从今天起)", t):
+                self.memory.observe(t, level=MemoryLevel.EPISODIC,
+                                    source=MemorySource.CONVERSATION,
                                     importance=0.4, context="user_speech")
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     # -------------------------------------------------- 启动
     def spawn(self, screen_w: int, screen_h: int, win: "FurinaWindow") -> None:

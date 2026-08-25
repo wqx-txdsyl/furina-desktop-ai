@@ -23,7 +23,8 @@
     "mode": "",
     "validation_status": "silent",
     "priority": 0,
-    "can_interrupt_animation": false
+    "can_interrupt_animation": false,
+    "speech_id": 0
   },
   "body": {
     "expression": "neutral",

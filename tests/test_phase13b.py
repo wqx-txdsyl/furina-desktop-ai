@@ -50,13 +50,21 @@ def test_agent_lifecycle_single_owner():
 
 
 def test_agent_failure_routes_dialoguebrain():
-    """§7：Agent fail 的可见反馈走 DialogueBrain（_speak_via_dialogue），非纯固定系统字符串。"""
+    """§7/R2.1 P1-4：Agent fail 的可见反馈走 DialogueBrain（_speak_via_dialogue），非纯固定系统字符串。
+
+    旧断言（_on_agent_fail 内 `if not self._speech` 立即检查）在 R2.1 升级为 **exactly-once
+    fallback**：fallback 由 _speak_via_dialogue 的 worker 在"角色台词未出话"时经 owner 落地
+    SYSTEM_STATUS 事实 —— 语义更强（先 DialogueBrain，失败才系统事实，且不丢报告）。
+    """
     import furina.runtime.scheduler as S
     src = open(S.__file__, encoding="utf-8").read()
     fail = src[src.index("def _on_agent_fail"):src.index("def _say(")]
     assert "_speak_via_dialogue" in fail, "Agent fail 应经 DialogueBrain"
-    # 仅当对话失败才 SYSTEM_STATUS（不是一律固定 Furina 台词）
-    assert "if not self._speech" in fail, "允许 Dialogue 失败时 SYSTEM_STATUS 事实"
+    # R2.1 P1-4：失败必须带确定性事实回退（SYSTEM_STATUS，非角色台词）
+    assert "fallback" in fail, "Agent fail 必须带确定性事实回退"
+    svd = src[src.index("def _speak_via_dialogue"):src.index("def _freeze_reaction_snapshot")]
+    assert "elif _fallback:" in svd, "对话未出话 → fallback 分支"
+    assert "fb=_fallback" in svd, "fallback 经 owner 队列落地（不冒充 Furina 台词）"
 
 
 # ================================================================ §9 feed non-blocking

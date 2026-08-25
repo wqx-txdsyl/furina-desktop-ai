@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Mapping, Optional
@@ -85,6 +86,12 @@ class MemoryEngine:
         mems = self.store.query(limit=max(limit * 4, 60))
         # 检索分数（§13 relevance ≠ importance）：context 匹配 × importance × recency × tags
         terms = [t for t in query.replace("，", " ").split() if len(t) >= 2]
+        # R2.1 P1-3：CJK 无空格查询 → 补 2-gram（"今天准备做什么" 命中含 今天/准备 的记忆；
+        # 让"今天准备做什么？/做完以后会怎么样？"能检索到计划/后续事实）
+        q = re.sub(r"[\s，。？！?!、：:；;]", "", query or "")
+        if len(q) >= 4 and not any(" " in t for t in terms):
+            terms = terms + [q[i:i + 2] for i in range(len(q) - 1)]
+        terms = list(dict.fromkeys(terms))
 
         def _score(m: Memory) -> float:
             # context/world_context 精确匹配（情境化 §22）：不匹配则大幅降权，避免跨情境误用

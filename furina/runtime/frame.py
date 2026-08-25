@@ -102,6 +102,9 @@ class FrameSpeech:
     validation_status: str = SpeechValidation.SILENT.value
     priority: int = 0
     can_interrupt_animation: bool = False
+    # R2.1 P0-1：speech event identity（单调递增）—— 不同 utterance 即使文本相同也是
+    # 不同事件；同一 utterance 的重复 tick 才允许去重（不能按 text equality 去重）。
+    speech_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,7 @@ class CharacterRuntimeFrame:
                 "validation_status": self.speech.validation_status,
                 "priority": self.speech.priority,
                 "can_interrupt_animation": self.speech.can_interrupt_animation,
+                "speech_id": self.speech.speech_id,   # R2.1 P0-1：speech event identity
             },
             "body": {
                 "expression": self.body.expression,

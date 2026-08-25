@@ -47,6 +47,10 @@ class DirectTurn:
         self.failure_reason: str = ""
         self.latency_ms: float = 0.0
         self.created_at = time.time()
+        # R2.1 P0-3：validation telemetry（为什么被拦/被放行）
+        self.validation_issues: list = []
+        self.hard_issues: list = []
+        self.soft_issues: list = []
         # R1.2-1：deadline 在 **submit 时刻** 设定（ingress→terminal 全生命周期预算，
         # 排队时间计入）；worker 绝不重置 —— 轮到 worker 时已过 deadline 必须快速 FAILED。
         self.created_monotonic: float = 0.0
@@ -62,6 +66,9 @@ class DirectTurn:
             "failure_reason": self.failure_reason,
             "latency_ms": round(self.latency_ms, 1),
             "created_at": round(self.created_at, 1),
+            "validation_issues": list(self.validation_issues),
+            "hard_issues": list(self.hard_issues),
+            "soft_issues": list(self.soft_issues),
         }
 
 
@@ -157,10 +164,10 @@ class DirectDialogueQueue:
                 latency = (time.perf_counter() - t0) * 1000.0
                 speech = out.get("speech")
                 if speech:
-                    self._finish(turn, "REPLIED", "", latency)
+                    self._finish(turn, "REPLIED", "", latency, out=out)
                 else:
                     reason = str(out.get("failure_reason") or "") or "generation_failed"
-                    self._finish(turn, "FAILED", reason, latency)
+                    self._finish(turn, "FAILED", reason, latency, out=out)
             except Exception as e:  # pragma: no cover —— worker 异常兜底，绝不遗留 pending
                 log.warning("direct dialogue worker 异常: %s", e)
                 latency = (time.perf_counter() - t0) * 1000.0
@@ -173,11 +180,17 @@ class DirectDialogueQueue:
         with self._lock:
             turn.status = status
 
-    def _finish(self, turn: DirectTurn, status: str, reason: str, latency_ms: float) -> None:
+    def _finish(self, turn: DirectTurn, status: str, reason: str, latency_ms: float,
+                out: Optional[dict] = None) -> None:
         with self._lock:
             turn.status = status
             turn.failure_reason = reason
             turn.latency_ms = latency_ms
+            if out:
+                # R2.1 P0-3：validation telemetry（为什么被拦/被放行）
+                turn.validation_issues = list(out.get("validation_issues") or [])
+                turn.hard_issues = list(out.get("hard_issues") or [])
+                turn.soft_issues = list(out.get("soft_issues") or [])
             # R1.2-4：终态转换后立即 trim terminal history —— retained terminal ≤ keep_outcomes
             # （活跃 turn 永不 trim；trim 只移除 registry，本 turn 局部引用仍可发 terminal trace）
             self._trim_locked()

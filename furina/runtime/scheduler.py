@@ -145,6 +145,10 @@ class Scheduler:
         bus.on(EventType.BRAIN_SPOKE, lambda ev: self.dispatcher.submit(lambda: self._on_brain(ev)))
         bus.on(EventType.AGENT_COMPLETED, lambda ev: self.dispatcher.submit(lambda: self._on_agent_done(ev)))
         bus.on(EventType.AGENT_FAILED, lambda ev: self.dispatcher.submit(lambda: self._on_agent_fail(ev)))
+        # R2.1 P1-1/P1-4：Agent 生命周期镜像（CURRENT_FACTS 权威 + 报告绑定原始请求）
+        bus.on(EventType.AGENT_STARTED, self._on_agent_started_ev)
+        self._agent_status = "IDLE"
+        self._agent_last_request = ""
 
         self._last_window_poll = 0.0
         self._debug_text = ""
@@ -245,9 +249,33 @@ class Scheduler:
             if payload_emotion:
                 self.se.state.intent.emotion = payload_emotion
 
+    def _on_agent_started_ev(self, ev) -> None:
+        """R2.1 P1-1/P1-4：Agent 开始 → 记录生命周期状态 + 原始请求（报告绑定事实）。"""
+        self._agent_status = "RUNNING"
+        try:
+            self._agent_last_request = str((ev.payload or {}).get("request", ""))
+        except Exception:
+            pass
+
+    def _agent_facts_sched(self) -> tuple:
+        """R2.1 P1-1：CURRENT_FACTS 权威 —— (agent_state, active_task)。"""
+        return self._agent_status, (self._agent_last_request if self._agent_status == "RUNNING" else "")
+
     def _on_agent_done(self, ev) -> None:
-        # FIX G：Agent 完成 → 角色台词走 DialogueBrain（非固定 summary 冒充人格）
-        summary = (ev.payload or {}).get("summary", "完成啦。")
+        # R2.1 P1-4：Agent 完成 → 结果绑定报告（AGENT_TERMINAL → AGENT_REPORT intent，
+        # context 含 original_request / terminal_status / goal / verification / concrete evidence）。
+        self._agent_status = "COMPLETED_VERIFIED"
+        payload = ev.payload or {}
+        summary = payload.get("summary", "完成啦。")
+        goal = str(payload.get("goal", "") or "")
+        req = str(getattr(self, "_agent_last_request", "") or "")
+        results = payload.get("results") or []
+        concrete = "; ".join(
+            f"{r.get('data')}" for r in results
+            if r.get("ok") and r.get("verified") and r.get("data")) or ""
+        ctx = (f"任务[{req}]已完成（验证通过）：{goal}。"
+               f"{summary}"
+               + (f"。具体结果：{concrete}" if concrete else ""))
         self.se.state.life.macro = st.MacroState.IDLE
         # §4.4/FINAL-R1 §2.2：Agent 验证成功 → EVENT_AGENT_DONE，apply + 立即派生（owner 线程）
         try:
@@ -258,7 +286,7 @@ class Scheduler:
         # §6：**已验证**的 Agent 帮助 → 真实关系证据 EV_SUCCESSFUL_HELP（恰好一次，
         # 经 RelationshipEngine 唯一写入口；未验证成功不得发放）。
         try:
-            verified = bool((ev.payload or {}).get("verified", False))
+            verified = bool(payload.get("verified", False))
             if verified and self.relationship is not None:
                 from furina.relationship.engine import EV_SUCCESSFUL_HELP
                 self.relationship.apply(EV_SUCCESSFUL_HELP)
@@ -267,19 +295,21 @@ class Scheduler:
                     self.me.store.save_relationship(self.relationship.state)
         except Exception:
             pass
+        # 结果绑定报告（exactly-once：角色报告成功出话，否则确定性事实回退）
         self._speak_via_dialogue(intent="assist_user", emotion=self.se.state.emotion.label,
-                                 user_initiated=True, context=summary, activity="agent_report")
+                                 user_initiated=True, context=ctx, activity="agent_report",
+                                 fallback=f"（系统状态：任务已完成：{goal}。）")
 
     def _on_agent_fail(self, ev) -> None:
         # §7：Agent 失败的用户可见反馈 = DialogueBrain(task_mode) 角色化；仅当对话失败才允许 SYSTEM_STATUS 事实。
+        self._agent_status = "FAILED"
         self.se.state.life.macro = st.MacroState.IDLE
         err = (ev.payload or {}).get("error", "") or (ev.payload or {}).get("reason", "")
         self._speak_via_dialogue(intent="agent", emotion=self.se.state.emotion.label,
                                  user_initiated=True, context=f"任务失败了：{err}",
-                                 activity="agent_fail", interaction="agent")
-        # DialogueBrain 失败 → 确定性系统事实（非角色化），放在独立状态区，不冒充 Furina 台词
-        if not self._speech:
-            self._say(f"（系统状态：Agent 任务未完成。{err}）" if err else "（系统状态：Agent 任务失败。）", dur=4.0)
+                                 activity="agent_fail", interaction="agent",
+                                 fallback=f"（系统状态：Agent 任务未完成。{err}）" if err
+                                 else "（系统状态：Agent 任务失败。）")
 
     def _on_interaction(self, ev) -> None:
         # 即时层（plan/4 §27）：互动改变情绪/社交需求，→ 表现层选对应表情素材
@@ -778,6 +808,7 @@ class Scheduler:
         # Pre-Manual §8：自主台词用 canonical 在场 —— unknown → present=False, solitude=False, presence_known=False
         from furina.world_perception import presence_facts
         pf = presence_facts(self.world_perc)
+        agent_state, agent_task = self._agent_facts_sched()   # R2.1 P1-1
         return DialogueContextSnapshot(
             intent=intent or activity,
             emotion_label=emotion,
@@ -787,6 +818,7 @@ class Scheduler:
             presence_known=pf["known"],
             user_present=pf["present"],
             solitude=False if not pf["known"] else (not pf["present"]),
+            agent_state=agent_state, agent_task=agent_task,   # R2.1 P1-1
             memories=tuple(mems),
             world=freeze_flat({**wf, "user_activity": wctx, "recent_events": list(self._recent_events)}),
             relationship=freeze_flat(self._rel_factors()),
@@ -1105,35 +1137,49 @@ class Scheduler:
             return 0.0
 
     def _say(self, text: str, dur: float = 4.0) -> None:
-        """立即显示一句台词（带显示时长，不刷屏）。"""
+        """立即显示一句台词（带显示时长，不刷屏）。
+
+        R2.1 P0-1：每次新 utterance 递增 speech_id（speech event identity）——
+        不同 utterance 即使文本完全相同（如连续失败的 SYSTEM_STATUS）也是不同事件；
+        Frame 携带该 id，Harness 按 id 去重而不是按 text。
+        """
         if text:
+            self._speech_seq = getattr(self, "_speech_seq", 0) + 1
             self._speech = text
             self._speech_until = time.monotonic() + dur
 
     def _speak_via_dialogue(self, *, intent: str, emotion: str, user_initiated: bool,
-                            context: str, activity: str, interaction: str = "") -> None:
+                            context: str, activity: str, interaction: str = "",
+                            fallback: str = "") -> None:
         """FIX G：把高频互动/系统事件台词交给 DialogueBrain（背景线程，不阻塞 UI）。
 
         唯一语言源 = DialogueBrain → Frame.speech。DialogueBrain 失败/无 LLM → 沉默（§9），
-        不回退固定句池。仅 Agent fail 的确定性错误事实显示为 SYSTEM_STATUS（非角色人格化）。
+        不回退固定句池；`fallback`（R2.1 P1-4）为 Agent 报告等**必须恰好一次用户可见**的
+        场景提供确定性事实回退（SYSTEM_STATUS 样式，非角色人格化）。
         H1 §10：**owner 线程冻结 DialogueContextSnapshot**（互动/Agent 报告通道），worker 只读快照。
         """
         if self.dialogue_brain is None:
+            if fallback:
+                self._say(fallback, dur=4.0)
             return
         snap = self._freeze_reaction_snapshot(intent=intent, emotion=emotion,
                                               user_initiated=user_initiated, context=context,
                                               activity=activity, interaction=interaction)
-        def _work(snapshot):
+        def _work(snapshot, _fallback):
             try:
                 speech = self.dialogue_brain.say(**snapshot.say_kwargs())
                 if speech:
                     # §8：对话结果经 apply 队列在 owner 线程落地（worker 线程不直接改 _speech）
                     self._enqueue_apply(lambda sp=speech: (self._say(sp, dur=3.0),
                                                            setattr(self, "_last_speech_at", time.monotonic())))
+                elif _fallback:
+                    # 角色报告未出话 → 确定性事实回退（exactly-once 用户可见）
+                    self._enqueue_apply(lambda fb=_fallback: self._say(fb, dur=4.0))
             except Exception:
-                pass
+                if _fallback:
+                    self._enqueue_apply(lambda fb=_fallback: self._say(fb, dur=4.0))
         import threading
-        threading.Thread(target=_work, args=(snap,), daemon=True).start()
+        threading.Thread(target=_work, args=(snap, fallback), daemon=True).start()
 
     def _freeze_reaction_snapshot(self, *, intent: str, emotion: str, user_initiated: bool,
                                   context: str, activity: str, interaction: str = ""):
@@ -1165,6 +1211,7 @@ class Scheduler:
                   "idle_seconds": None, "source": "explicit_user_event"}
         else:
             pf = presence_facts(self.world_perc)
+        agent_state, agent_task = self._agent_facts_sched()   # R2.1 P1-1
         return DialogueContextSnapshot(
             intent=intent,
             emotion_label=emotion,
@@ -1176,6 +1223,8 @@ class Scheduler:
             user_present=pf["present"],
             solitude=False if not pf["known"] else (not pf["present"]),
             channel="AGENT_REPORT" if interaction == "agent" else "INTERACTION_REACTION",
+            interaction=interaction,               # R2.1 P1-2：互动事实 kind
+            agent_state=agent_state, agent_task=agent_task,   # R2.1 P1-1
             memories=tuple(mems),
             world=freeze_flat(wf),
             relationship=freeze_flat(rel),
@@ -1281,6 +1330,7 @@ class Scheduler:
             activity_interruptible=True,
             speech={
                 "should_speak": not silence, "text": speech,
+                "speech_id": getattr(self, "_speech_seq", 0),   # R2.1 P0-1：speech event identity
                 "dialogue_act": (self.dialogue_brain.expression.appraise(
                     emotion=state.emotion.label or "calm", intent=state.intent.action or "",
                     relationship=self._rel_factors(),   # C-R1.2 归一化
