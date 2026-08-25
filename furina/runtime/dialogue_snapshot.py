@@ -38,6 +38,8 @@ class DialogueContextSnapshot:
     recent_activity: str = ""                          # ingress 时刻冻结的 recent activity（上一 current）
     recent_activity_finished_at: float = 0.0           # ingress 时刻冻结的 recent 结束时间（monotonic）
     recent_activity_freshness: float = 0.0             # recent 可视为"刚才"的最大秒数（快照携带常量）
+    # Phase 14K：bounded CognitiveContext（owner ingress 由 CognitionHub.assemble 冻结的 plain 事实）
+    cognitive_context: Tuple[Tuple[str, Any], ...] = ()
 
     # -------------------------------------------------- 只读辅助（副本 → 调用参数）
     def memories_list(self) -> List[str]:
@@ -80,6 +82,8 @@ class DialogueContextSnapshot:
             kw["agent_task"] = self.agent_task      # R2.1 P1-1
         if self.agent_facts:
             kw["agent_facts"] = dict(self.agent_facts)   # R2.2.1 §5
+        if self.cognitive_context:
+            kw["cognitive_context"] = dict(self.cognitive_context)   # Phase 14K：bounded
         return kw
 
     def ambient_texts(self) -> List[str]:

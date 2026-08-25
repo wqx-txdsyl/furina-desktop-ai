@@ -112,6 +112,19 @@ class Furina:
         # 角色化确认由 confirm 回调表现（弹台词），并放行 L2/L3。
         self.permission.on_confirm = self._confirm_agent_permission
         self.agent = AgentRuntime(self.bus, self.tools, self.permission)
+        # Phase 14K：认知层总装（CognitionHub；连接现有 Memory/Relationship + Canon adapters +
+        # UserModel/EventTimeline/AgentTaskHistory + ContextAssembler）。
+        self.cognition = None
+        try:
+            from furina.cognition import CognitionHub
+            self.cognition = CognitionHub(cfg.db_path, memory_engine=self.memory,
+                                          relationship_engine=self.relationship)
+            # Phase 14I：Agent worker 产出结构化 task_record → dispatcher 回 owner → C7 persist
+            self.agent.on_task_finished = lambda rec: self._rt_dispatcher().submit(
+                lambda: self._persist_agent_task(rec))
+        except Exception as e:
+            log.warning("cognition 初始化失败（不影响既有运行）: %s", e)
+            self.cognition = None
 
         # 三脑架构（legacy-plan/8 修正）：LifeBrain 状态决策 + DialogueBrain 语言 + ToolAgent 双手。
         # 用配置的 provider（默认 zhipu glm-4v-flash；.env 可切 openai_compat 更快模型）。
@@ -551,6 +564,25 @@ class Furina:
                 self.emotion.apply_event(EVENT_TALK, tired_hint=self._tired_hint())
             except Exception:
                 pass
+        # Phase 14J：明确高置信 self-statements → UserModel candidate（deterministic conservative
+        # extraction，owner persist；不覆盖 current explicit user turn —— 只新增/升级 item）。
+        cog = getattr(self, "cognition", None)
+        if cog is not None:
+            try:
+                cand = cog.extract_user_model(text)
+                if cand:
+                    cog.user_model.upsert_item(
+                        category=cand["category"], key=cand["key"], value=cand["value"],
+                        confidence=cand["confidence"], source_text_excerpt=cand["excerpt"])
+                    ev_type = ("USER_PLAN_DECLARED" if cand["category"] == "PLAN"
+                               else "USER_PREFERENCE_DECLARED")
+                    cog.record_event(ev_type, source="dialogue", channel="DIRECT_USER_TURN",
+                                     payload={"key": cand["key"], "value": cand["value"],
+                                              "excerpt": cand["excerpt"],
+                                              "confidence": cand["confidence"]},
+                                     importance=0.5, consolidate=False)
+            except Exception:
+                pass
         # 2. R1.2-2：**不再在入队前 reserve DialogueBrain seq** —— DirectDialogueQueue
         #    是 DIRECT_USER_TURN 的唯一串行 authority（turn_id = 用户 ingress identity）；
         #    brain seq 只在 worker 真正执行 DialogueBrain 时由 say() 内部分配
@@ -760,6 +792,45 @@ class Furina:
         except Exception as e:
             log.warning("agent worker err: %s", e)
 
+    def _persist_agent_task(self, record: dict) -> None:
+        """owner 线程（Phase 14I）：Agent 结构化 task_record → C7 persist + C6 事件。
+
+        worker 不直接写 Cognition authoritative DB：AgentRuntime 返回 task_record →
+        dispatcher 回 owner → 本方法持久化（owner contract）。
+        """
+        cog = getattr(self, "cognition", None)
+        if cog is None:
+            return
+        try:
+            cog.persist_agent_result(
+                str(record.get("task_id", "") or ""),
+                status=str(record.get("status", "FAILED") or "FAILED"),
+                goal=str(record.get("goal", "") or ""),
+                original_request=str(record.get("original_request", "") or ""),
+                verified=bool(record.get("verified", False)),
+                result_summary=str(record.get("result_summary", "") or ""),
+                error=str(record.get("error", "") or ""),
+                steps=record.get("steps") or [],
+                artifacts=record.get("artifacts") or [],
+                plan_json=str(record.get("plan_json", "{}") or "{}"),
+                permission_summary=str(record.get("permission_summary", "") or ""))
+            status = str(record.get("status", "") or "")
+            tid = str(record.get("task_id", "") or "")
+            if status == "COMPLETED_VERIFIED":
+                cog.record_event("AGENT_COMPLETED",
+                                 payload={"goal": record.get("goal", ""), "task_id": tid},
+                                 source="agent", task_id=tid, importance=0.6)
+            elif status == "FAILED":
+                cog.record_event("AGENT_FAILED",
+                                 payload={"task_id": tid, "error": record.get("error", "")},
+                                 source="agent", task_id=tid, importance=0.4)
+            elif status == "UNVERIFIED":
+                cog.record_event("AGENT_FAILED",
+                                 payload={"task_id": tid, "reason": "unverified"},
+                                 source="agent", task_id=tid, importance=0.4)
+        except Exception as e:
+            log.warning("persist agent task failed: %s", e)
+
     def _agent_facts(self) -> tuple:
         """R2.1 P1-1：CURRENT_FACTS 权威 —— 当前 Agent 生命周期状态 + 活跃任务（只读真相）。"""
         try:
@@ -801,6 +872,25 @@ class Furina:
         recent_act = str(getattr(self, "_recent_activity", "") or "")
         recent_fin = float(getattr(self, "_recent_activity_finished_at", 0.0) or 0.0)
         from furina.app import RECENT_ACTIVITY_FRESHNESS_SECONDS
+        # Phase 14K：owner ingress 用 CognitionHub 组装有界 cognitive context（plain immutable）。
+        cog_ctx = ()
+        cog = getattr(self, "cognition", None)
+        if cog is not None:
+            try:
+                ctx = cog.assemble(query=text, current_facts={"activity": str(
+                    getattr(self.state.state.life, "activity", "")), "agent_state": agent_state})
+                cog_ctx = freeze_flat({
+                    "user_model_items": [{"category": i.category, "value": i.value,
+                                          "confidence": i.confidence, "key": i.key}
+                                         for i in ctx.user_model_items],
+                    "recent_events": [{"event_type": e.event_type, "importance": e.importance}
+                                      for e in ctx.recent_events],
+                    "relevant_agent_tasks": [{"goal": t.goal, "status": t.status}
+                                             for t in ctx.relevant_agent_tasks],
+                    "canon_activation": ctx.canon_activation,
+                })
+            except Exception:
+                cog_ctx = ()
         return DialogueContextSnapshot(
             intent="talk",
             emotion_label=self.state.state.emotion.label,
@@ -822,6 +912,7 @@ class Furina:
             recent_activity=recent_act,
             recent_activity_finished_at=recent_fin,
             recent_activity_freshness=RECENT_ACTIVITY_FRESHNESS_SECONDS,
+            cognitive_context=cog_ctx,
         )
 
     def _brain_worker(self, text: str, snapshot=None, deadline: float | None = None,

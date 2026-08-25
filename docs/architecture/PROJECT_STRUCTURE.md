@@ -26,16 +26,17 @@ tests/               pytest 测试套件
 
 ```
 furina/
-├─ app.py              应用总装（Director executor / 生产入口）
+├─ app.py              应用总装（Director executor / 生产入口 / CognitionHub 组装边界）
 ├─ dialogue_brain.py   三脑：语言（DialogueBrain）
 ├─ runtime/scheduler.py 运行时调度器（furina/runtime/scheduler.py）
 ├─ brain.py            LifeBrain 决策脑
 ├─ life_brain.py       生命决策
 ├─ feeding.py          喂食系统
 ├─ persona/            人格包（furina_canon 唯一 Canon 源 + planner/autobiographical）
+├─ cognition/          认知层（Phase 14B：C1-C7 + assembler + consolidator）
 ├─ memory/             记忆引擎（SQLite + 检索）
 ├─ relationship/       关系引擎
-├─ agent/              Agent（手/眼/行动：planner/permission/tools）
+├─ agent/              Agent（planner_v2 + capabilities/ + permission/tools）
 ├─ embodiment/         具身语义层
 ├─ emotion/            情感引擎
 ├─ behavior/           行为引擎
@@ -82,30 +83,34 @@ pytest 套件；`python -m pytest` 运行。新增测试按子系统命名（如
 
 ---
 
-# Future Production Namespace（PLANNED —— 仅冻结命名，NO IMPLEMENTATION YET）
+# Future Production Namespace（部分已实现；仅冻结尚未实现的命名）
 
-以下路径**预留**给后续 Phase，本任务及当前版本**禁止创建**这些 Python package。
-
-## furina/cognition/
+## furina/cognition/（✅ Phase 14B IMPLEMENTED）
 
 ```
 furina/cognition/
-    stores/            逻辑认知存储（见 docs/architecture/future/COGNITIVE_STORES.md）
-    retrieval/         语义检索
-    consolidation/     记忆巩固
-    beliefs/           解释 / Belief Update
-    context_assembly/  上下文组装
+    models.py            数据契约（CanonEpisode/UserModelItem/LifeEvent/AgentTask/CognitiveContext…）
+    hub.py               CognitionHub 总装（7 store + assembler + consolidator + willingness model）
+    context.py           CognitiveContextAssembler（bounded，owner ingress）
+    stores/              7 个逻辑 Store（canon_identity/canon_history/autobiography/user_model/
+                        relationship/event_timeline/agent_history）+ base（CognitionDB/redaction）
+    retrieval/           CanonLifeRetriever（activation 0..3）
+    consolidation/       Consolidator（Event → Memory 最小决策）
 ```
 
-## furina/agent/（扩展）
+权威契约：docs/architecture/COGNITIVE_ARCHITECTURE.md。数据：data/canon/*.json（version-controlled）。
+
+## furina/agent/（扩展，✅ Phase 14C IMPLEMENTED）
 
 ```
 furina/agent/
-    capabilities/      能力域注册（见 UNIVERSAL_AGENT.md）
-    integrations/      外部集成
+    capabilities/       能力域注册（registry/models）+ documents/ + applications/ + integrations/
+    planner_v2.py       Planner V2（LLM 结构化计划 + deterministic validation + fallback）
 ```
 
-## furina/presentation/
+权威契约：docs/architecture/UNIVERSAL_AGENT_ARCHITECTURE.md。
+
+## furina/presentation/（PLANNED —— 仅冻结命名，NO IMPLEMENTATION YET）
 
 ```
 furina/presentation/
@@ -116,4 +121,4 @@ furina/presentation/
 ```
 
 > 现有 `persona/` `memory/` `relationship/` `agent/` `embodiment/` `runtime/` 全部原地保留，
-> 不迁移到上述命名空间。
+> 不迁移到上述命名空间。Character Body / Renderer 未实现（ROADMAP：Phase 18 pending）。

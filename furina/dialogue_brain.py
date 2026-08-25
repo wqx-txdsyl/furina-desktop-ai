@@ -221,7 +221,8 @@ class DialogueBrain:
             interaction: str = "",         # R2.1 P1-2：互动事实 kind（petting/poke/drag/click）
             agent_state: str = "",         # R2.1 P1-1：当前 Agent 生命周期状态
             agent_task: str = "",
-            agent_facts: Optional[dict] = None) -> Optional[str]:   # R2.2.1 §5：AgentReportFacts
+            agent_facts: Optional[dict] = None,
+            cognitive_context: Optional[dict] = None) -> Optional[str]:   # R2.2.1 §5：AgentReportFacts
         """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
 
         R1.1-6：公开 consumer API 保持不变（返回 speech 或 None）；
@@ -238,7 +239,7 @@ class DialogueBrain:
                                   ingress_seq=ingress_seq, timeout=timeout,
                                   deadline=deadline, interaction=interaction,
                                   agent_state=agent_state, agent_task=agent_task,
-                                  agent_facts=agent_facts)["speech"]
+                                  agent_facts=agent_facts, cognitive_context=cognitive_context)["speech"]
 
     def say_with_result(self, *, intent: str = "", emotion: str = "", user_text: str = "",
                         context: Optional[str] = "", memories: Optional[List[str]] = None,
@@ -254,7 +255,8 @@ class DialogueBrain:
                         interaction: str = "",
                         agent_state: str = "",
                         agent_task: str = "",
-                        agent_facts: Optional[dict] = None) -> dict:
+                        agent_facts: Optional[dict] = None,
+                        cognitive_context: Optional[dict] = None) -> dict:
         """内部 result API（R1.1-6/R2.1 P0-3）：返回 {"speech","failure_reason",
         "validation_issues","hard_issues","soft_issues"}。
 
@@ -270,7 +272,7 @@ class DialogueBrain:
                                   ingress_seq=ingress_seq, timeout=timeout,
                                   deadline=deadline, interaction=interaction,
                                   agent_state=agent_state, agent_task=agent_task,
-                                  agent_facts=agent_facts)
+                                  agent_facts=agent_facts, cognitive_context=cognitive_context)
 
     def _say_dispatch(self, *, intent: str = "", emotion: str = "", user_text: str = "",
                       context: Optional[str] = "", memories: Optional[List[str]] = None,
@@ -286,7 +288,8 @@ class DialogueBrain:
                       interaction: str = "",
                       agent_state: str = "",
                       agent_task: str = "",
-                      agent_facts: Optional[dict] = None) -> dict:
+                      agent_facts: Optional[dict] = None,
+                      cognitive_context: Optional[dict] = None) -> dict:
         """B1/R1.1-3 lane 分发：direct 与 ambient 独立序号 + 独立门；总预算 deadline 传递。
 
         B1/R1.2-2（评审基线）**通道分 lane**：
@@ -314,7 +317,7 @@ class DialogueBrain:
                     presence_known=presence_known, channel=channel, _seq=seq,
                     _lane="direct", timeout=eff_timeout, deadline=deadline,
                     interaction=interaction, agent_state=agent_state, agent_task=agent_task,
-                    agent_facts=agent_facts)
+                    agent_facts=agent_facts, cognitive_context=cognitive_context)
                 return {"speech": speech, "failure_reason": reason,
                         "validation_issues": issues, "hard_issues": hard, "soft_issues": soft}
             finally:
@@ -337,7 +340,7 @@ class DialogueBrain:
                 presence_known=presence_known, channel=channel, _aseq=aseq,
                 _lane="ambient", timeout=eff_timeout, deadline=deadline,
                 interaction=interaction, agent_state=agent_state, agent_task=agent_task,
-                agent_facts=agent_facts)
+                agent_facts=agent_facts, cognitive_context=cognitive_context)
             return {"speech": speech, "failure_reason": reason,
                     "validation_issues": issues, "hard_issues": hard, "soft_issues": soft}
         finally:
@@ -357,7 +360,8 @@ class DialogueBrain:
                   interaction: str = "",
                   agent_state: str = "",
                   agent_task: str = "",
-                  agent_facts: Optional[dict] = None) -> tuple:
+                  agent_facts: Optional[dict] = None,
+                  cognitive_context: Optional[dict] = None) -> tuple:
         """say() 的实现体（由 lane 入口包裹）→
         (speech, failure_reason, validation_issues, hard_issues, soft_issues)。
 
@@ -410,7 +414,8 @@ class DialogueBrain:
                                          interaction=interaction,
                                          agent_state=agent_state, agent_task=agent_task,
                                          plan=plan, auto_guide=auto_guide,
-                                         agent_facts=agent_facts)
+                                         agent_facts=agent_facts,
+                                         cognitive_context=cognitive_context)
             # R2.1 P1-5：用户显式格式/回答约束（优先级高于 persona style，保守确定性提取）
             if user_text:
                 m = re.search(r"只能回答([^或，,。！？\s]{1,6})(?:或者|或)([^。！？\s]{1,6})", user_text)
@@ -839,7 +844,8 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
                         agent_state: str = "",
                         agent_task: str = "",
                         plan=None, auto_guide: str = "",
-                        agent_facts: Optional[dict] = None) -> str:
+                        agent_facts: Optional[dict] = None,
+                        cognitive_context: Optional[dict] = None) -> str:
     """Phase 08B 结构化 prompt：Compact Contract + Mode + Intent + Strategy + Context + Examples + Constraints。
 
     Phase 13C：加"说话机制"引导（§43-44）与短期对话上下文（§24-26）。
@@ -920,6 +926,28 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
                 parts.append(f"- 具体结果证据: {af.get('concrete_evidence')}")
             if not af.get("has_duration_evidence"):
                 parts.append("- 注意: 没有时长证据，**禁止**编造'花了几分钟/几秒'")
+        except Exception:
+            pass
+    # Phase 14K：bounded CognitiveContext（owner ingress 冻结的 plain 事实；无则不注入）。
+    # 权威顺序已由 assembler 决定；这里只放**有界**摘要，绝不 dump 数据库。
+    if cognitive_context:
+        try:
+            cc = cognitive_context
+            lines = []
+            um = cc.get("user_model_items") or []
+            if um:
+                lines.append("用户已知事实: " + "；".join(
+                    f"{i.get('category','FACT')}={i.get('value','')}" for i in um[:3]))
+            evs = cc.get("recent_events") or []
+            if evs:
+                lines.append("最近事件: " + "；".join(
+                    str(e.get("event_type", "")) for e in evs[:3]))
+            tasks = cc.get("relevant_agent_tasks") or []
+            if tasks:
+                lines.append("最近任务: " + "；".join(
+                    str(t.get("goal", ""))[:40] for t in tasks[:2]))
+            if lines:
+                parts.append("【认知上下文（有界事实，供参考）】\n" + "\n".join(lines))
         except Exception:
             pass
     # R2.2.1 §4：PersonaPlan.mode 是 Dialogue realization 的**唯一 mode authority**。
