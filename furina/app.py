@@ -24,6 +24,7 @@ from furina.assets.asset_manifest import AssetEntry, AssetManifest, AssetQuery
 from furina.memory import MemoryEngine, MemoryStore, MemoryLevel, MemorySource
 from furina.director import Director
 from furina.agent import ToolRegistry, PermissionManager, AgentRuntime
+from furina.agent.permission import Permission
 from furina.agent.tools import ALL_TOOLS
 from furina.life_brain import LifeBrain
 from furina.dialogue_brain import DialogueBrain
@@ -108,13 +109,30 @@ class Furina:
         for tool_cls in ALL_TOOLS:
             self.tools.register(tool_cls())  # type: ignore[arg-type]
         self.permission = PermissionManager()
-        # 用户主动在右键菜单里点的“随手帮忙”任务 → 视为用户已授权（legacy-plan/5 §20），
-        # 角色化确认由 confirm 回调表现（弹台词），并放行 L2/L3。
+        # Phase 14.1 §2：真实权限 —— App 的 confirm 回调**默认拒绝 L2/L3**（不 blanket allow）；
+        # 只有 Authorization Context 显式授权（精选安全菜单任务 / GUI confirm token）才放行。
         self.permission.on_confirm = self._confirm_agent_permission
-        self.agent = AgentRuntime(self.bus, self.tools, self.permission)
+        # Phase 14.1 §1：**唯一共享 LLM adapter** —— LifeBrain / DialogueBrain / PlannerV2 用同一实例
+        # （禁止第二套模型配置）。LLM 不可用 → PlannerV2 deterministic fallback 继续工作。
+        self.llm = None
+        try:
+            self.llm = get_adapter(cfg.llm.provider)(cfg.llm)
+        except Exception as e:
+            log.warning("LLM adapter 初始化失败: %s", e)
+            self.llm = None
+        # Phase 14.1 §1/§4：production agent 必须使用 PlannerV2（收到 ToolRegistry +
+        # CapabilityRegistry + 同一 LLM adapter）
+        from furina.agent.capabilities import build_capability_registry
+        from furina.agent.planner_v2 import PlannerV2
+        self.capability_registry = build_capability_registry(self.tools)
+        self.agent = AgentRuntime(
+            self.bus, self.tools, self.permission,
+            planner_factory=lambda tools: PlannerV2(tools, self.capability_registry,
+                                                    llm=self.llm))
         # Phase 14K：认知层总装（CognitionHub；连接现有 Memory/Relationship + Canon adapters +
         # UserModel/EventTimeline/AgentTaskHistory + ContextAssembler）。
         self.cognition = None
+        self._event_bridge = None
         try:
             from furina.cognition import CognitionHub
             self.cognition = CognitionHub(cfg.db_path, memory_engine=self.memory,
@@ -122,18 +140,24 @@ class Furina:
             # Phase 14I：Agent worker 产出结构化 task_record → dispatcher 回 owner → C7 persist
             self.agent.on_task_finished = lambda rec: self._rt_dispatcher().submit(
                 lambda: self._persist_agent_task(rec))
+            # Phase 14.1 §7：C6 curated event bridge（唯一 owner；worker emit 经 dispatcher 回 owner）
+            from furina.cognition.bridge import EventBridge
+            self._event_bridge = EventBridge(self.cognition)
+            self.bus.on(EventType.DIRECT_TURN_TRACE, self._on_trace_bridge)
+            self.bus.on(EventType.BRAIN_SPOKE, self._on_spoke_bridge)
+            self.bus.on(EventType.AGENT_STARTED, self._on_agent_started_bridge)
         except Exception as e:
             log.warning("cognition 初始化失败（不影响既有运行）: %s", e)
             self.cognition = None
 
         # 三脑架构（legacy-plan/8 修正）：LifeBrain 状态决策 + DialogueBrain 语言 + ToolAgent 双手。
-        # 用配置的 provider（默认 zhipu glm-4v-flash；.env 可切 openai_compat 更快模型）。
+        # 用**同一**共享 LLM adapter（Phase 14.1 §1；默认 zhipu glm-4v-flash；.env 可切）。
         self.life_brain = None
         self.dialogue_brain = None
         try:
-            llm = get_adapter(cfg.llm.provider)(cfg.llm)
-            self.life_brain = LifeBrain(llm, self.memory, identity=furina_character_identity)
-            self.dialogue_brain = DialogueBrain(llm, identity=furina_character_identity)
+            if self.llm is not None:
+                self.life_brain = LifeBrain(self.llm, self.memory, identity=furina_character_identity)
+                self.dialogue_brain = DialogueBrain(self.llm, identity=furina_character_identity)
         except Exception as e:
             log.warning("大脑初始化失败，对话/状态决策不可用: %s", e)
             self.life_brain = None
@@ -313,7 +337,18 @@ class Furina:
                 self._recent_activity = prev
                 self._recent_activity_finished_at = time.monotonic()
                 self._recent_activity_finished_wall = time.time()
+                # Phase 14.1 §7：C6 ACTIVITY_FINISHED（活动切换时记录上一活动，owner）
+                bridge = getattr(self, "_event_bridge", None)
+                if bridge is not None:
+                    bridge.record("ACTIVITY_FINISHED", key=f"actfin:{prev}:{req.action}",
+                                  payload={"activity": prev, "next": req.action},
+                                  source="director", importance=0.1)
             self._current_activity_truth = req.action
+            # Phase 14.1 §7：C6 ACTIVITY_STARTED（活动启动，owner；同活动不重复）
+            bridge = getattr(self, "_event_bridge", None)
+            if bridge is not None and req.action != "idle":
+                bridge.record("ACTIVITY_STARTED", key=f"actstart:{req.action}",
+                              payload={"activity": req.action}, source="director", importance=0.1)
         except Exception:
             pass
         # Phase 13 终审 §4.5：**EmotionEngine 是情绪真相的唯一所有者**。
@@ -360,6 +395,12 @@ class Furina:
     # -------------------------------------------------- 互动 → 记忆/关系（legacy-plan/4 §27）
     def _on_meaningful_interaction(self, ev) -> None:
         kind = ev.type.value
+        # Phase 14.1 §7：C6 MEANINGFUL_INTERACTION（objective event reference，owner）
+        bridge = getattr(self, "_event_bridge", None)
+        if bridge is not None and kind in ("petting", "poke", "drag"):
+            bridge.record("MEANINGFUL_INTERACTION", key=f"interact:{kind}:{ev.count or 0}:{id(ev)}",
+                          payload={"kind": kind, "count": int(getattr(ev, "count", 0) or 0)},
+                          source="interaction", importance=0.4)
         # 关系：唯一写入口 = RelationshipEngine.apply(event)（§12：Relationship → RelationshipEngine owns）。
         # 事件同一份，关系引擎与记忆各自消费，**不做 Memory → Relationship**。
         if kind in ("petting", "poke", "drag"):
@@ -564,23 +605,24 @@ class Furina:
                 self.emotion.apply_event(EVENT_TALK, tired_hint=self._tired_hint())
             except Exception:
                 pass
-        # Phase 14J：明确高置信 self-statements → UserModel candidate（deterministic conservative
-        # extraction，owner persist；不覆盖 current explicit user turn —— 只新增/升级 item）。
+        # Phase 14.1 §8：UserModel evidence chain —— objective USER_* declaration event **先**落地，
+        # 拿到 event_id → UserModel upsert(source_event_id=event_id)（证据可追溯）。
         cog = getattr(self, "cognition", None)
         if cog is not None:
             try:
                 cand = cog.extract_user_model(text)
                 if cand:
-                    cog.user_model.upsert_item(
-                        category=cand["category"], key=cand["key"], value=cand["value"],
-                        confidence=cand["confidence"], source_text_excerpt=cand["excerpt"])
                     ev_type = ("USER_PLAN_DECLARED" if cand["category"] == "PLAN"
                                else "USER_PREFERENCE_DECLARED")
-                    cog.record_event(ev_type, source="dialogue", channel="DIRECT_USER_TURN",
-                                     payload={"key": cand["key"], "value": cand["value"],
-                                              "excerpt": cand["excerpt"],
-                                              "confidence": cand["confidence"]},
-                                     importance=0.5, consolidate=False)
+                    ev = cog.record_event(
+                        ev_type, source="dialogue", channel="DIRECT_USER_TURN",
+                        payload={"key": cand["key"], "value": cand["value"],
+                                 "excerpt": cand["excerpt"], "confidence": cand["confidence"]},
+                        importance=0.5, consolidate=False)
+                    cog.user_model.upsert_item(
+                        category=cand["category"], key=cand["key"], value=cand["value"],
+                        confidence=cand["confidence"], source_event_id=ev.event_id,
+                        source_text_excerpt=cand["excerpt"])
             except Exception:
                 pass
         # 2. R1.2-2：**不再在入队前 reserve DialogueBrain seq** —— DirectDialogueQueue
@@ -593,7 +635,15 @@ class Furina:
         # 4. R1.1-1：无论 dialogue_brain 是否为 None，都必须产生 DirectTurn + 可观察终态。
         #    db=None → worker 立即 FAILED(reason=dialogue_brain_unavailable) + SYSTEM_STATUS，
         #    绝不让用户消息静默消失；db 恢复后下一条消息正常回复。
-        self._direct_dialogue_queue().submit(snap, user_text=text)
+        turn_id = self._direct_dialogue_queue().submit(snap, user_text=text)
+        # Phase 14.1 §7：C6 USER_MESSAGE + DIRECT_TURN_STARTED（owner，exactly once per turn_id）
+        bridge = getattr(self, "_event_bridge", None)
+        if bridge is not None and turn_id:
+            bridge.record("USER_MESSAGE", key=f"umsg:{turn_id}",
+                          payload={"text": text[:200]}, source="user",
+                          channel="DIRECT_USER_TURN", turn_id=turn_id, importance=0.2)
+            bridge.record("DIRECT_TURN_STARTED", key=f"dstart:{turn_id}",
+                          source="app", channel="DIRECT_USER_TURN", turn_id=turn_id, importance=0.1)
 
     # -------------------------------------------------- B1：DirectDialogueQueue（专用直接 lane）
     def _direct_dialogue_queue(self):
@@ -748,17 +798,28 @@ class Furina:
             pass
 
     def _confirm_agent_permission(self, description: str, level) -> bool:
-        """角色化权限确认（legacy-plan/5 §20）：用户主动点的菜单任务直接放行，给出认可台词。"""
-        log.info("agent 授权: %s (level=%s)", description, getattr(level, "name", level))
-        return True
+        """Phase 14.1 §2：**禁止 blanket allow L2/L3**。
+
+        生产默认**拒绝**（当前无真实 confirmation UI/provider）——绝不 fake confirm；
+        只有 Authorization Context 显式授权（精选安全菜单任务 / GUI confirm token）才放行。
+        unknown/LLM plan 的 delete/overwrite/send 绝不自动通过。
+        """
+        log.info("agent 授权请求被拒（无显式授权）: %s (level=%s)", description,
+                 getattr(level, "name", level))
+        return False
 
     def submit_agent_task(self, user_request: str, extra_context: dict | None = None) -> None:
         """§7：唯一正式 Agent 请求入口（右键菜单 + Harness 共用）。
 
         通过 App._agent_worker → AgentRuntime.execute；AgentRuntime 是 AGENT_COMPLETED/FAILED
         的**唯一** production owner（App 不再重复 emit）。
+
+        Phase 14.1 §2：只有**精选安全菜单任务**（AGENT_TASKS，用户显式点击、固定 bounded 工具序列）
+        授予本次任务 L2 高风险授权；任意文本请求（含 LLM plan）不授予 → L2/L3 默认拒绝。
         """
         import threading
+        if user_request in self.AGENT_TASKS:
+            self.permission.authorize(Permission.L2_HIGH_RISK, scope=f"menu:{user_request}")
         threading.Thread(target=self._agent_worker, args=(user_request, extra_context), daemon=True).start()
 
     def _set_agent_planning(self) -> None:
@@ -791,6 +852,12 @@ class Furina:
                                                 outcome=goal))
         except Exception as e:
             log.warning("agent worker err: %s", e)
+        finally:
+            # Phase 14.1 §2：授权上下文是**本次任务**一次性 —— 任务结束回 owner 清空（不跨任务延续）
+            try:
+                self._rt_dispatcher().submit(self.permission.revoke_all)
+            except Exception:
+                pass
 
     def _persist_agent_task(self, record: dict) -> None:
         """owner 线程（Phase 14I）：Agent 结构化 task_record → C7 persist + C6 事件。
@@ -830,6 +897,74 @@ class Furina:
                                  source="agent", task_id=tid, importance=0.4)
         except Exception as e:
             log.warning("persist agent task failed: %s", e)
+
+    # -------------------------------------------------- Phase 14.1 §7：C6 curated event bridge
+    def _bridge_owner(self, fn) -> None:
+        """bridge 记录只在 owner 线程执行（worker emit 的 bus 事件经 dispatcher 回 owner）。"""
+        d = self._rt_dispatcher()
+        if d.is_owner():
+            try:
+                fn()
+            except Exception:
+                pass
+        else:
+            try:
+                d.submit(fn)
+            except Exception:
+                pass
+
+    def _on_trace_bridge(self, ev) -> None:
+        """DIRECT_TURN_TRACE 终态 → C6 DIRECT_TURN_TERMINAL（exactly once per turn_id）。"""
+        payload = dict((ev.payload or {}) or {})
+        if payload.get("phase", "") in ("REPLIED", "FAILED", "CANCELLED"):
+            self._bridge_owner(lambda: self._record_direct_terminal(payload))
+
+    def _record_direct_terminal(self, payload: dict) -> None:
+        bridge = getattr(self, "_event_bridge", None)
+        if bridge is None:
+            return
+        turn_id = int(payload.get("turn_id", 0) or 0)
+        bridge.record("DIRECT_TURN_TERMINAL", key=f"dterm:{turn_id}",
+                      payload={"phase": str(payload.get("phase", "")),
+                               "failure_reason": str(payload.get("failure_reason", "") or "")},
+                      source="dialogue_queue", channel="DIRECT_USER_TURN",
+                      turn_id=turn_id or None, importance=0.3)
+
+    def _on_spoke_bridge(self, ev) -> None:
+        """BRAIN_SPOKE → C6 FURINA_SPOKE（DIRECT turn 按 turn_id exactly once）。"""
+        payload = getattr(ev, "payload", None)
+        if payload is None:
+            return
+        self._bridge_owner(lambda: self._record_spoke(payload))
+
+    def _record_spoke(self, payload) -> None:
+        bridge = getattr(self, "_event_bridge", None)
+        if bridge is None:
+            return
+        turn_id = int(getattr(payload, "turn_id", 0) or 0)
+        if turn_id:
+            key = f"spoke:{turn_id}"
+        else:
+            key = f"spoke:a:{getattr(self, '_spoke_seq', 0)}"
+            self._spoke_seq = getattr(self, "_spoke_seq", 0) + 1
+        bridge.record("FURINA_SPOKE", key=key,
+                      payload={"speech": str(getattr(payload, "speech", ""))[:120]},
+                      source="app", channel=str(getattr(payload, "channel", "") or ""),
+                      turn_id=turn_id or None, importance=0.2)
+
+    def _on_agent_started_bridge(self, ev) -> None:
+        """AGENT_STARTED → C6 AGENT_STARTED（exactly once per task_id）。"""
+        payload = dict((ev.payload or {}) or {})
+        task_id = str(payload.get("task_id", "") or "")
+        self._bridge_owner(lambda: self._record_agent_started(payload, task_id))
+
+    def _record_agent_started(self, payload: dict, task_id: str) -> None:
+        bridge = getattr(self, "_event_bridge", None)
+        if bridge is None:
+            return
+        bridge.record("AGENT_STARTED", key=f"agstart:{task_id}",
+                      payload={"request": str(payload.get("request", ""))[:200]},
+                      source="agent", task_id=task_id, importance=0.4)
 
     def _agent_facts(self) -> tuple:
         """R2.1 P1-1：CURRENT_FACTS 权威 —— 当前 Agent 生命周期状态 + 活跃任务（只读真相）。"""
@@ -872,22 +1007,36 @@ class Furina:
         recent_act = str(getattr(self, "_recent_activity", "") or "")
         recent_fin = float(getattr(self, "_recent_activity_finished_at", 0.0) or 0.0)
         from furina.app import RECENT_ACTIVITY_FRESHNESS_SECONDS
-        # Phase 14K：owner ingress 用 CognitionHub 组装有界 cognitive context（plain immutable）。
+        # Phase 14K/14.1 §6：owner ingress 用 CognitionHub 组装有界 cognitive context（plain immutable）。
+        # Phase 14.1：bounded serialization —— canon episodes 只在 activation>=2 时携带（普通日常
+        # activation=0 不得把 explicit Canon plot 写进 prompt）；activation 0 允许只传 present-day
+        # influence 或不传 episode。
         cog_ctx = ()
         cog = getattr(self, "cognition", None)
         if cog is not None:
             try:
                 ctx = cog.assemble(query=text, current_facts={"activity": str(
                     getattr(self.state.state.life, "activity", "")), "agent_state": agent_state})
+                episodes = []
+                if ctx.canon_activation >= 2:
+                    episodes = [
+                        {"episode_id": e.episode_id,
+                         "objective_summary": e.objective_summary,
+                         "present_day_effects": list(e.present_day_effects)[:3],
+                         "psychological_effects": list(e.psychological_effects)[:3],
+                         "explicit_recall_policy": e.explicit_recall_policy}
+                        for e in ctx.relevant_canon_episodes[:2]]
                 cog_ctx = freeze_flat({
+                    "canon": {"activation": ctx.canon_activation, "episodes": episodes},
+                    "autobiographical_memories": list(ctx.autobiographical_memories)[:3],
                     "user_model_items": [{"category": i.category, "value": i.value,
                                           "confidence": i.confidence, "key": i.key}
                                          for i in ctx.user_model_items],
-                    "recent_events": [{"event_type": e.event_type, "importance": e.importance}
-                                      for e in ctx.recent_events],
+                    "relationship": dict(ctx.relationship),
                     "relevant_agent_tasks": [{"goal": t.goal, "status": t.status}
                                              for t in ctx.relevant_agent_tasks],
-                    "canon_activation": ctx.canon_activation,
+                    "recent_events": [{"event_type": e.event_type, "importance": e.importance}
+                                      for e in ctx.recent_events],
                 })
             except Exception:
                 cog_ctx = ()

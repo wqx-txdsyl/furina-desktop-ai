@@ -1,21 +1,23 @@
 """应用启动工具（legacy-plan/5 §10-11）。
 
-用 subprocess 启动本机应用（记事本/浏览器/编辑器等）。
-Phase 13 终审 §10.4：`app.launch` 必须**可观察验证** —— Popen 成功不等于应用真的起来了；
-Windows 上在有限超时内轮询 tasklist 确认进程出现，未观察到 → verified=False（绝不假装成功）。
-Phase 13 终审 §10.7：启动应用是副作用动作 → 权限档位 L1_LOW_WRITE（不再是只读 L0）。
+Phase 14.1 §4：production `app.launch` **必须**经 `ApplicationCatalog` 解析真实 target
+（alias/PATH/Start Menu/App Paths/Office 发现），不得以 `_APPS` 固定字典作为唯一 resolver。
+- known safe aliases 保留为 Catalog seed 数据（_APPS 仅供说明/兼容查看，不再作唯一解析器）；
+- 未知应用 → unable（绝不猜 executable，绝不启动 notepad）；
+- 禁止 shell 执行用户任意字符串（只 launch 解析后的 target）。
+Phase 13 终审 §10.4：可观察验证 —— Popen 成功 ≠ 启动成功（tasklist 轮询确认进程）。
 """
 from __future__ import annotations
 
 import subprocess
 import sys
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Union
 
 from ..permission import Permission
 from ..tool import BaseTool, ToolResult
 
-# 常见别名 → 可执行名
+# 已知 safe aliases（Catalog seed 说明；production resolver = ApplicationCatalog）
 _APPS = {
     "notepad": "notepad", "记事本": "notepad",
     "code": "code", "vscode": "code",
@@ -45,14 +47,18 @@ _OBSERVABLE_ALIASES = {
 }
 
 
-def _observe_process(exe: str) -> bool:
+def _observe_process(exe: Union[str, List[str]]) -> bool:
     """可观察验证：进程是否真实出现（Windows tasklist；非 Windows 无法观察 → False）。
 
-    按应用的真实可观察身份（别名列表）匹配，绝不假设启动名 == 最终进程名。
+    兼容两种入参：str（按 _OBSERVABLE_ALIASES 解析）或 List[str]（显式进程名列表，
+    ApplicationCatalog record.process_names 直接消费）。
     """
     if sys.platform != "win32":
         return False
-    names = _OBSERVABLE_ALIASES.get(exe, (f"{exe}.exe",))
+    if isinstance(exe, str):
+        names = _OBSERVABLE_ALIASES.get(exe, (f"{exe}.exe",))
+    else:
+        names = list(exe) or [f"{exe}.exe"]
     for _ in range(_LAUNCH_VERIFY_TRIES):
         try:
             for name in names:
@@ -68,23 +74,39 @@ def _observe_process(exe: str) -> bool:
 
 class LaunchTool(BaseTool):
     name = "app.launch"
-    description = "启动一个本机应用"
+    description = "启动一个本机应用（经 ApplicationCatalog 解析真实 target；未知应用不猜）"
     permission = Permission.L1_LOW_WRITE   # 启动应用 = 副作用动作（§10.7）
-    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"name": {"type": "string"}},
+              "required": ["name"]}
+
+    def __init__(self, catalog=None) -> None:
+        # Phase 14.1 §4：production resolver = ApplicationCatalog（真实发现 + 未知不猜）
+        from furina.agent.capabilities.applications import ApplicationCatalog
+        self.catalog = catalog or ApplicationCatalog()
 
     def run(self, name: str) -> ToolResult:
-        key = (name or "").strip().lower()
-        exe = _APPS.get(key) or _APPS.get(name or "")
-        if not exe:
-            return ToolResult(False, error=f"未知应用: {name}", verified=False)
+        rec = self.catalog.resolve(name)
+        if rec is None:
+            return ToolResult(False, error=f"未知应用: {name}（不猜 executable，不启动）",
+                              verified=False)
+        target = rec.launch_target
         try:
-            # 启动；用 shell 让系统解析可执行/别名（Window 下 notepad/code 在 PATH 中）
-            subprocess.Popen([exe], shell=True)
+            # 只 launch 解析后的 target（.lnk 用 start 语义；exe 直接 Popen）；禁止 shell 任意字符串
+            if str(target).lower().endswith(".lnk"):
+                subprocess.Popen(["cmd", "/c", "start", "", target], shell=True)
+            else:
+                subprocess.Popen([target], shell=True)
         except Exception as e:
             return ToolResult(False, error=str(e), verified=False)
         # §10.4：可观察验证（Popen 成功 ≠ 启动成功）
-        if _observe_process(exe):
-            return ToolResult(True, data={"launched": name, "process": exe},
-                              verified=True, note=f"已启动并确认进程 {exe}")
-        return ToolResult(True, data={"launched": name, "process": exe},
-                          verified=False, note=f"Popen 成功但未观察到进程 {exe}（不假装启动成功）")
+        if _observe_process(rec.process_names or [_exe_name(target)]):
+            return ToolResult(True, data={"launched": name, "target": target,
+                                          "process": (rec.process_names or [_exe_name(target)])[0]},
+                              verified=True, note=f"已启动并确认进程 {rec.app_id}")
+        return ToolResult(True, data={"launched": name, "target": target},
+                          verified=False, note=f"Popen 成功但未观察到进程（UNVERIFIED）")
+
+
+def _exe_name(target: str) -> str:
+    import os
+    return os.path.basename(str(target))

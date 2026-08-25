@@ -16,7 +16,8 @@ class OpenUrlTool(BaseTool):
     name = "browser.open"
     description = "用系统浏览器打开一个网址"
     permission = Permission.L0_READ
-    schema = {"type": "object", "properties": {"url": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"url": {"type": "string"}},
+              "required": ["url"]}
 
     def run(self, url: str) -> ToolResult:
         href = url if "://" in url else "https://" + url
@@ -31,7 +32,8 @@ class SearchTool(BaseTool):
     name = "browser.search"
     description = "用默认搜索引擎搜索关键词"
     permission = Permission.L0_READ
-    schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"query": {"type": "string"}},
+              "required": ["query"]}
 
     def run(self, query: str) -> ToolResult:
         href = "https://www.bing.com/search?q=" + urllib.parse.quote(query)

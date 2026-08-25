@@ -112,13 +112,18 @@ class CognitionHub:
     def record_event(self, event_type: str, *, payload: Optional[Dict[str, Any]] = None,
                      source: str = "runtime", actor: str = "furina", channel: str = "",
                      turn_id: Optional[int] = None, task_id: str = "",
-                     importance: float = 0.0, consolidate: bool = True) -> None:
-        """owner 线程：追加客观事件 + 可选 consolidation（单事件单 owner）。"""
+                     importance: float = 0.0, consolidate: bool = True):
+        """owner 线程：追加客观事件 + 可选 consolidation（单事件单 owner）。
+
+        Phase 14.1 §8：返回 LifeEvent（含 event_id），供 UserModel upsert 的 source_event_id
+        evidence chain 使用（objective event 先落地 → 拿到 event_id → item 引用它）。
+        """
         ev = self.events.append(event_type=event_type, payload=payload, source=source,
                                 actor=actor, channel=channel, turn_id=turn_id,
                                 task_id=task_id, importance=importance)
         if consolidate:
             self._apply_consolidation(ev)
+        return ev
 
     def _apply_consolidation(self, ev) -> None:
         try:
@@ -158,6 +163,8 @@ class CognitionHub:
                              permission_summary: str = "") -> None:
         """worker 返回结构化 task result → **owner**（dispatcher）调用本方法持久化 C7。
 
+        Phase 14.1 §5：C7 精确保留生命周期 status（PLANNED/RUNNING/COMPLETED_VERIFIED/
+        FAILED/UNVERIFIED/CANCELLED），**不得由 verified bool 替代 status**。
         本方法设计为只在 owner 线程执行（不直接暴露给 worker）。
         """
         task = self.agent_history.get_task(task_id)
@@ -179,8 +186,9 @@ class CognitionHub:
                     task_id, a.get("artifact_type", "file"), a.get("path", ""),
                     exists_verified=bool(a.get("exists_verified", False)),
                     metadata=a.get("metadata"))
-        self.agent_history.complete_task(task_id, verified=verified,
-                                         result_summary=result_summary, error=error)
+        # 精确保留 status（FAILED → FAILED；UNVERIFIED → UNVERIFIED；verified success → COMPLETED_VERIFIED）
+        self.agent_history.set_status(task_id, status, error=error,
+                                      verified=bool(verified), result_summary=result_summary)
 
     def assemble(self, *, query: str = "", topic: str = "",
                  current_facts: Optional[Dict[str, Any]] = None,

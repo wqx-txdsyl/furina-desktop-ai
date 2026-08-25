@@ -928,12 +928,24 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
                 parts.append("- 注意: 没有时长证据，**禁止**编造'花了几分钟/几秒'")
         except Exception:
             pass
-    # Phase 14K：bounded CognitiveContext（owner ingress 冻结的 plain 事实；无则不注入）。
+    # Phase 14K/14.1 §6：bounded CognitiveContext（owner ingress 冻结的 plain 事实；无则不注入）。
     # 权威顺序已由 assembler 决定；这里只放**有界**摘要，绝不 dump 数据库。
+    # activation 0 的普通日常**不得**把 explicit Canon plot 写进 prompt（episodes 为空）。
     if cognitive_context:
         try:
             cc = cognitive_context
             lines = []
+            canon = cc.get("canon") or {}
+            episodes = canon.get("episodes") or []
+            if episodes:
+                for e in episodes[:2]:
+                    lines.append(f"过去经历片段({e.get('episode_id','')}): "
+                                 f"{str(e.get('objective_summary',''))[:60]}"
+                                 + (f"；现在影响: {'；'.join(str(x) for x in (e.get('present_day_effects') or [])[:2])}"
+                                    if e.get("present_day_effects") else ""))
+            mems = cc.get("autobiographical_memories") or []
+            if mems:
+                lines.append("我记忆中的事: " + "；".join(str(m)[:40] for m in mems[:3]))
             um = cc.get("user_model_items") or []
             if um:
                 lines.append("用户已知事实: " + "；".join(

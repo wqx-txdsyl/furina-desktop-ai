@@ -248,7 +248,8 @@ def test_app_freeze_snapshot_includes_cognitive_context(tmp_path):
     snap = app._freeze_direct_snapshot("今天吃什么")
     assert len(snap.cognitive_context) > 0, "快照必须携带 bounded cognitive context"
     d = dict(snap.cognitive_context)
-    assert "canon_activation" in d and d["canon_activation"] == 0
+    assert d["canon"]["activation"] == 0 and d["canon"]["episodes"] == [], \
+        "普通日常 activation=0 不得携带 explicit Canon episode"
     app.cognition.close()
 
 

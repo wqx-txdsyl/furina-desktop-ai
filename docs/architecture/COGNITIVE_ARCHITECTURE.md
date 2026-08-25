@@ -49,6 +49,13 @@ Consolidator、Retrieval、Migration 边界。实现见 `furina/cognition/`。
 | CONFLICT RULE | C2（+C1）> 任何 Runtime memory；C2 是"经历及其现在影响"，不是剧情百科 |
 | RUNTIME USE | 触发式（activation）进入对话；不 always-on、不 lore bot |
 
+> **C2 状态（Phase 14.1 §10 明示）**：
+> `C2 STATUS = STRUCTURE IMPLEMENTED`（schema/store/retrieval/activation 全部实现）；
+> `CANON CORPUS = SEED / PARTIAL`（20 条 seed episodes；Chapter IV Act I–IV 具体场景标
+> `status=PARTIAL`，不猜）。**不得宣称 FULL CANON LIFE COMPLETE / source-complete**。
+> SRC-004/005/006（官方游戏文本）没有可重定位 locator（本 repo 不保存大段原文），
+> 不声称 source-complete；完整官方 source expansion 留 Phase 15。
+
 字段模型 `CanonEpisode`（见 `furina/cognition/models.py`）：
 `episode_id / timeline_order / period / version / quest / act / scene / objective_summary /
 furina_role_at_time / furina_knew[] / furina_did_not_know[] / people_present[] /

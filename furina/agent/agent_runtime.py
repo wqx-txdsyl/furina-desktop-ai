@@ -34,12 +34,16 @@ class AgentContext:
 class AgentRuntime:
     def __init__(self, bus: EventBus, tools: ToolRegistry, permission: PermissionManager,
                  planner_factory: Callable[[ToolRegistry], Planner] = Planner,
-                 task_history: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
+                 task_history: Optional[Callable[[Dict[str, Any]], None]] = None,
+                 permission_resolver=None) -> None:
         self.bus = bus
         self.tools = tools
         self.permission = permission
         self.planner = planner_factory(tools)
         self.context = AgentContext()
+        # Phase 14.1 §3：动态权限（effective permission）解析器（覆盖已有文件 → L2 等）
+        from .permission import EffectivePermissionResolver
+        self._perm_resolver = permission_resolver or EffectivePermissionResolver()
         # Phase 14I：worker 产出结构化 task_record → owner persist 回调（App 注入 dispatcher owner 包装）
         self.on_task_finished = task_history
         # 角色行为同步钩子（legacy-plan/5 §15），由 app 注入：如 approach/walk/report
@@ -105,14 +109,17 @@ class AgentRuntime:
                                   permission_summary="")
                 return {"status": "failed", "reason": str(e), "results": results,
                         "task_id": task_id, "task_record": self._last_task_record}
-            # 权限检查
-            decision = self.permission.check(f"{tool.description}：{step.args}", tool.permission)
+            # 权限检查（Phase 14.1：最终 effective permission —— 动态升级覆盖/删除/发送）
+            eff = self._perm_resolver.effective_permission(tool, step.args)
+            decision = self.permission.check(f"{tool.description}：{step.args}", eff)
             steps.append({"step_index": i, "tool": step.tool, "args": step.args,
-                          "capability": "", "permission_level": tool.permission.name,
+                          "capability": "", "permission_level": eff.name,
                           "status": "RUNNING", "verified": False, "result": None, "error": ""})
             if not decision.granted:
+                # Phase 14.1 §2：reason 保持旧契约 "permission_denied"（level 放 permission_summary）
                 self.bus.emit(EventType.AGENT_FAILED,
-                              payload={"step": i, "reason": "permission_denied", "task_id": task_id},
+                              payload={"step": i, "reason": "permission_denied",
+                                       "task_id": task_id},
                               source="agent")
                 self._body("report")
                 self.status = "FAILED"
@@ -121,7 +128,7 @@ class AgentRuntime:
                 self._report_task(task_id, "FAILED", goal=plan.goal, original_request=user_request,
                                   verified=False, result_summary="", error="permission_denied",
                                   steps=steps, artifacts=artifacts, plan_json=self._plan_json(plan),
-                                  permission_summary=f"denied:{tool.permission.name}")
+                                  permission_summary=f"denied:{eff.name}")
                 return {"status": "failed", "reason": "permission_denied", "results": results,
                         "task_id": task_id, "task_record": self._last_task_record}
             # 执行

@@ -27,7 +27,8 @@ class DocCreateTool(BaseTool):
     description = "创建 TXT/Markdown 文档并写入内容（L1，显式目标路径）"
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
-                                               "content": {"type": "string"}}}
+                                               "content": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str, content: str = "") -> ToolResult:
         p = _resolve(path)
@@ -49,7 +50,8 @@ class DocReadTool(BaseTool):
     name = "doc.read"
     description = "读取 TXT/Markdown 文档内容（只读 L0）"
     permission = Permission.L0_READ
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"path": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str) -> ToolResult:
         p = _resolve(path)
@@ -71,10 +73,11 @@ class DocWriteTool(BaseTool):
     schema = {"type": "object", "properties": {"path": {"type": "string"},
                                                "content": {"type": "string"},
                                                "expected_old_hash": {"type": "string"},
-                                               "overwrite": {"type": "boolean"}}}
+                                               "overwrite": {"type": "boolean"}},
+              "required": ["path", "content"]}
 
     def run(self, path: str, content: str = "", expected_old_hash: str = "",
-            overwrite: bool = True) -> ToolResult:
+            overwrite: bool = False) -> ToolResult:
         import hashlib
         p = _resolve(path)
         if p.exists():
@@ -83,7 +86,8 @@ class DocWriteTool(BaseTool):
                 if old != expected_old_hash:
                     return ToolResult(False, error="expected_old_hash 不匹配，拒绝写入", verified=False)
             elif overwrite is False:
-                return ToolResult(False, error="overwrite=false，目标已存在，拒绝覆盖", verified=False)
+                return ToolResult(False, error="目标已存在且未显式 overwrite=True，拒绝覆盖",
+                                  verified=False)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content or "", encoding="utf-8")
@@ -99,7 +103,8 @@ class DocAppendTool(BaseTool):
     description = "追加内容到 TXT/Markdown（L1）"
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
-                                               "content": {"type": "string"}}}
+                                               "content": {"type": "string"}},
+              "required": ["path", "content"]}
 
     def run(self, path: str, content: str = "") -> ToolResult:
         p = _resolve(path)
@@ -120,7 +125,8 @@ class DocEditTool(BaseTool):
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
                                                "old": {"type": "string"},
-                                               "new": {"type": "string"}}}
+                                               "new": {"type": "string"}},
+              "required": ["path", "old", "new"]}
 
     def run(self, path: str, old: str, new: str) -> ToolResult:
         p = _resolve(path)
@@ -147,7 +153,8 @@ class DocxCreateTool(BaseTool):
     schema = {"type": "object", "properties": {"path": {"type": "string"},
                                                "title": {"type": "string"},
                                                "paragraphs": {"type": "array"},
-                                               "bullets": {"type": "array"}}}
+                                               "bullets": {"type": "array"}},
+              "required": ["path"]}
 
     def run(self, path: str, title: str = "", paragraphs: Optional[list] = None,
             bullets: Optional[list] = None) -> ToolResult:
@@ -187,7 +194,8 @@ class PptxCreateTool(BaseTool):
     description = "创建 PowerPoint：title/content slides，保存后重新打开验证 slide count（L1）"
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
-                                               "slides": {"type": "array"}}}
+                                               "slides": {"type": "array"}},
+              "required": ["path"]}
 
     def run(self, path: str, slides: Optional[list] = None) -> ToolResult:
         try:
@@ -232,7 +240,8 @@ class XlsxCreateTool(BaseTool):
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
                                                "rows": {"type": "array"},
-                                               "sheet": {"type": "string"}}}
+                                               "sheet": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str, rows: Optional[list] = None, sheet: str = "Sheet1") -> ToolResult:
         try:

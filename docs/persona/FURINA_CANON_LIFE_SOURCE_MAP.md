@@ -45,6 +45,10 @@
 - `data/canon/furina_life_history.json` —— 20+ 条 CanonEpisode（version-controlled、只读）。
 - `data/canon/furina_life_sources.json` —— 上述 SOURCE_ID 机器可读登记。
 
+> **C2 状态（Phase 14.1 §10）**：`STRUCTURE IMPLEMENTED` / `CANON CORPUS = SEED / PARTIAL`。
+> 20 条 seed episodes；Act I–IV 具体场景标 PARTIAL。SRC-004/005/006 无可重定位 locator，
+> 不声称 source-complete；完整官方 source expansion 留 Phase 15。禁止写 FULL CANON LIFE COMPLETE。
+
 ## 验收计数（C2 ACCEPTANCE）
 
 - canon_source_map_entries: 10（SRC-001~010）

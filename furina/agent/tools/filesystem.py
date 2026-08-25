@@ -33,7 +33,8 @@ class ListDirTool(BaseTool):
     name = "fs.list_dir"
     description = "列出目录内容"
     permission = Permission.L0_READ
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"path": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str = "~") -> ToolResult:
         p = _resolve(path)
@@ -63,7 +64,8 @@ class ReadFileTool(BaseTool):
     name = "fs.read_file"
     description = "读取一个文本文件的内容（前若干行）"
     permission = Permission.L0_READ
-    schema = {"type": "object", "properties": {"path": {"type": "string"}, "max_lines": {"type": "integer"}}}
+    schema = {"type": "object", "properties": {"path": {"type": "string"}, "max_lines": {"type": "integer"}},
+              "required": ["path"]}
 
     def run(self, path: str, max_lines: int = 200) -> ToolResult:
         p = _resolve(path)
@@ -131,7 +133,8 @@ class ExistsTool(BaseTool):
     name = "fs.exists"
     description = "检查路径是否存在（只读）"
     permission = Permission.L0_READ
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"path": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str) -> ToolResult:
         p = _resolve(path)
@@ -143,7 +146,8 @@ class StatTool(BaseTool):
     name = "fs.stat"
     description = "读取文件/目录元数据（大小/修改时间，只读）"
     permission = Permission.L0_READ
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"path": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str) -> ToolResult:
         p = _resolve(path)
@@ -164,7 +168,8 @@ class SearchTool(BaseTool):
     permission = Permission.L0_READ
     schema = {"type": "object", "properties": {"path": {"type": "string"},
                                                "pattern": {"type": "string"},
-                                               "limit": {"type": "integer"}}}
+                                               "limit": {"type": "integer"}},
+              "required": ["path"]}
 
     def run(self, path: str, pattern: str = "", limit: int = 50) -> ToolResult:
         base = _resolve(path)
@@ -190,7 +195,8 @@ class CreateFileTool(BaseTool):
     description = "在显式目标路径创建空文件（L1；用户选择目标）"
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
-                                               "content": {"type": "string"}}}
+                                               "content": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str, content: str = "") -> ToolResult:
         p = _resolve(path)
@@ -215,22 +221,23 @@ class WriteTextTool(BaseTool):
     schema = {"type": "object", "properties": {"path": {"type": "string"},
                                                "content": {"type": "string"},
                                                "expected_old_hash": {"type": "string"},
-                                               "overwrite": {"type": "boolean"}}}
+                                               "overwrite": {"type": "boolean"}},
+              "required": ["path", "content"]}
 
     def run(self, path: str, content: str = "", expected_old_hash: str = "",
-            overwrite: bool = True) -> ToolResult:
+            overwrite: bool = False) -> ToolResult:
         import hashlib
         p = _resolve(path)
         exists = p.exists()
         if exists:
-            # 防误覆盖：显式 expected_old_hash 必须匹配；overwrite=false 拒绝覆盖
+            # 防误覆盖：显式 expected_old_hash 必须匹配；overwrite 默认 False（Phase 14.1）
             if expected_old_hash:
                 old = hashlib.sha256(p.read_bytes()).hexdigest()
                 if old != expected_old_hash:
                     return ToolResult(False, error="expected_old_hash 不匹配，拒绝写入（并发/误覆盖防护）",
                                       verified=False)
             elif overwrite is False:
-                return ToolResult(False, error="overwrite=false，目标已存在，拒绝覆盖",
+                return ToolResult(False, error="目标已存在且未显式 overwrite=True，拒绝覆盖",
                                   verified=False)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -249,7 +256,8 @@ class AppendTextTool(BaseTool):
     description = "追加文本到文件（文件不存在则创建；L1）"
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
-                                               "content": {"type": "string"}}}
+                                               "content": {"type": "string"}},
+              "required": ["path", "content"]}
 
     def run(self, path: str, content: str = "") -> ToolResult:
         p = _resolve(path)
@@ -270,7 +278,8 @@ class ReplaceTextTool(BaseTool):
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
                                                "old": {"type": "string"},
-                                               "new": {"type": "string"}}}
+                                               "new": {"type": "string"}},
+              "required": ["path", "old", "new"]}
 
     def run(self, path: str, old: str, new: str) -> ToolResult:
         p = _resolve(path)
@@ -296,7 +305,8 @@ class CopyTool(BaseTool):
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"source": {"type": "string"},
                                                "dest": {"type": "string"},
-                                               "overwrite": {"type": "boolean"}}}
+                                               "overwrite": {"type": "boolean"}},
+              "required": ["source", "dest"]}
 
     def run(self, source: str, dest: str, overwrite: bool = False) -> ToolResult:
         import shutil as _shutil
@@ -325,7 +335,8 @@ class MoveTool(BaseTool):
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"source": {"type": "string"},
                                                "dest": {"type": "string"},
-                                               "overwrite": {"type": "boolean"}}}
+                                               "overwrite": {"type": "boolean"}},
+              "required": ["source", "dest"]}
 
     def run(self, source: str, dest: str, overwrite: bool = False) -> ToolResult:
         src = _resolve(source)
@@ -350,7 +361,8 @@ class RenameTool(BaseTool):
     description = "重命名文件/目录（同一目录内；L1/L2）"
     permission = Permission.L1_LOW_WRITE
     schema = {"type": "object", "properties": {"path": {"type": "string"},
-                                               "new_name": {"type": "string"}}}
+                                               "new_name": {"type": "string"}},
+              "required": ["path", "new_name"]}
 
     def run(self, path: str, new_name: str) -> ToolResult:
         p = _resolve(path)
@@ -372,7 +384,8 @@ class CreateDirTool(BaseTool):
     name = "fs.create_dir"
     description = "创建目录（含父目录；L1）"
     permission = Permission.L1_LOW_WRITE
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"path": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str) -> ToolResult:
         p = _resolve(path)
@@ -388,7 +401,8 @@ class OpenPathTool(BaseTool):
     name = "fs.open_path"
     description = "在系统文件管理器中打开路径（L0/L1）"
     permission = Permission.L0_READ
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"path": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str) -> ToolResult:
         import subprocess as _sp
@@ -411,7 +425,8 @@ class DeleteTool(BaseTool):
     name = "fs.delete"
     description = "删除文件/目录（L2；必要时 L3；不默认出现在普通计划）"
     permission = Permission.L2_HIGH_RISK
-    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    schema = {"type": "object", "properties": {"path": {"type": "string"}},
+              "required": ["path"]}
 
     def run(self, path: str) -> ToolResult:
         p = _resolve(path)
