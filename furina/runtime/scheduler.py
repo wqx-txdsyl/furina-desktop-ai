@@ -149,6 +149,12 @@ class Scheduler:
         bus.on(EventType.AGENT_STARTED, self._on_agent_started_ev)
         self._agent_status = "IDLE"
         self._agent_last_request = ""
+        # R2.2 FINAL §16：前台对话所有权 —— 通过 DIRECT_TURN_TRACE 跟踪 direct 回合是否活跃。
+        # DIRECT_USER_TURN active 时 AMBIENT 不得 surface 插话；direct terminal 后有短 grace window。
+        self._direct_active = False          # 有 DIRECT 回合正在生成/排队
+        self._direct_grace_until = 0.0       # direct 终态后的对话宽限窗（monotonic）
+        self._ambient_deferred: List[Dict] = []   # IMPORTANT ambient 台词延迟到 grace 后（freshness 检查）
+        bus.on(EventType.DIRECT_TURN_TRACE, self._on_direct_turn_trace_ev)
 
         self._last_window_poll = 0.0
         self._debug_text = ""
@@ -257,6 +263,74 @@ class Scheduler:
         self._agent_status = "RUNNING"
         try:
             self._agent_last_request = str((ev.payload or {}).get("request", ""))
+        except Exception:
+            pass
+
+    # -------------------------------------------------- R2.2 FINAL §16：前台对话所有权
+    def _on_direct_turn_trace_ev(self, ev) -> None:
+        """跟踪 DIRECT_USER_TURN 生命周期：active 相位 → ambient 禁入；终态 → 开 grace window。
+
+        DIRECT > AGENT_REPORT > INTERACTION_REACTION > AMBIENT 的优先顺序在启动侧实现：
+          - `start_autonomous_dialogue`（AMBIENT 唯一入口）在 direct active / grace 内被节流；
+          - 高价值 IMPORTANT ambient 台词 defer 到 grace 结束后再做 freshness 检查（stale drop）。
+        """
+        p = ev.payload or {}
+        phase = p.get("phase", "")
+        status = p.get("status", "")
+        now = time.monotonic()
+        if phase in ("DIRECT_INGRESS", "QUEUED", "GENERATION_STARTED") or status in ("QUEUED", "GENERATING"):
+            self._direct_active = True
+            self._ambient_deferred = []
+        elif phase in ("REPLIED", "FAILED", "CANCELLED") or status in ("REPLIED", "FAILED", "CANCELLED"):
+            self._direct_active = False
+            # Direct terminal + visible 完成后 → 短 conversational grace window（§16）
+            self._direct_grace_until = now + self._direct_grace_window()
+            # 释放被 defer 的 IMPORTANT ambient 台词（freshness 检查）
+            deferred = list(self._ambient_deferred)
+            self._ambient_deferred = []
+            for d in deferred:
+                self._try_deferred_ambient(d, now)
+
+    def _direct_grace_window(self) -> float:
+        """direct 终态后的对话宽限窗（秒）。短：刚对话完不给 ambient 插话。"""
+        try:
+            cfg = getattr(getattr(self, "_owner_cfg", None), "dialogue_grace_seconds", 0.0)
+            if cfg:
+                return float(cfg)
+        except Exception:
+            pass
+        return 3.0
+
+    def _ambient_allowed(self, now: Optional[float] = None) -> bool:
+        """AMBIENT 是否被允许现在 surface（前台所有权检查）。"""
+        now = time.monotonic() if now is None else now
+        if self._direct_active:
+            return False
+        if now < self._direct_grace_until:
+            return False
+        return True
+
+    def _try_deferred_ambient(self, d: Dict, now: float) -> None:
+        """freshness 检查后重放被 defer 的 IMPORTANT ambient（过时则 stale drop）。
+
+        defer 记录的是"意图参数"（未生成 speech）；grace 结束后重新走正常自主台词路径
+        （此时 _ambient_allowed=True，会重新做节流 + 冻结快照 + LLM 生成）。
+        超过 8s 的 defer 视为过期（EPHEMERAL 语义）→ drop。
+        """
+        try:
+            if now < self._direct_grace_until:
+                return                      # 仍在 grace 内 → 再等
+            born = d.get("born", 0.0)
+            if now - born > 8.0:            # 过期 → stale drop
+                return
+            self.start_autonomous_dialogue(
+                activity=d.get("activity", ""),
+                speech_level=int(d.get("speech_level", 0) or 0),
+                speech_intent=d.get("speech_intent", ""),
+                dialogue_needed=bool(d.get("dialogue_needed", False)),
+                emotion=d.get("emotion", ""),
+                duration=float(d.get("duration", 0.0) or 0.0),
+                intent=d.get("intent", ""))
         except Exception:
             pass
 
@@ -748,12 +822,31 @@ class Scheduler:
 
         owner：节流检查 + 冻结快照 → worker：DialogueBrain.say → owner：应用台词/开 social bid。
         被阻塞/从未执行的 mind 请求不会走到这里（无台词、无 bid）。
+
+        R2.2 FINAL §16（前台对话所有权）：DIRECT_USER_TURN active 或 grace window 内，
+        AMBIENT 不得 surface 插话。
+          - EPHEMERAL（普通自主闲聊）→ 直接 drop；
+          - IMPORTANT（dialogue_needed / 高 speech_level）→ defer 到 grace 后 + freshness 检查。
+        LifeBrain ticking 不受影响（只拦台词 surface）。
         """
         if self.dialogue_brain is None:
             return
         try:
-            last = getattr(self, "_llm_speech_at", 0.0)
+            # R2.2 §16：前台所有权 gate（direct active / grace 内 → ambient 让路）
             now = time.monotonic()
+            if not self._ambient_allowed(now):
+                important = bool(dialogue_needed or int(speech_level or 0) >= 3)
+                if important:
+                    # IMPORTANT：defer（freshness 检查在 grace 后；记录意图参数待重放）
+                    self._ambient_deferred.append({
+                        "activity": activity, "speech_intent": speech_intent,
+                        "emotion": emotion, "intent": intent or activity,
+                        "duration": duration, "speech_level": int(speech_level or 0),
+                        "dialogue_needed": dialogue_needed, "born": now,
+                    })
+                    self._ambient_deferred = self._ambient_deferred[-3:]
+                return   # EPHEMERAL → stale drop；IMPORTANT → defer
+            last = getattr(self, "_llm_speech_at", 0.0)
             speech_level = int(speech_level or 0)
             # 节流：自主/状态触发的说话必须 >= 35s 一次，否则会刷屏（每次决策都说同一句）。
             # 只有高 speech_level(>=3 深聊) 或明确 dialogue_needed 且过了 15s 才放行。

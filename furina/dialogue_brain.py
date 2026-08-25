@@ -45,6 +45,8 @@ class DialogueBrain:
         # B3：近期**已展示**的直接回复（surface 语言重复监测，bounded；只记 direct）
         self._recent_surfaced: List[str] = []
         self._recent_surfaced_limit = 8
+        # R2.2 FINAL：近期 opening styles（防"哎呀"塌缩；跨直接对话轮）
+        self._recent_openings: List[str] = []
         # Phase 13C §24-26：有界短期对话上下文（内存，非数据库）
         self._history: List[Dict[str, Any]] = []
         self._history_limit = 8
@@ -380,6 +382,13 @@ class DialogueBrain:
                                               emotion=emotion, user_text=user_text)
             # 3) 相关 synthetic examples（Top-K=3）
             examples = self._select_examples(app, emotion, activity=activity, user_text=user_text)
+            # ============ R2.2 FINAL：PersonaPlan + UserTurnFrame + Autobiographical ============
+            # 确定性语义规划（不新增 LLM）：理解用户这一句 → 决定怎么回应。
+            plan, auto_guide = self._plan_turn(
+                user_text=user_text, app=app, emotion=emotion,
+                relationship=relationship, activity=activity,
+                user_initiated=user_initiated, task_mode=task_mode,
+                agent_state=agent_state, agent_task=agent_task)
             # 4) 生成 prompt。C-R1.3.1：history 只含**当前轮之前**的发言，当前 user_text 单独附一次
             hist = self.recent_turns(4)
             prompt = _dialogue_prompt_v2(app, intent=intent, emotion=emotion,
@@ -388,7 +397,8 @@ class DialogueBrain:
                                          examples=examples, person=self.persona,
                                          activity=activity, history=hist,
                                          interaction=interaction,
-                                         agent_state=agent_state, agent_task=agent_task)
+                                         agent_state=agent_state, agent_task=agent_task,
+                                         plan=plan, auto_guide=auto_guide)
             # R2.1 P1-5：用户显式格式/回答约束（优先级高于 persona style，保守确定性提取）
             if user_text:
                 m = re.search(r"只能回答([^或，,。！？\s]{1,6})(?:或者|或)([^。！？\s]{1,6})", user_text)
@@ -417,11 +427,17 @@ class DialogueBrain:
                 if picked is not None:
                     speech = picked
         # 5) Deterministic Validation（§38）—— **HARD invalid 绝不原样显示；SOFT 只记质量**
+        # R2.2 FINAL：context 用 PersonaPlan 的 mode（serious 转换后的真实表达姿态），
+        # 不再用 expression appraise 的旧 mode（后者不感知'我是认真问的'纠正）。
         v = self.validator.validate(speech, should_speak=True,
                                     example_phrases=[ex["speech"] for ex in examples],
-                                    activity=activity, context=app.mode.lower(),
+                                    activity=activity, context=plan.mode.lower(),
                                     recent_surface=list(self._recent_surfaced[-3:]),
-                                    interaction=interaction, constraint=constraint)
+                                    interaction=interaction, constraint=constraint,
+                                    agent_state=agent_state, agent_task=agent_task,
+                                    user_act=plan.user_dialogue_act,
+                                    correction=plan._frame_correction,
+                                    referent=plan.referent if plan.has_referent else "")
         soft_quality: List[str] = []
         if not v.valid:
             # 有界恢复：至多再生成一次（**同一 deadline，不重置预算**；确定性校验反馈）
@@ -439,9 +455,13 @@ class DialogueBrain:
                             retry = picked
                 v2 = self.validator.validate(retry, should_speak=True,
                                              example_phrases=[ex["speech"] for ex in examples],
-                                             activity=activity, context=app.mode.lower(),
+                                             activity=activity, context=plan.mode.lower(),
                                              recent_surface=list(self._recent_surfaced[-3:]),
-                                             interaction=interaction, constraint=constraint)
+                                             interaction=interaction, constraint=constraint,
+                                             agent_state=agent_state, agent_task=agent_task,
+                                             user_act=plan.user_dialogue_act,
+                                             correction=plan._frame_correction,
+                                             referent=plan.referent if plan.has_referent else "")
                 if v2.valid:
                     speech = retry
                     v = v2
@@ -518,6 +538,12 @@ class DialogueBrain:
             # R2.1 P1-6：surface 跟踪跨 **所有 user-visible 通道**（direct/interaction/feed/agent）
             self._recent_surfaced.append(speech)
             self._recent_surfaced = self._recent_surfaced[-self._recent_surfaced_limit:]
+            # R2.2 FINAL：opening style 跟踪（跨直接对话轮，防"哎呀"式开场塌缩）
+            try:
+                self._recent_openings.append(plan.opening_style)
+                self._recent_openings = self._recent_openings[-6:]
+            except Exception:
+                pass
             # H1 §6：原子成对提交 —— 只有存在可显示回复（DIRECT）才提交 user+furina 成对；
             # 失败/沉默/校验失败的回合**不产生孤儿 User 回合**（槽位由 say() finally 跳过）。
             if channel == "DIRECT_USER_TURN":
@@ -609,6 +635,58 @@ class DialogueBrain:
             return "high_trust"
         return ""
 
+    # -------------------------------------------------- R2.2 FINAL：PersonaPlan 规划（确定性）
+    def _plan_turn(self, *, user_text: str, app, emotion: str = "",
+                   relationship: Optional[dict] = None, activity: str = "",
+                   user_initiated: bool = False, task_mode: bool = False,
+                   agent_state: str = "", agent_task: str = ""):
+        """PersonaPlanner + AutobiographicalRouter（确定性，不新增 LLM）。
+
+        返回 (PersonaPlan, auto_guide)。失败时返回默认 plan（不阻断对话）。
+        """
+        from furina.persona.persona_planner import plan_for
+        from furina.persona.autobiographical import prompt_guide as _auto_guide
+        rel = relationship or {}
+        try:
+            trust = float(rel.get("trust", 0.5))
+            familiarity = float(rel.get("familiarity", 0.5))
+            annoyance = float(rel.get("annoyance", 0.1))
+        except Exception:
+            trust, familiarity, annoyance = 0.5, 0.5, 0.1
+        history_topic = ""
+        try:
+            recent = self.recent_turns(4)
+            if recent:
+                last_f = next((h for h in reversed(recent) if h.get("role") == "furina"), None)
+                if last_f:
+                    history_topic = str(last_f.get("text", ""))[:40]
+        except Exception:
+            pass
+        plan = plan_for(
+            user_text or "", mode_hint=app.mode, emotion=emotion,
+            trust=trust, familiarity=familiarity, annoyance=annoyance,
+            task_mode=task_mode, activity=activity,
+            agent_state=agent_state, agent_task=agent_task,
+            history_topic=history_topic,
+            recent_openings=list(getattr(self, "_recent_openings", [])))
+        # 暴露 frame 标记供 validator 使用（correction/referent）
+        try:
+            from furina.persona.persona_planner import parse_user_turn
+            fr = parse_user_turn(user_text or "", history_topic=history_topic)
+            plan._frame_correction = bool(fr.correction)
+            plan.has_referent = bool(fr.has_referent_deictic and fr.referent)
+            if fr.referent:
+                plan.referent = fr.referent
+        except Exception:
+            plan._frame_correction = False
+            plan.has_referent = False
+        try:
+            auto_guide = _auto_guide(user_text or "", mode=plan.mode, trust=trust,
+                                     task_mode=task_mode)
+        except Exception:
+            auto_guide = ""
+        return plan, auto_guide
+
     def _select_examples(self, app, emotion: str = "", activity: str = "",
                          user_text: str = "") -> list:
         try:
@@ -698,7 +776,8 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
                         history: Optional[List[dict]] = None,
                         interaction: str = "",
                         agent_state: str = "",
-                        agent_task: str = "") -> str:
+                        agent_task: str = "",
+                        plan=None, auto_guide: str = "") -> str:
     """Phase 08B 结构化 prompt：Compact Contract + Mode + Intent + Strategy + Context + Examples + Constraints。
 
     Phase 13C：加"说话机制"引导（§43-44）与短期对话上下文（§24-26）。
@@ -760,8 +839,11 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
                      + "\n（记忆里的'帮用户整理…/打开…'是**过去完成**的事；除非 CURRENT_FACTS 显示"
                        "当前 Agent 任务正活跃，否则不得说成'我现在正在…'）")
     if activity == "agent_report" or (agent_state or "").startswith("COMPLETED"):
-        parts.append("【Agent 报告要求】先明确报告任务结果事实（做了什么/完成/验证结果/具体证据），"
-                     "再允许角色口吻；不得只答'小事一桩''你越来越依赖我'而缺失事实层。")
+        parts.append("【Agent 报告要求 - FACT_CORE（不可删除）】"
+                     "先明确报告任务结果事实层（做了什么/完成/验证结果/具体证据——如文件去了哪里），"
+                     "**FACT_CORE 不允许 Persona 删改**；再允许角色口吻（Persona tail）。"
+                     "不得只答'小事一桩''你越来越依赖我'而缺失事实层；不得编造未验证的细节（如'花了几分钟'）。"
+                     "有验证证据就引用具体结果（如'已移到 Images/Docs 文件夹'），没有就不说。")
     parts.append(f"【当前表达姿态】mode={ap['mode']}" +
                  (f" (次级 {ap['secondary_mode']})" if ap["secondary_mode"] else "") +
                  f" | dialogue_act={ap['dialogue_act']}")
@@ -796,10 +878,33 @@ def _dialogue_prompt_v2(app, *, intent: str, emotion: str, user_text: str, conte
         ctx.append("- 记得: " + "；".join(memories[:3]))
     if ctx:
         parts.append("【当前情境】\n" + "\n".join(ctx))
+    # R2.2 FINAL §14：few-shot 反复制 —— 不再注入整句台词，只注入表达规律。
     if examples:
-        parts.append("【语气范例（只学表达方式，不要背句子）】")
-        for e in examples:
-            parts.append(f"  {e['speech']}")
+        parts.append("【表达规律参考（只学'怎么组织回应'，绝不照抄句子）】")
+        for e in examples[:2]:
+            notes = []
+            if e.get("internal_state"):
+                notes.append(f"内心: {e['internal_state']}")
+            if e.get("social_strategy"):
+                notes.append(f"策略: {e['social_strategy']}")
+            if e.get("transition"):
+                notes.append(f"转折: {e['transition']}")
+            if e.get("voice_features"):
+                notes.append(f"语感: {e['voice_features']}")
+            if e.get("anti_pattern"):
+                notes.append(f"避免: {e['anti_pattern']}")
+            if notes:
+                parts.append(f"- 情境[{e.get('context','')}]：" + "；".join(notes))
+        parts.append("（以上是表达方式参考，不是可抄的台词。）")
+    # R2.2 FINAL：PersonaPlan 注入（mode/opening/姿态/禁止/必须回应）
+    if plan is not None:
+        try:
+            parts.append(plan.prompt_block())
+        except Exception:
+            pass
+    # R2.2 FINAL：Autobiographical 激活指导（0=不注入；1/2/3 按级注入）
+    if auto_guide:
+        parts.append(auto_guide)
     if history:
         parts.append("【最近对话（仅作延续参考，不要复述）】")
         for h in history[-3:]:

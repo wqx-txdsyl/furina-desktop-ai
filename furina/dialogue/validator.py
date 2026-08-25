@@ -116,6 +116,15 @@ _ISSUE_FEEDBACK = {
     "possible_lore_leak": "普通闲聊不要自动提五百年/水神往事",
     "god_overuse": "'本神'用得太多，收着点",
     "god_overuse_ordinary": "普通情境不要端'本神'架子",
+    # R2.2 FINAL：新规则反馈
+    "identity_contradiction": "与芙宁娜的身份事实冲突（芙宁娜=人格侧人类；芙卡洛斯=神格侧；她不是神、没有神权）",
+    "action_promise_contradiction": "当前没有进行中的任务时，不得声称'正在/去帮你整理/打开/处理'——语言不能创造电脑动作；建议要转成正式请求",
+    "subject_inversion": "对方在说自己的感受/经历，你却把话题拉回自己——先回应对方，别抢主题",
+    "lore_overexposition": "历史名词（枫丹/水神/五百年等）与当前话题无关或密度过高，别百科式铺开",
+    "seriousness_mismatch": "对方认真时你却用夸张/俏皮糊弄——降下戏剧强度，认真回应",
+    "unusable_output": "输出不可用（空/无意义/与请求无关）",
+    "constraint_ignored_after_correction": "用户明确纠正/追问过，必须正面回应纠正点",
+    "referent_lost": "用户指代'那/刚才/现在呢'，你丢了指代对象——先接住它",
 }
 
 
@@ -127,6 +136,9 @@ _HARD_ISSUES = frozenset({
     "nonhuman_user_framing", "ungrounded_activity", "activity_contradiction",
     "stage_direction", "interaction_contradiction",
     "explicit_user_constraint_violation",
+    # R2.2 FINAL：HARD —— 身份矛盾 / 动作承诺矛盾 / 主体反转（客观清晰时）/ 不可用输出
+    "identity_contradiction", "action_promise_contradiction", "subject_inversion",
+    "unusable_output", "constraint_ignored_after_correction", "referent_lost",
 })
 
 # R2.1 P1-2：interaction 事实 grounding —— petting（正面触碰）回复不得声称被戳/被袭
@@ -137,6 +149,42 @@ _GENERIC_SELF_ANALYSIS = [
     r"善于(与人)?(交流|倾听|沟通)",
     r"最大的缺点(就)?是(有时候|总是|确实)?太(过于)?(追求)?完美",
     r"追求完美主义",
+]
+
+# R2.2 FINAL：身份矛盾（Furina≠神；芙卡洛斯=神格侧；她无神权）
+_IDENTITY_CONTRADICTION = [
+    # 自称拥有神权/神格/神的记忆 —— 与 canonical 冲突（她是人格侧人类）
+    r"我(就)?是(真正的|水)?神(明)?",
+    r"我拥有(神|芙卡洛斯)的(力量|权能|记忆)",
+    r"我(和|跟)芙卡洛斯(是)?(同一个人|一体)",
+    r"我是芙卡洛斯",
+    r"我有(神的|水神的)(力量|权能)",
+]
+# R2.2 FINAL：动作承诺矛盾（agent_state=IDLE 且无任务时声称正在/去执行电脑动作）
+_ACTION_PROMISE = [
+    r"(正在|马上|这就|去)(帮你)?(整理|打开|处理|删除|移动|创建|搜索|安装|下载)(文件|目录|文档|程序|东西|文件夹|测试目录|下载文件夹)?",
+    r"(已经|刚才|我帮你)(打开|整理|处理|删除|移动|创建)了(文件|目录|文档|程序|东西|文件夹|测试目录|下载文件夹)?",
+    r"我这就(去|帮你)",
+    r"我来(帮你)?(整理|打开|处理)(文件|目录|文档|程序|东西|文件夹|测试目录|下载文件夹)?",
+]
+# R2.2 FINAL：主体反转（用户在说自己的感受，回复把话题拉回自己）
+# 检测：CONFIDE/LISTEN_WANT 语境下，回复以"你怎么知道/你这话说得/你这是在说我"等
+# 把话题拉回用户/自己的反问开头（search 任意位置出现 + 无承接用户情绪）。
+_SUBJECT_INVERSION_SELF = [
+    r"你怎么知道",
+    r"你这话说得",
+    r"你这是在说我",
+    r"^你(怎么|为什么|还)",
+]
+# R2.2 FINAL：百科式 lore 铺开
+_LORE_ENCYCLOPEDIA = [
+    r"(实际上|众所周知|历史|当时|据说|据记载|设定是|简单来说|总之就是|我来解释一下)",
+]
+# R2.2 FINAL：严肃度不匹配（认真话题用夸张俏皮糊弄）
+_SERIOUSNESS_MISMATCH = [
+    r"(哈|嘿|嘻){4,}",
+    r"(哈哈|嘿嘿|嘻嘻){2,}",
+    r"！{4,}",
 ]
 
 # R2.1 P1-1：production activities 覆盖（talk/idle/approach/agent_* 等）
@@ -193,6 +241,11 @@ class DialogueValidator:
         self._lore = [re.compile(p) for p in _LORE_LEAK]
         self._god = [re.compile(p) for p in _GOD_REF]
         self._generic_self = [re.compile(p) for p in _GENERIC_SELF_ANALYSIS]
+        self._identity_c = [re.compile(p) for p in _IDENTITY_CONTRADICTION]
+        self._action_p = [re.compile(p) for p in _ACTION_PROMISE]
+        self._subject_inv = [re.compile(p) for p in _SUBJECT_INVERSION_SELF]
+        self._lore_enc = [re.compile(p) for p in _LORE_ENCYCLOPEDIA]
+        self._serious_mismatch = [re.compile(p) for p in _SERIOUSNESS_MISMATCH]
         # R1.1-5：activity-claim ontology（每个语义组一组现在时声称 pattern）
         self._claims = {g: [re.compile(p) for p in pats] for g, pats in _CLAIM_PATTERNS.items()}
 
@@ -207,7 +260,10 @@ class DialogueValidator:
                  activity: str = "", context: str = "casual",
                  recent_surface: Optional[List[str]] = None,
                  interaction: str = "",
-                 constraint: Optional[tuple] = None) -> ValidationResult:
+                 constraint: Optional[tuple] = None,
+                 agent_state: str = "", agent_task: str = "",
+                 user_act: str = "", correction: bool = False,
+                 referent: str = "") -> ValidationResult:
         r = ValidationResult()
         s = (speech or "").strip()
         if should_speak and not s:
@@ -279,6 +335,38 @@ class DialogueValidator:
         # R2.1 P1-6：generic interview self-analysis（模板化自我描述）
         if any(p.search(s) for p in self._generic_self):
             r.valid = False; r.issues.append("generic_self_analysis")
+        # ============ R2.2 FINAL：新检测（HARD/SOFT 由 severity 分类） ============
+        # 身份矛盾（Furina≠神；无神权/神记忆；与芙卡洛斯非同一个人）
+        for p in self._identity_c:
+            if p.search(s):
+                r.valid = False; r.issues.append("identity_contradiction"); break
+        # 动作承诺矛盾：agent_state 非 RUNNING（无进行中任务）且当前 activity 非 agent 工作时，
+        # 声称"正在/去帮你整理/打开/处理" → 语言不能创造电脑动作。
+        _agent_like_activity = any(k in (activity or "") for k in
+                                   ("agent", "assist", "help", "offer_help", "work"))
+        if not (str(agent_state or "").startswith("RUNNING")) and not _agent_like_activity:
+            for p in self._action_p:
+                if p.search(s):
+                    r.valid = False; r.issues.append("action_promise_contradiction"); break
+        # 主体反转（用户 CONFIDE/LISTEN_WANT 说自己的感受，回复把话题拉回自己）
+        if user_act in ("CONFIDE", "LISTEN_WANT", "QUIET") and any(p.search(s) for p in self._subject_inv):
+            r.valid = False; r.issues.append("subject_inversion")
+        # 纠正后被无视：用户明确纠正/追问（我是认真问的），回复仍敷衍/回避（短于阈值或纯俏皮）
+        if correction:
+            if len(self._normalize(s)) < 4 or (s.count("！") >= 2 and len(s) < 20):
+                r.valid = False; r.issues.append("constraint_ignored_after_correction")
+        # 指代丢失：用户"那现在呢/刚才"指代前文，回复不含任何指代承接词
+        if referent:
+            if not any(w in s for w in ("你", "我", "刚", "那", "现在", "刚才", "之前", "这个", "那件事")):
+                r.valid = False; r.issues.append("referent_lost")
+        # lore overexposition（SOFT）：相关性由调用方 context 判断；这里只标百科式密度
+        # 注意：仅记录 soft issue，**不置 valid=False**（SOFT 不得造成 availability failure）
+        lore_hits = sum(1 for p in self._lore for _ in p.findall(s))
+        if lore_hits and (lore_hits >= 3 or any(p.search(s) for p in self._lore_enc)):
+            r.issues.append("lore_overexposition")
+        # 严肃度不匹配（SOFT）：认真话题（context=sincere/vulnerable）用夸张糊弄
+        if context in ("sincere", "vulnerable") and any(p.search(s) for p in self._serious_mismatch):
+            r.valid = False; r.issues.append("seriousness_mismatch")
         # lore 泄漏（§19）
         if any(p.search(s) for p in self._lore):
             r.issues.append("possible_lore_leak")

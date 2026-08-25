@@ -581,6 +581,80 @@ class Furina:
         return self._brain_worker(snapshot.user_text, snapshot, deadline=turn.deadline,
                                   turn_id=turn.turn_id)
 
+    def _grounded_fact_recovery(self, snapshot, res: dict, turn_id=None) -> str:
+        """R2.2 FINAL §17：LLM 两次因 ungrounded_activity 失败 → authoritative facts 恢复。
+
+        只有 hard_issues 明确含 ungrounded_activity（且无其它 HARD）时才恢复：
+        - 用 snapshot 的权威 current activity + 事实描述构造确定性回复（persona wrapping 简短）；
+        - 其余 HARD 失败仍走 SYSTEM_STATUS（不绕过 validator 的其它约束）。
+        返回恢复文本或 ""（不恢复）。
+        """
+        try:
+            hard = list(res.get("hard_issues") or [])
+            if "ungrounded_activity" not in hard:
+                return ""
+            if any(h for h in hard if h != "ungrounded_activity"):
+                return ""          # 其它 HARD 仍失败（不绕过）
+            activity = str(getattr(snapshot, "activity", "") or "")
+            if not activity:
+                return ""
+            # authoritative activity → 事实描述（确定性，不依赖 LLM）
+            desc = self._activity_fact_line(activity)
+            if not desc:
+                return ""
+            user_text = str(getattr(snapshot, "user_text", "") or "")
+            # 用户问"刚才/在做什么" → 事实层回答（简短 persona wrapping 可选）
+            if any(k in user_text for k in ("你在干嘛", "在做什么", "刚才", "干嘛", "做自己的事情")):
+                return f"嗯，刚才我在{desc}。怎么，你好奇呀？"
+            return f"嗯，我刚才在{desc}。"
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _activity_fact_line(activity: str) -> str:
+        """权威 activity → 简短事实描述（确定性；只覆盖真实 production activities）。"""
+        _MAP = {
+            "read": "看书",
+            "study": "看书",
+            "eat": "吃点东西",
+            "drink": "喝点什么",
+            "rest": "歇着",
+            "nap": "打个盹",
+            "sleep": "睡觉",
+            "explore": "四处走走看看",
+            "wander": "随便逛逛",
+            "look_around": "看看周围",
+            "play": "自己玩一会儿",
+            "play_with_object": "玩玩小东西",
+            "think": "想点事情",
+            "daydream": "发呆想事情",
+            "idle": "在这儿待着",
+            "talk": "和你说话",
+            "approach_user": "走过来看看你",
+            "greet": "和你打个招呼",
+            "observe_user": "看看你在忙什么",
+            "observe_work": "看着你工作",
+            "watch_user": "看着你",
+            "invite_user": "想叫你一起玩",
+            "seek_attention": "想吸引你注意",
+            "offer_help": "想看看你要不要帮忙",
+            "assist_user": "想着帮帮你",
+            "agent_planning": "琢磨怎么帮你办事",
+            "agent_work": "帮你处理事情",
+            "agent_report": "准备告诉你结果",
+            "agent_fail": "想办法把事情办好",
+            "tidy": "收拾一下",
+            "stretch": "伸个懒腰",
+            "yawn": "打个哈欠",
+            "groom": "整理一下自己",
+            "celebrate": "小小庆祝一下",
+            "comfort": "想安慰安慰你",
+            "comment": "随便说点什么",
+            "ask_user": "想问问你",
+            "continue": "继续刚才的事",
+        }
+        return _MAP.get(activity or "", "")
+
     def _system_status_failure(self, turn_id=None) -> None:
         """B1/R2.1.1：直接回合无法产生角色回复 → 可观察 SYSTEM_STATUS（非 Furina 台词，不进 Persona history）。
 
@@ -750,9 +824,23 @@ class Furina:
             out["speech"] = speech
             out["failure_reason"] = ""
         else:
-            # R1.1-1/B1：所有失败模式 → 可观察 SYSTEM_STATUS + 明确 failure_reason
-            out["failure_reason"] = reason or "generation_empty"
-            self._system_status_failure(turn_id=turn_id)
+            # R2.2 FINAL §17：Grounded Fact Recovery —— 若因 ungrounded_activity 双重失败，
+            # 用权威 current/recent activity 事实恢复（persona wrapping），而不是 SYSTEM_STATUS。
+            recovered = self._grounded_fact_recovery(snapshot, res, turn_id=turn_id)
+            if recovered:
+                out["speech"] = recovered
+                out["failure_reason"] = ""
+                # 事实恢复也作为 user-visible speech 落地（同 BRAIN_SPOKE 通道）
+                self.bus.emit(EventType.BRAIN_SPOKE,
+                              payload=type("_O", (), {"speech": recovered, "intent": "talk",
+                                                      "emotion": snapshot.emotion_label,
+                                                      "channel": "DIRECT_USER_TURN",
+                                                      "turn_id": turn_id})(),
+                              source="app")
+            else:
+                # R1.1-1/B1：所有失败模式 → 可观察 SYSTEM_STATUS + 明确 failure_reason
+                out["failure_reason"] = reason or "generation_empty"
+                self._system_status_failure(turn_id=turn_id)
         # C-R1.3.2：记忆候选观察放对话后；**记忆写入是域变更** → dispatcher 回 owner 执行
         self._rt_dispatcher().submit(lambda: self._maybe_observe_conversation(text))
         return out
