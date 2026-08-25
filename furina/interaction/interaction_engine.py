@@ -27,6 +27,8 @@ class InteractionEngine:
         self.on_meaningful_interaction = None   # callable(InteractionEvent) -> 长期层
         # H1 §9：语义情绪钩子（Emotion 效果先于 INTERACTION_INPUT 广播，见 _apply 顺序）
         self.on_emotion_semantic = None         # callable(InteractionEvent)
+        # H1-FINAL §4：定型语义互动（click/petting/poke/drag）→ 用户抢占钩子（finalize 运行中 mind 实例）
+        self.on_user_takeover = None            # callable(InteractionEvent)
 
     # -------------------------------------------------- hitbox
     def set_hitboxes_from_anchor(self, anchors: Dict[str, List[float]], body_box: Tuple[float, float, float, float]) -> None:
@@ -88,12 +90,19 @@ class InteractionEngine:
         cur = self._counts[key]
         if cur > 3:
             self._saturation = min(1.0, self._saturation + 0.15)
-        # H1 §9：**定型互动的 owner 顺序** —— Emotion → Relationship → Memory → 广播/快照/worker。
+        # H1 §9：**定型互动的 owner 顺序** —— Emotion → 用户抢占 → Relationship → Memory → 广播/快照/worker。
         # 先于 INTERACTION_INPUT 广播完成语义效果，Scheduler 的对话快照才能看到 post-event 状态。
         # 1. owner Emotion（语义映射，apply+立即派生）
         if self.on_emotion_semantic is not None:
             try:
                 self.on_emotion_semantic(ev)
+            except Exception:  # pragma: no cover
+                pass
+        # 1b. H1-FINAL §4：定型语义互动（click/petting/poke/drag）→ 用户抢占运行中的 mind 活动
+        if self.on_user_takeover is not None and ev.type in (TouchKind.CLICK, TouchKind.PETTING,
+                                                             TouchKind.POKE, TouchKind.DRAG):
+            try:
+                self.on_user_takeover(ev)
             except Exception:  # pragma: no cover
                 pass
         # 2. owner Relationship + Memory（长期层，plan/4 §27）

@@ -157,6 +157,8 @@ class CharacterState:
     active_window_app: str = ""
     user_idle_seconds: float = 0.0
     user_working: bool = False
+    # H1-FINAL §7：空闲真相可用性 —— False 且从未有有效样本时，user_idle_seconds 默认 0 不得当作"用户刚互动"
+    idle_available: bool = True
 
     # ---- 时间 ----
     clock_hour: int = 0

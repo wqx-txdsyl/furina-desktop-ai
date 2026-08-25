@@ -159,6 +159,15 @@ class DialogueBrain:
             return "REFLECT"
         return "COMMENT"
 
+    # -------------------------------------------------- H1-FINAL §2：owner 入队序号（用户输入顺序）
+    def reserve_turn(self) -> int:
+        """owner 线程在**用户输入入口**（submit_user_message）预留 turn 序号。
+
+        FIFO 的身份必须来自用户入队顺序，而不是 worker 执行时序（否则 worker2 先进入 say()
+        会拿到更小的 seq，FIFO 忠实保存了错误顺序）。
+        """
+        return self._next_seq()
+
     # -------------------------------------------------- Phase 13 终审 §8 / FINAL-R1 §4：FIFO 串行入口
     def say(self, *, intent: str = "", emotion: str = "", user_text: str = "",
             context: Optional[str] = "", memories: Optional[List[str]] = None,
@@ -166,18 +175,15 @@ class DialogueBrain:
             relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
             user_initiated: bool = False, task_mode: bool = False,
             solitude: bool = False, user_present: bool = True,
-            channel: str = "DIRECT_USER_TURN") -> Optional[str]:
+            channel: str = "DIRECT_USER_TURN",
+            ingress_seq: Optional[int] = None) -> Optional[str]:
         """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
 
-        FINAL-R1 §4.1：**入队即分配递增 seq**（在取锁之前），history 提交严格按 seq 排序
-        —— 即使 turn1 模型比 turn2 慢、即使 worker 调度乱序，直接对话历史仍是
-        user1 → furina1 → user2 → furina2。
-        FINAL-R1 §4.2：`channel` 决定台词归属：
-          DIRECT_USER_TURN（默认）→ 进入直接对话历史（user/Furina 成对）
-          AMBIENT_AUTONOMOUS / FEED_REACTION / AGENT_REPORT / INTERACTION_REACTION
-          → 进 ambient 池（近期上下文事实，不当孤儿 Furina 回合）。
+        FINAL-R1 §4.1 + H1-FINAL §2：**入队 seq 在 owner 入口预留**（`reserve_turn()`，
+        经 `ingress_seq` 传入）—— 用户输入顺序的 FIFO 身份不依赖 worker 执行时序。
+        FINAL-R1 §4.2：`channel` 决定台词归属（DIRECT → 直接历史；其它 → ambient 池）。
         """
-        seq = self._next_seq()          # 调用顺序 = seq 顺序（与锁获取顺序无关）
+        seq = ingress_seq if ingress_seq is not None else self._next_seq()
         self._gate_wait(seq)            # H1 §5：turn FIFO 门 —— 前序 turn 完成前不进入生成（防锁反转）
         try:
             with self._say_lock:            # 内部安全锁（非排序机制）

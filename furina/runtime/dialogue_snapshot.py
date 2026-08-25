@@ -23,6 +23,7 @@ class DialogueContextSnapshot:
     user_present: bool = True
     channel: str = "DIRECT_USER_TURN"
     seq: int = 0
+    ingress_seq: Optional[int] = None   # H1-FINAL §2：owner 入口预留的 FIFO 序号（经 say(ingress_seq=) 消费）
     memories: Tuple[str, ...] = ()
     world: Tuple[Tuple[str, float], ...] = ()          # flat dict 副本
     relationship: Tuple[Tuple[str, float], ...] = ()   # flat dict 副本
@@ -44,7 +45,7 @@ class DialogueContextSnapshot:
 
     def say_kwargs(self) -> Dict[str, Any]:
         """展开为 DialogueBrain.say(**kw) 的参数（全部来自冻结副本）。"""
-        return {
+        kw = {
             "intent": self.intent,
             "emotion": self.emotion_label,
             "user_text": self.user_text,
@@ -60,6 +61,9 @@ class DialogueContextSnapshot:
             "user_present": self.user_present,
             "channel": self.channel,
         }
+        if self.ingress_seq is not None:
+            kw["ingress_seq"] = self.ingress_seq   # H1-FINAL §2：用户输入顺序身份
+        return kw
 
     def ambient_texts(self) -> List[str]:
         return [t for t in self.ambient_recent]

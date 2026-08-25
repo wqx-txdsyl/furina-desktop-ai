@@ -62,6 +62,7 @@ class WorldState:
     user_present: bool = True
     user_active: bool = True           # 有近期输入（非 idle）
     user_idle_seconds: float = 0.0
+    idle_available: bool = True        # H1-FINAL §7：空闲真相可用性（False 且无有效样本 → 不制造活跃）
     foreground_app: str = ""           # 窗口类名
     foreground_process: str = ""       # 进程名（近似 app）
     foreground_title: str = ""
@@ -169,6 +170,7 @@ class WorldPerception:
         # 消费方只按实例恰好一次；历史串只是诊断，不能用来推断"新事件"。
         self.last_events: List[str] = []
         self._event_seq = 0   # 全局单调事件实例序号（诊断/去重用）
+        self._has_valid_idle = False   # H1-FINAL §7：是否已有过有效空闲样本
 
     def _emit(self, out: List[str], ev: WorldEvent, w: WorldState) -> None:
         """debounce / stability：同一事件需间隔最少 20s 才再发。"""
@@ -182,15 +184,34 @@ class WorldPerception:
 
     def update(self, *, app: str, title: str, idle_seconds: float,
                hour: int, minute: int, typing: bool = False, dt: float = 3.0,
-               process: str = "") -> WorldState:
+               process: str = "", idle_available: bool = True) -> WorldState:
         w = self.state
         w.timestamp = self._now_fn()
         w.day_period = _period(hour)
-        w.user_idle_seconds = idle_seconds
         w.foreground_app = app          # 窗口类名（原始信号）
         w.foreground_title = title
         w.foreground_process = process or app   # 进程可执行名（分类唯一输入）
         w.app_category = _cat(w.foreground_process, title)
+        w.idle_available = idle_available
+        if idle_available:
+            self._has_valid_idle = True
+        # H1-FINAL §7：**从未有有效空闲样本** → 不把默认 0 当作"用户刚互动"：
+        # user_activity=UNKNOWN、不发任何在场/活跃/离开转换、不制造事件。
+        if not idle_available and not self._has_valid_idle:
+            w.user_idle_seconds = idle_seconds   # 原始值（诊断），但**不**据此分类
+            w.user_activity = UserActivity.UNKNOWN
+            w.user_present = True     # 未知偏置，但不产生 USER_BECAME_ACTIVE/离开转换
+            w.user_focus_level = 0.0
+            w.interaction_availability = 0.0
+            w.interruption_cost = 0.0
+            w.activity_duration = 0.0
+            w.same_context_duration = 0.0
+            self._pending_activity = None
+            self._pending_duration = 0.0
+            self.last_events = []
+            return w
+
+        w.user_idle_seconds = idle_seconds
 
         # 用户在场/活跃
         w.user_present = idle_seconds < _AWAY_IDLE_THRESHOLD

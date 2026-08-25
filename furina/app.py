@@ -89,9 +89,11 @@ class Furina:
         self.body_validator = BodyValidator()
 
         # 互动事件 → 情绪（确定性映射，不用 LLM）。
-        # Phase 13 FINAL-R1 §2.4：只有**显式语义映射**才调用 EmotionEngine；
-        # 未映射的指针控制（grab/release/hover/leave/approach/double_click）**不进 emotion._recent**。
-        self.bus.on(EventType.INTERACTION_INPUT, self._on_interaction_emotion)
+        # H1-FINAL §1：**唯一 owner = InteractionEngine.on_emotion_semantic 预广播钩子**
+        # （在 _apply() 里于 INTERACTION_INPUT 广播前调用，见 interaction_engine._apply）。
+        # **不再**注册 EventBus INTERACTION_INPUT → _on_interaction_emotion 订阅 —— 否则一次语义事件
+        # 会经钩子 + 广播订阅各 apply 一次（双重情绪）。
+        # （订阅在下方「纵向集成」区：self.interaction.on_emotion_semantic = self._on_interaction_emotion）
 
         # Director（唯一仲裁）
         self.director = Director(self.bus)
@@ -134,8 +136,9 @@ class Furina:
         self.director.on_before_replace = self._on_director_replace
 
         # 纵向集成：互动→记忆/关系；Agent→角色身体同步（保持模块边界）。
-        # H1 §9：Emotion 语义钩子（先于广播完成情绪效果）
+        # H1 §9：Emotion 语义钩子（先于广播完成情绪效果）；H1-FINAL §4：用户抢占钩子
         self.interaction.on_emotion_semantic = self._on_interaction_emotion
+        self.interaction.on_user_takeover = self._on_user_takeover_interaction
         self.interaction.on_meaningful_interaction = self._on_meaningful_interaction
         self.agent.on_body_sync = self._on_agent_body
         # 互动 hitbox：由素材锚点定义（plan/4 §5），否则摸头/拖拽/点击都无法识别
@@ -258,12 +261,23 @@ class Furina:
             return
         # FINAL-R1 §5：**mind 动作真正执行（Director executor 落地）时才启动活动生命周期**。
         # 被更高优先级请求阻塞、从未执行的 mind 动作不创建实例、不 mark_done。
+        # H1-FINAL §3：自主台词也在**同一执行边界**启动（阻塞请求无台词、无 social bid）。
         if getattr(req, "source", "") == "mind":
             try:
                 sched = getattr(self, "_sched", None)
+                payload = getattr(req, "payload", {}) or {}
                 if sched is not None and hasattr(sched, "on_mind_action_started"):
                     sched.on_mind_action_started(
-                        req.action, float((getattr(req, "payload", {}) or {}).get("planned_duration", 0.0) or 0.0))
+                        req.action, float(payload.get("planned_duration", 0.0) or 0.0))
+                    if hasattr(sched, "start_autonomous_dialogue"):
+                        sched.start_autonomous_dialogue(
+                            activity=req.action,
+                            speech_level=int(payload.get("speech_level", 0) or 0),
+                            speech_intent=payload.get("speech_intent", "") or "",
+                            dialogue_needed=bool(payload.get("dialogue_needed", False)),
+                            emotion=payload.get("emotion", ""),
+                            duration=float(payload.get("planned_duration", 0.0) or 0.0),
+                            intent=payload.get("speech_intent", "") or req.action)
             except Exception:
                 pass
         st.life.macro = macro
@@ -298,6 +312,16 @@ class Furina:
             sched = getattr(self, "_sched", None)
             if sched is not None and hasattr(sched, "on_mind_preempted"):
                 sched.on_mind_preempted(reason=reason)
+        except Exception:
+            pass
+
+    # -------------------------------------------------- H1-FINAL §4：定型互动 → 用户抢占
+    def _on_user_takeover_interaction(self, ev) -> None:
+        """真实定型互动（click/petting/poke/drag）→ finalize 运行中的 mind 活动（owner 线程）。"""
+        try:
+            sched = getattr(self, "_sched", None)
+            if sched is not None and hasattr(sched, "on_user_takeover"):
+                sched.on_user_takeover()
         except Exception:
             pass
 
@@ -500,9 +524,17 @@ class Furina:
                 self.emotion.apply_event(EVENT_TALK, tired_hint=self._tired_hint())
             except Exception:
                 pass
-        # 2. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
-        snap = self._freeze_direct_snapshot(text)
-        # 3. worker：LLM 对话（只读快照）；结果经 BRAIN_SPOKE → dispatcher 回 owner 应用
+        # 2. H1-FINAL §2：**owner 入口预留 FIFO 序号**（用户输入顺序身份，不依赖 worker 执行时序）
+        ingress_seq = None
+        try:
+            db = getattr(self, "dialogue_brain", None)
+            if db is not None and hasattr(db, "reserve_turn"):
+                ingress_seq = db.reserve_turn()
+        except Exception:
+            pass
+        # 3. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
+        snap = self._freeze_direct_snapshot(text, ingress_seq=ingress_seq)
+        # 4. worker：LLM 对话（只读快照）；结果经 BRAIN_SPOKE → dispatcher 回 owner 应用
         import threading
         threading.Thread(target=self._brain_worker, args=(text, snap), daemon=True).start()
 
@@ -551,7 +583,7 @@ class Furina:
         except Exception as e:
             log.warning("agent worker err: %s", e)
 
-    def _freeze_direct_snapshot(self, text: str):
+    def _freeze_direct_snapshot(self, text: str, ingress_seq=None):
         """H1 §10：owner 线程冻结直接对话上下文（只读事实副本，不引用 live 可变运行时对象）。"""
         from furina.runtime.dialogue_snapshot import DialogueContextSnapshot, freeze_flat
         mem_objs = []
@@ -582,6 +614,7 @@ class Furina:
             solitude=idle > 300,
             user_present=idle < 300,
             channel="DIRECT_USER_TURN",
+            ingress_seq=ingress_seq,   # H1-FINAL §2：owner 入口预留的 FIFO 序号
             memories=tuple(mems),
             world=freeze_flat(wf),
             relationship=freeze_flat(rel),

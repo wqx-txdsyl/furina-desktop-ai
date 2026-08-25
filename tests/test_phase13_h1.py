@@ -427,7 +427,9 @@ def test_preempted_mind_cannot_later_become_completed():
     time.sleep(0.05)
     director.submit(AR(source="agent", action="agent_work", priority=2))
     director.drain()
-    assert sched._activity_instance["status"] == "PREEMPTED_BY_AGENT"
+    # H1-FINAL §5：status 是规范集 INTERRUPTED；finish_reason 保留抢占来源
+    assert sched._activity_instance["status"] == "INTERRUPTED", sched._activity_instance
+    assert sched._activity_instance["finish_reason"] == "preempted_by_agent"
     # 后续 Life 决策换活动：settlement 必须跳过（非 RUNNING）→ 不会被算成 completed
     sched._current_life_activity = "read"
     sched._apply_life_decision(LifeDecision(activity="sleep", duration=180, next_think_in=90))

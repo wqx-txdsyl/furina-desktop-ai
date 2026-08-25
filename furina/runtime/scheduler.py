@@ -172,6 +172,9 @@ class Scheduler:
     # -------------------------------------------------- 启动注册三档 tick
     def start(self, window) -> None:
         self.window = window
+        # H1-FINAL §6：**统一启动边界绑定 owner** —— launch 与 launch_harness 都经 start()，
+        # 早于首个 timer/事件的消息/喂食也拿到已绑定 owner（不依赖"第一个 timer 先于第一次点击"）。
+        self.dispatcher.bind_owner()
         # Medium：状态 + 行为
         self.clock.schedule("medium", self.clock.medium_interval, self._tick_medium)
         # Slow：记忆/关系
@@ -329,9 +332,8 @@ class Scheduler:
                 self.se.state.relationship = self.relationship.state
             except Exception:
                 pass
-        # 经历 → 长期记忆（Phase 07：重要互动沉淀为 episodic memory）
-        self._consolidate_episode(event_type="user_positive_response" if kind in ("petting", "click", "drag")
-                                  else "user_initiated", activity=kind)
+        # H1-FINAL §8：**长期记忆唯一 owner = App 语义互动处理器**（_on_meaningful_interaction 的
+        # memory.observe）。这里**不再** _consolidate_episode —— 否则一次定型语义事件写两条长期记忆。
         # 重要互动 → 触发 LifeBrain 重决策（摸头/戳/拖拽会唤醒睡眠，进入互动而非继续睡）
         self._interrupt_life(f"user_{kind}")
         if self.se.state.life.macro == st.MacroState.SLEEPING:
@@ -374,7 +376,10 @@ class Scheduler:
         self.se.update_clock(lt.tm_hour, lt.tm_min)
         # §2.2/FINAL-R1 §1.1：**真实输入空闲秒**来自 WindowAwareness（GetLastInputInfo+GetTickCount64）。
         # 空闲真相不可用时（idle_available=False）保留上一有效值，**不假装 0**（那不是"用户一直活跃"）。
-        if getattr(self.wa, "idle_available", False):
+        # H1-FINAL §7：availability 位跨运行时边界 —— 首样本不可用时，world 不得从默认 0 制造活跃转换。
+        idle_avail = bool(getattr(self.wa, "idle_available", True))
+        self.se.state.idle_available = idle_avail
+        if idle_avail:
             self.se.state.user_idle_seconds = float(getattr(self.wa, "last_idle", 0.0) or 0.0)
         # 世界感知：**每 medium 采样恰好一次 update**（§1.2）。
         # 原始事实（class/process/title/rect/idle/hour/minute）由 wa.poll() 缓存，这里统一消费；
@@ -387,7 +392,8 @@ class Scheduler:
                                    idle_seconds=self.se.state.user_idle_seconds,
                                    hour=self.se.state.clock_hour,
                                    minute=self.se.state.clock_minute,
-                                   typing=bool(getattr(self, "_last_typing", False)), dt=dt)
+                                   typing=bool(getattr(self, "_last_typing", False)), dt=dt,
+                                   idle_available=idle_avail)   # H1-FINAL §7：availability 位
             self.se.state.world = self.world_perc
             # §2.3：user_working 来自 World 感知（进程分类），不再用上一帧值自喂
             self.se.state.user_working = bool(
@@ -645,7 +651,7 @@ class Scheduler:
                     reason, success = "completed", True
                 else:
                     reason, success = "interrupted", False
-                inst.update({"status": "COMPLETED" if reason == "completed" else reason.upper(),
+                inst.update({"status": self._canonical_status(reason),
                              "elapsed": round(elapsed, 1), "progress": round(progress, 2),
                              "finish_reason": reason})
                 self._last_activity_finish = {
@@ -690,50 +696,66 @@ class Scheduler:
         self._current_activity_duration = max(float(getattr(d, "duration", 0.0) or 0.0), 1.0)
         self._life_next_think = max(15.0, d.next_think_in)
 
-        # 需要说话 → 交给 DialogueBrain（三脑：语言只负责怎么说；此处仅产出台词，不决定行为）。
-        # H1 §4.2/§10：**LLM 不得在 owner 线程执行** —— owner 冻结快照 → worker say → 结果经 dispatcher 回 owner。
-        speech_level = getattr(d, "speech_level", 0) or 0
-        voiced = d.activity in SPEAKABLE_ACTIVITIES
-        speak = d.dialogue_needed or speech_level >= 1 or voiced
-        if speak and self.dialogue_brain is not None:
-            try:
-                last = getattr(self, "_llm_speech_at", 0.0)
-                now = time.monotonic()
-                # 节流：自主/状态触发的说话必须 >= 35s 一次，否则会刷屏（每次决策都说同一句）。
-                # 只有高 speech_level(>=3 深聊) 或明确 dialogue_needed 且过了 15s 才放行。
-                min_gap = 15.0 if (speech_level >= 3 or (d.dialogue_needed and speech_level >= 2)) else 35.0
-                if (now - last) >= min_gap:
-                    snap = self._freeze_ambient_snapshot(d)
-                    dur = min(6.0, d.duration) if d.duration else 4.0
-                    social = d.activity in self._SOCIAL_BID_KINDS
-                    def _ambient_work(snapshot, _dur, _social):
-                        try:
-                            speech = self.dialogue_brain.say(**snapshot.say_kwargs())
-                            if speech:
-                                # 结果经 dispatcher 在 owner 线程应用（worker 不直改 _speech）
-                                self._enqueue_apply(lambda sp=speech, dd=_dur: (
-                                    self._say(sp, dur=dd),
-                                    setattr(self, "_llm_speech_at", time.monotonic()),
-                                    setattr(self, "_last_speech_at", time.monotonic())))
-                                # H1 §7：社交类**可见台词成功出话**后才开响应窗口（owner 线程）
-                                if _social:
-                                    self._enqueue_apply(lambda: self.begin_social_bid(
-                                        reason=f"spoken:{snapshot.activity}"))
-                        except Exception:
-                            pass
-                    import threading
-                    threading.Thread(target=_ambient_work, args=(snap, dur, social), daemon=True).start()
-            except Exception as e:  # pragma: no cover
-                log.warning("dialogue say err: %s", e)
+        # H1-FINAL §3：自主台词**不在决策提交时启动** —— 移到 Director 实际执行边界
+        # （app._on_execute → sched.start_autonomous_dialogue）。被阻塞/未执行的 mind 请求
+        # 不得产出台词、不得开 social bid。
         # 需要操作电脑 → 交给 Tool Agent（三脑：手）
         if d.tool_needed:
             log.info("life decision requested tool, but tool task needs explicit user goal; 交给用户或在 Agent 菜单触发")
 
-    def _freeze_ambient_snapshot(self, d):
+    def start_autonomous_dialogue(self, *, activity: str, speech_level: int = 0,
+                                  speech_intent: str = "", dialogue_needed: bool = False,
+                                  emotion: str = "", duration: float = 0.0,
+                                  intent: str = "") -> None:
+        """H1-FINAL §3：**Director 实际执行 mind 动作后**才启动自主台词（owner 线程）。
+
+        owner：节流检查 + 冻结快照 → worker：DialogueBrain.say → owner：应用台词/开 social bid。
+        被阻塞/从未执行的 mind 请求不会走到这里（无台词、无 bid）。
+        """
+        if self.dialogue_brain is None:
+            return
+        try:
+            last = getattr(self, "_llm_speech_at", 0.0)
+            now = time.monotonic()
+            speech_level = int(speech_level or 0)
+            # 节流：自主/状态触发的说话必须 >= 35s 一次，否则会刷屏（每次决策都说同一句）。
+            # 只有高 speech_level(>=3 深聊) 或明确 dialogue_needed 且过了 15s 才放行。
+            min_gap = 15.0 if (speech_level >= 3 or (dialogue_needed and speech_level >= 2)) else 35.0
+            if (now - last) < min_gap:
+                return
+            voiced = activity in SPEAKABLE_ACTIVITIES
+            if not (dialogue_needed or speech_level >= 1 or voiced):
+                return
+            snap = self._freeze_ambient_snapshot(activity=activity, speech_intent=speech_intent,
+                                                 emotion=emotion, intent=intent or activity)
+            dur = min(6.0, duration) if duration else 4.0
+            social = activity in self._SOCIAL_BID_KINDS
+            def _ambient_work(snapshot, _dur, _social):
+                try:
+                    speech = self.dialogue_brain.say(**snapshot.say_kwargs())
+                    if speech:
+                        # 结果经 dispatcher 在 owner 线程应用（worker 不直改 _speech）
+                        self._enqueue_apply(lambda sp=speech, dd=_dur: (
+                            self._say(sp, dur=dd),
+                            setattr(self, "_llm_speech_at", time.monotonic()),
+                            setattr(self, "_last_speech_at", time.monotonic())))
+                        # H1 §7：社交类**可见台词成功出话**后才开响应窗口（owner 线程）
+                        if _social:
+                            self._enqueue_apply(lambda: self.begin_social_bid(
+                                reason=f"spoken:{snapshot.activity}"))
+                except Exception:
+                    pass
+            import threading
+            threading.Thread(target=_ambient_work, args=(snap, dur, social), daemon=True).start()
+        except Exception as e:  # pragma: no cover
+            log.warning("autonomous dialogue err: %s", e)
+
+    def _freeze_ambient_snapshot(self, *, activity: str, speech_intent: str = "",
+                                 emotion: str = "", intent: str = ""):
         """H1 §10：owner 冻结自主环境台词快照（只读事实副本，不引用 live 对象）。"""
         from furina.runtime.dialogue_snapshot import DialogueContextSnapshot, freeze_flat
         st = self.se.state
-        mems = [m.content for m in self.me.retrieve(query=d.intent, limit=3)] if self.me else []
+        mems = [m.content for m in self.me.retrieve(query=intent or activity, limit=3)] if self.me else []
         wf = {}
         try:
             wf = self.world_perc.factors()
@@ -752,10 +774,10 @@ class Scheduler:
         except Exception:
             pass
         return DialogueContextSnapshot(
-            intent=d.activity,
-            emotion_label=d.emotion,
-            context=getattr(d, "speech_intent", "") or d.intent,
-            activity=d.activity,
+            intent=intent or activity,
+            emotion_label=emotion,
+            context=speech_intent or intent or activity,
+            activity=activity,
             channel="AMBIENT_AUTONOMOUS",   # FINAL-R1 §4.2：自主台词不进直接对话历史
             memories=tuple(mems),
             world=freeze_flat({**wf, "user_activity": wctx, "recent_events": list(self._recent_events)}),
@@ -798,6 +820,18 @@ class Scheduler:
             except Exception:
                 pass
 
+    def on_user_takeover(self) -> None:
+        """H1-FINAL §4：真实定型互动（click/petting/poke/drag）→ 用户抢占：
+        finalize 运行中的 mind 实例（elapsed 停在互动时刻、部分奖励一次）+ 释放 Director mind 所有权。
+        指针控制阶段（grab/release/hover/leave）**不**经此路径（不抢占）。
+        """
+        self.require_owner("user_takeover")
+        self.on_mind_preempted(reason="preempted_by_user")
+        try:
+            self.director.finish(source="mind")
+        except Exception:
+            pass
+
     def on_mind_preempted(self, reason: str = "interrupted") -> None:
         """H1 §8：**实际抢占发生时**立即 finalize 运行中的 mind 实例（owner 线程）。
 
@@ -815,14 +849,28 @@ class Scheduler:
         elapsed = max(0.0, now - float(inst.get("started_at", now)))
         planned = float(inst.get("planned_duration", 0.0) or 1.0)
         progress = min(1.0, elapsed / planned) if planned > 0 else 1.0
-        inst.update({"status": reason.upper(), "elapsed": round(elapsed, 1),
+        # H1-FINAL §5：**status 必须是规范集** {RUNNING,COMPLETED,INTERRUPTED,ABORTED,FAILED}；
+        # preempted_by_* / user_cancel / shutdown 等是 finish_reason，绝不写进 status。
+        status = self._canonical_status(reason)
+        inst.update({"status": status, "elapsed": round(elapsed, 1),
                      "progress": round(progress, 2), "finish_reason": reason})
         self._last_activity_finish = {
-            "activity": inst["activity"], "reason": reason,
+            "activity": inst["activity"], "reason": reason, "status": status,
             "elapsed": round(elapsed, 1), "planned_duration": round(planned, 1),
             "progress": round(progress, 2),
         }
         self._apply_activity_outcome(inst["activity"], success=False, reason=reason, progress=progress)
+
+    @staticmethod
+    def _canonical_status(reason: str) -> str:
+        """H1-FINAL §5：finish reason → 规范生命周期状态（任意 reason 不得直接进 status）。"""
+        if reason == "completed":
+            return "COMPLETED"
+        if reason in ("aborted", "user_cancel") or reason.startswith("user_cancel") or reason == "shutdown":
+            return "ABORTED"
+        if reason == "failed" or reason.startswith("tool") or reason.startswith("runtime"):
+            return "FAILED"
+        return "INTERRUPTED"   # interrupted / preempted_by_agent / preempted_by_user / ...
 
     # -------------------------------------------------- 经历→状态反馈（Life Simulation 闭环）
     def _apply_activity_outcome(self, activity: str, success: bool = True,
@@ -845,11 +893,12 @@ class Scheduler:
                               success=success, progress=progress,
                               relationship=getattr(self.me, "relationship", None),
                               recent_counts=recent_counts)
-            # 结局（reason/elapsed/planned/progress）已由结算点记录到 _last_activity_finish；
-            # 这里仅兜底记录 reason（活动被外部直接结算时也有迹可循）
+            # 结局（reason/elapsed/planned/progress/status）已由结算点记录到 _last_activity_finish；
+            # 这里兜底记录 reason（活动被外部直接结算时也有迹可循），并保留 status 键（H1-FINAL §5）
             fin = getattr(self, "_last_activity_finish", None)
             self._last_activity_finish = {
                 "activity": activity, "reason": reason,
+                "status": fin.get("status", self._canonical_status(reason)) if isinstance(fin, dict) else self._canonical_status(reason),
                 "progress": round(progress, 2),
                 "elapsed": fin.get("elapsed", 0.0) if isinstance(fin, dict) else 0.0,
                 "planned_duration": fin.get("planned_duration", 0.0) if isinstance(fin, dict) else 0.0,

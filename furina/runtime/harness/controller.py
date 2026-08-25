@@ -414,6 +414,7 @@ class RuntimeHarness:
             if st is not None:
                 d["clock"] = {"hour": st.clock_hour, "minute": st.clock_minute}
                 d["idle_seconds"] = round(float(st.user_idle_seconds), 1)
+                d["idle_available"] = bool(getattr(st, "idle_available", True))   # H1-FINAL §7
                 d["user_working"] = bool(st.user_working)
                 d["emotion_label"] = st.emotion.label
                 d["activity"] = st.life.activity

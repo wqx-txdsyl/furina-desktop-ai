@@ -94,7 +94,11 @@ def _drive_autonomous(sched, db):
     sched._llm_speech_at = 0.0
     d = LifeDecision(activity="read", duration=30, next_think_in=60,
                      speech_level=3, speech_intent="看看书")
-    sched._apply_life_decision(d)
+    sched._apply_life_decision(d)   # 只提交决策（H1-FINAL §3：**不在此启动台词**）
+    # 模拟 Director 执行边界（app._on_execute 在 mind 执行后调用）：
+    sched.start_autonomous_dialogue(activity=d.activity, speech_level=3,
+                                    speech_intent="看看书", emotion=d.emotion,
+                                    duration=float(d.duration or 0.0), intent=d.intent)
     return d
 
 
@@ -225,9 +229,8 @@ def test_autonomous_dialogue_uses_owner_frozen_snapshot():
     from furina.life_brain import LifeDecision
     sched, bus, se = _sched_stub()
     sched.se.state.emotion.label = "calm"
-    d = LifeDecision(activity="read", duration=30, next_think_in=60,
-                     emotion="proud", speech_level=1, speech_intent="看看书")
-    snap = sched._freeze_ambient_snapshot(d)
+    snap = sched._freeze_ambient_snapshot(activity="read", speech_intent="看看书",
+                                          emotion="proud", intent="read")
     sched.se.state.emotion.label = "sleepy"
     assert snap.emotion_label == "proud" and snap.channel == "AMBIENT_AUTONOMOUS"
 
