@@ -321,3 +321,16 @@ def test_path_style_wander_explore_are_meander_or_multi():
 
 def test_day_period_night_0030():
     assert _period(0) == "night"   # 00:30 → night（hour=0 落在 night 区间）
+
+
+def test_drag_release_no_snap_back():
+    """§12（评审契约名）：拖拽释放后不弹回自主计划位置。"""
+    import random
+    world = DesktopWorld(1920, 1080)
+    world.taskbar_height = 48.0
+    world.update_active_window(Rect(600, 200, 700, 600))
+    rt = DesktopSpatialRuntime(world, rng=random.Random(3))
+    rt.set_initial_foot(400, 700)
+    rt.on_drag_start(now=1.0)
+    rt.on_drag_release(now=2.0, commit=True)
+    assert rt._current_plan is None, "释放后不应保留自主计划（无 snap-back）"

@@ -109,6 +109,29 @@ def test_unverified_step_cannot_complete():
         "unverified 步骤不得发 AGENT_COMPLETED"
 
 
+def test_agent_completed_only_after_all_verified():
+    """§10.3（评审契约名）：全部步骤 ok AND verified 才发 AGENT_COMPLETED。"""
+    from furina.agent.tools.filesystem import ListDirTool, MakeDirsTool, OrganizeTool
+    from furina.agent.tool import ToolResult
+    from furina.agent.permission import Permission
+    bus = EventBus()
+    completed = []
+    bus.on(EventType.AGENT_COMPLETED, lambda ev: completed.append(ev))
+    tools = ToolRegistry()
+    for t in (ListDirTool, MakeDirsTool, OrganizeTool):
+        tools.register(t())
+    perm = PermissionManager()
+    perm.on_confirm = lambda d, l: True   # L2 组织操作放行
+    agent = AgentRuntime(bus, tools, perm)
+    # 中间某步 verified=False（organize 真实移动后文件未消失）→ 不得 COMPLETED
+    with mock.patch.object(OrganizeTool, "run",
+                           return_value=ToolResult(True, data=[{"from": "a.txt", "to": "Docs"}],
+                                                   verified=False)):
+        res = agent.execute("整理下载文件夹", {"path": "/tmp/xxx"})
+    assert res["status"] != "completed", f"未全部 verified 不得 completed: {res}"
+    assert not completed, "未全部 verified 不得发 AGENT_COMPLETED"
+
+
 def test_agent_context_is_task_local():
     """任务 A 的 path/vars 不得泄漏进任务 B（§10.2）。"""
     bus = EventBus()

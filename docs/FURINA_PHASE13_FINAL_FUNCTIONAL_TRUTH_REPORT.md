@@ -228,7 +228,7 @@ explore        seeds [5.7, 4.9, 6.1, 6.5, 5.5]
 
 | 基线 | 本终审 |
 |---|---|
-| 452 passed / 0 failed（C-R2 hotfix） | **526 passed / 0 failed**（+74 新增：final/final2/final3/final4/final5） |
+| 452 passed / 0 failed（C-R2 hotfix） | **530 passed / 0 failed**（+78 新增：final/final2/final3/final4/final5 + 评审契约名测试） |
 
 替换/更新的旧测试（均因旧断言编码了被证伪的行为，已注释原因）：
 - `test_dynamics`：120min → 480min 人类尺度；振荡阈值按封顶驱动带重标定；takeover 阈值改为"≥2× 全分布基线"。
@@ -253,7 +253,7 @@ explore        seeds [5.7, 4.9, 6.1, 6.5, 5.5]
 ### 最终判定
 
 ```text
-Technical = READY_FOR_REVIEW        （§2-§14 全部实现，73 项新测试 + 真实探针证据）
+Technical = READY_FOR_REVIEW        （§2-§14 全部实现，78 项新测试 + 真实探针证据）
 Real Runtime Evidence = PROVIDED    （本报告 §1 各节的复现/探针/轨迹采样）
 Persona = NOT REVIEWED              （无 GLM 转录，不自我通过）
 Manual = NOT YET REVIEWED

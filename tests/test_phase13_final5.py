@@ -91,3 +91,18 @@ def test_harness_diagnostics_present(qapp):
     assert "clock" in d and d["clock"]["hour"] == 14
     assert "idle_seconds" in d
     assert "emotion_label" in d
+
+
+def test_harness_feed_same_production_path(qapp):
+    """§14（评审契约名）：Harness Feed 与 GUI 同一生产路径（app._feed）。"""
+    import furina.runtime.harness.controller as C
+    src = open(C.__file__, encoding="utf-8").read()
+    assert "self.app._feed(food)" in src
+
+
+def test_harness_ignore_uses_semantic_ignore(qapp):
+    """§14（评审契约名）：Harness Ignore 走语义忽略路由（非指针 leave）。"""
+    import furina.runtime.harness.controller as C
+    src = open(C.__file__, encoding="utf-8").read()
+    assert "on_user_ignore" in src
+    assert 'emit_event("leave", "whole")' not in src
