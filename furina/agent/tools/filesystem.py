@@ -121,3 +121,308 @@ class OrganizeTool(BaseTool):
             elif ext in exts:
                 return _GROUP_FOLDER[group]
         return ""
+
+
+# ================================================================ Phase 14D：真实 fs primitives
+# 所有 verified 必须读取 filesystem truth（写后读回/存在性/stat），绝不"函数没报错=verified"。
+
+
+class ExistsTool(BaseTool):
+    name = "fs.exists"
+    description = "检查路径是否存在（只读）"
+    permission = Permission.L0_READ
+    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    def run(self, path: str) -> ToolResult:
+        p = _resolve(path)
+        return ToolResult(True, data={"path": str(p), "exists": p.exists(),
+                                      "is_dir": p.is_dir()}, verified=True)
+
+
+class StatTool(BaseTool):
+    name = "fs.stat"
+    description = "读取文件/目录元数据（大小/修改时间，只读）"
+    permission = Permission.L0_READ
+    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    def run(self, path: str) -> ToolResult:
+        p = _resolve(path)
+        if not p.exists():
+            return ToolResult(False, error=f"不存在: {p}", verified=False)
+        try:
+            st = p.stat()
+            return ToolResult(True, data={"path": str(p), "is_dir": p.is_dir(),
+                                          "size": st.st_size,
+                                          "mtime": st.st_mtime}, verified=True)
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+
+
+class SearchTool(BaseTool):
+    name = "fs.search"
+    description = "在目录内按名称/扩展名搜索文件（只读）"
+    permission = Permission.L0_READ
+    schema = {"type": "object", "properties": {"path": {"type": "string"},
+                                               "pattern": {"type": "string"},
+                                               "limit": {"type": "integer"}}}
+
+    def run(self, path: str, pattern: str = "", limit: int = 50) -> ToolResult:
+        base = _resolve(path)
+        if not base.is_dir():
+            return ToolResult(False, error=f"不是目录: {base}", verified=False)
+        pat = (pattern or "").lower()
+        hits = []
+        try:
+            for it in base.rglob("*"):
+                if it.is_file():
+                    name = it.name.lower()
+                    if (not pat) or pat in name or it.suffix.lower().lstrip(".") == pat.lstrip("."):
+                        hits.append(str(it))
+                        if len(hits) >= limit:
+                            break
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        return ToolResult(True, data={"hits": hits, "count": len(hits)}, verified=True)
+
+
+class CreateFileTool(BaseTool):
+    name = "fs.create_file"
+    description = "在显式目标路径创建空文件（L1；用户选择目标）"
+    permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"path": {"type": "string"},
+                                               "content": {"type": "string"}}}
+
+    def run(self, path: str, content: str = "") -> ToolResult:
+        p = _resolve(path)
+        if p.exists():
+            return ToolResult(False, error=f"已存在（不允许 silent overwrite）: {p}",
+                              verified=False)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        # verified：filesystem truth（存在 + 内容一致）
+        ok = p.is_file() and p.read_text(encoding="utf-8", errors="replace") == content
+        return ToolResult(True, data={"path": str(p)}, verified=ok,
+                          note=f"创建 {p}" if ok else f"创建但内容校验失败 {p}")
+
+
+class WriteTextTool(BaseTool):
+    name = "fs.write_text"
+    description = "写文本文件（显式目标 L1；覆盖已有文件 → 至少 L2，且必须 expected_old_hash 或 overwrite=false 语义）"
+    permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"path": {"type": "string"},
+                                               "content": {"type": "string"},
+                                               "expected_old_hash": {"type": "string"},
+                                               "overwrite": {"type": "boolean"}}}
+
+    def run(self, path: str, content: str = "", expected_old_hash: str = "",
+            overwrite: bool = True) -> ToolResult:
+        import hashlib
+        p = _resolve(path)
+        exists = p.exists()
+        if exists:
+            # 防误覆盖：显式 expected_old_hash 必须匹配；overwrite=false 拒绝覆盖
+            if expected_old_hash:
+                old = hashlib.sha256(p.read_bytes()).hexdigest()
+                if old != expected_old_hash:
+                    return ToolResult(False, error="expected_old_hash 不匹配，拒绝写入（并发/误覆盖防护）",
+                                      verified=False)
+            elif overwrite is False:
+                return ToolResult(False, error="overwrite=false，目标已存在，拒绝覆盖",
+                                  verified=False)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        # verified：写后读回（filesystem truth）
+        back = p.read_text(encoding="utf-8", errors="replace")
+        return ToolResult(True, data={"path": str(p), "bytes": len(back.encode("utf-8"))},
+                          verified=(back == content),
+                          note="内容校验通过" if back == content else "内容校验失败")
+
+
+class AppendTextTool(BaseTool):
+    name = "fs.append_text"
+    description = "追加文本到文件（文件不存在则创建；L1）"
+    permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"path": {"type": "string"},
+                                               "content": {"type": "string"}}}
+
+    def run(self, path: str, content: str = "") -> ToolResult:
+        p = _resolve(path)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        back = p.read_text(encoding="utf-8", errors="replace")
+        return ToolResult(True, data={"path": str(p)},
+                          verified=content in back, note="追加并校验")
+
+
+class ReplaceTextTool(BaseTool):
+    name = "fs.replace_text"
+    description = "在已有文本文件中替换子串（编辑；L1/L2）"
+    permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"path": {"type": "string"},
+                                               "old": {"type": "string"},
+                                               "new": {"type": "string"}}}
+
+    def run(self, path: str, old: str, new: str) -> ToolResult:
+        p = _resolve(path)
+        if not p.is_file():
+            return ToolResult(False, error=f"不是文件: {p}", verified=False)
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+            if old not in text:
+                return ToolResult(False, error=f"未找到要替换的内容: {old[:50]}", verified=False)
+            new_text = text.replace(old, new, 1)
+            p.write_text(new_text, encoding="utf-8")
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        back = p.read_text(encoding="utf-8", errors="replace")
+        return ToolResult(True, data={"path": str(p)},
+                          verified=(new in back and text != back),
+                          note="替换并校验")
+
+
+class CopyTool(BaseTool):
+    name = "fs.copy"
+    description = "复制文件/目录（目标已存在 → 需要 overwrite 显式；L1/L2）"
+    permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"source": {"type": "string"},
+                                               "dest": {"type": "string"},
+                                               "overwrite": {"type": "boolean"}}}
+
+    def run(self, source: str, dest: str, overwrite: bool = False) -> ToolResult:
+        import shutil as _shutil
+        src = _resolve(source)
+        dst = _resolve(dest)
+        if not src.exists():
+            return ToolResult(False, error=f"源不存在: {src}", verified=False)
+        if dst.exists() and not overwrite:
+            return ToolResult(False, error="目标已存在且 overwrite=false（禁止 silent overwrite）",
+                              verified=False)
+        try:
+            if src.is_dir():
+                _shutil.copytree(str(src), str(dst), dirs_exist_ok=overwrite)
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(str(src), str(dst))
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        return ToolResult(True, data={"source": str(src), "dest": str(dst)},
+                          verified=dst.exists(), note="复制并校验存在性")
+
+
+class MoveTool(BaseTool):
+    name = "fs.move"
+    description = "移动文件/目录（目标已存在 → 需要 overwrite 显式；L1/L2）"
+    permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"source": {"type": "string"},
+                                               "dest": {"type": "string"},
+                                               "overwrite": {"type": "boolean"}}}
+
+    def run(self, source: str, dest: str, overwrite: bool = False) -> ToolResult:
+        src = _resolve(source)
+        dst = _resolve(dest)
+        if not src.exists():
+            return ToolResult(False, error=f"源不存在: {src}", verified=False)
+        if dst.exists() and not overwrite:
+            return ToolResult(False, error="目标已存在且 overwrite=false（禁止 silent overwrite）",
+                              verified=False)
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        return ToolResult(True, data={"source": str(src), "dest": str(dst)},
+                          verified=(dst.exists() and not src.exists()),
+                          note="移动并校验（源消失+目标存在）")
+
+
+class RenameTool(BaseTool):
+    name = "fs.rename"
+    description = "重命名文件/目录（同一目录内；L1/L2）"
+    permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"path": {"type": "string"},
+                                               "new_name": {"type": "string"}}}
+
+    def run(self, path: str, new_name: str) -> ToolResult:
+        p = _resolve(path)
+        if not p.exists():
+            return ToolResult(False, error=f"不存在: {p}", verified=False)
+        dst = p.parent / new_name
+        if dst.exists():
+            return ToolResult(False, error="目标已存在（禁止 silent overwrite）", verified=False)
+        try:
+            p.rename(dst)
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        return ToolResult(True, data={"from": str(p), "to": str(dst)},
+                          verified=(dst.exists() and not p.exists()),
+                          note="重命名并校验")
+
+
+class CreateDirTool(BaseTool):
+    name = "fs.create_dir"
+    description = "创建目录（含父目录；L1）"
+    permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    def run(self, path: str) -> ToolResult:
+        p = _resolve(path)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        return ToolResult(True, data={"path": str(p)}, verified=p.is_dir(),
+                          note="目录已确保存在")
+
+
+class OpenPathTool(BaseTool):
+    name = "fs.open_path"
+    description = "在系统文件管理器中打开路径（L0/L1）"
+    permission = Permission.L0_READ
+    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    def run(self, path: str) -> ToolResult:
+        import subprocess as _sp
+        import sys as _sys
+        p = _resolve(path)
+        if not p.exists():
+            return ToolResult(False, error=f"不存在: {p}", verified=False)
+        try:
+            if _sys.platform == "win32":
+                _sp.Popen(["explorer", str(p)], shell=True)
+            else:
+                _sp.Popen(["xdg-open", str(p)], shell=True)
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        return ToolResult(True, data={"path": str(p)},
+                          verified=True, note=f"已在资源管理器打开 {p}")
+
+
+class DeleteTool(BaseTool):
+    name = "fs.delete"
+    description = "删除文件/目录（L2；必要时 L3；不默认出现在普通计划）"
+    permission = Permission.L2_HIGH_RISK
+    schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    def run(self, path: str) -> ToolResult:
+        p = _resolve(path)
+        if not p.exists():
+            return ToolResult(False, error=f"不存在: {p}", verified=False)
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(str(p))
+            else:
+                p.unlink()
+        except Exception as e:
+            return ToolResult(False, error=str(e), verified=False)
+        return ToolResult(True, data={"path": str(p)}, verified=not p.exists(),
+                          note="删除并校验（目标确实消失）")
