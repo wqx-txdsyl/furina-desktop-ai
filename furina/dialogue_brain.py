@@ -44,6 +44,31 @@ class DialogueBrain:
         # "本神" Micro-Calibration Gate（Phase 10：情境化，非强制，短生命周期，不进 Memory）
         from furina.dialogue.god_calibration import GodCalibrationGate
         self.god_gate = GodCalibrationGate()
+        # Phase 13 终审 §9：最近一次校验失败（可观察对话失败路径；空 = 无失败）
+        self.last_validation_failure: List[str] = []
+        # Phase 13 终审 §8：**对话 FIFO 串行** —— say() 全程持锁（含 LLM 调用），
+        # 保证 history 严格时序：user1 → furina1 → user2 → furina2（即使 turn1 模型比 turn2 慢）。
+        import threading
+        self._say_lock = threading.RLock()
+
+    # -------------------------------------------------- Phase 13 终审 §8：FIFO 串行入口
+    def say(self, *, intent: str = "", emotion: str = "", user_text: str = "",
+            context: Optional[str] = "", memories: Optional[List[str]] = None,
+            world: Optional[dict] = None, activity: str = "",
+            relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
+            user_initiated: bool = False, task_mode: bool = False,
+            solitude: bool = False, user_present: bool = True) -> Optional[str]:
+        """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
+
+        world/relationship/memory_interp 提供具体细节。可通过 expression 层决定 should_speak。
+        **线程安全**：FIFO 串行（锁覆盖整个生成 + history 写入），保证对话时序不被并发打乱。
+        """
+        with self._say_lock:
+            return self._say_impl(intent=intent, emotion=emotion, user_text=user_text,
+                                  context=context, memories=memories, world=world,
+                                  activity=activity, relationship=relationship,
+                                  memory_interp=memory_interp, user_initiated=user_initiated,
+                                  task_mode=task_mode, solitude=solitude, user_present=user_present)
 
     def push_history(self, role: str, text: str) -> None:
         """短期对话上下文（bounded）。只存发言，不存系统 prompt。"""
@@ -58,15 +83,20 @@ class DialogueBrain:
 
     # -------------------------------------------------- Phase 13C §19-20：确定性 DialogueAct 路由
     def classify_act(self, user_text: str = "") -> str:
-        """高置信地把常见用户输入路由到有意义的 act（不新增 LLM）。默认 COMMENT。"""
+        """高置信地把常见用户输入路由到有意义的 act（不新增 LLM）。默认 COMMENT。
+
+        Phase 13 终审 §9：**边界/拒绝语义优先于标点式疑问检测** ——
+        "你能别烦我吗？" 必须路由到 DECLINE，而不是被 "吗" 抢成 RESPONSE_TO_QUESTION。
+        """
         import re
         t = (user_text or "").strip()
         if not t:
             return "COMMENT"
+        # 0) 拒绝/边界（最高优先）
+        if re.search(r"别烦|别吵|走开|别打扰|要忙|没空|安静|离我远点|别烦我|先别理我", t):
+            return "DECLINE"
         if re.search(r"[?？]|吗|呢|干嘛|什么|几|哪|是不是|怎么样", t):
             return "RESPONSE_TO_QUESTION"
-        if re.search(r"别烦|别吵|走开|别打扰|要忙|没空|安静|离我远点", t):
-            return "DECLINE"
         if re.search(r"累|难过|伤心|压力|辛苦|烦死|不开心", t):
             return "COMFORT"
         if re.search(r"可爱|好看|喜欢|棒|厉害|真好|爱你|厉害呀", t):
@@ -75,12 +105,12 @@ class DialogueBrain:
             return "REFLECT"
         return "COMMENT"
 
-    def say(self, *, intent: str = "", emotion: str = "", user_text: str = "",
-            context: Optional[str] = "", memories: Optional[List[str]] = None,
-            world: Optional[dict] = None, activity: str = "",
-            relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
-            user_initiated: bool = False, task_mode: bool = False,
-            solitude: bool = False, user_present: bool = True) -> Optional[str]:
+    def _say_impl(self, *, intent: str = "", emotion: str = "", user_text: str = "",
+                  context: Optional[str] = "", memories: Optional[List[str]] = None,
+                  world: Optional[dict] = None, activity: str = "",
+                  relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
+                  user_initiated: bool = False, task_mode: bool = False,
+                  solitude: bool = False, user_present: bool = True) -> Optional[str]:
         """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
 
         world/relationship/memory_interp 提供具体细节。可通过 expression 层决定 should_speak。
@@ -119,26 +149,50 @@ class DialogueBrain:
             self.push_history("user", user_text)   # 当前轮入历史（供下一轮），但本 prompt 不含它
         # 4b) 注入"本神"语境 advice（非强制）
         prompt += "\n" + self.god_gate.prompt_advice(god_cal)
-        try:
-            if not self.llm.is_available():
-                return None
-            msgs = [
-                LLMMessage("system", content(self.persona)),
-                LLMMessage("user", content(prompt)),
-            ]
-            out = self.llm.structured(msgs, schema=_DIALOGUE_SCHEMA, temperature=0.9)
-            speech = str(out.get("speech", "")).strip()
-        except Exception as e:  # pragma: no cover
-            log.warning("DialogueBrain 失败: %s", e)
-            speech = ""
+
+        # 4c) 生成（Phase 13 终审 §9：有界恢复 —— 至多再生成一次，带校验反馈）
+        def _generate(p: str) -> str:
+            try:
+                if not self.llm.is_available():
+                    return ""
+                msgs = [
+                    LLMMessage("system", content(self.persona)),
+                    LLMMessage("user", content(p)),
+                ]
+                out = self.llm.structured(msgs, schema=_DIALOGUE_SCHEMA, temperature=0.9)
+                return str(out.get("speech", "")).strip()
+            except Exception as e:  # pragma: no cover
+                log.warning("DialogueBrain 失败: %s", e)
+                return ""
+
+        speech = _generate(prompt)
         if not speech:
             return None   # 沉默优先于 Generic fallback（§39）
-        # 5) Deterministic Validation（§38）
+        # 5) Deterministic Validation（§38）—— Phase 13 终审 §9：**invalid 绝不原样显示**
         v = self.validator.validate(speech, should_speak=True,
                                     example_phrases=[ex["speech"] for ex in examples],
                                     activity=activity, context=app.mode.lower())
-        if not v.valid and "generic_assistant_voice" in v.issues:
-            return None
+        if not v.valid:
+            self.last_validation_failure = v.issues
+            # 有界恢复：同一 DialogueBrain 再生成一次（确定性校验反馈），再验证
+            feedback = "；".join(v.issues[:3])
+            retry = _generate(prompt + f"\n（上一版未通过人格校验：{feedback}。请重写，禁止上述问题，保持角色口吻。）")
+            if retry:
+                v2 = self.validator.validate(retry, should_speak=True,
+                                             example_phrases=[ex["speech"] for ex in examples],
+                                             activity=activity, context=app.mode.lower())
+                if v2.valid:
+                    speech = retry
+                    v = v2
+                    self.last_validation_failure = []
+                else:
+                    # 仍 invalid → 不泄漏 invalid 角色输出；暴露可观察失败路径（调用方转 SYSTEM_STATUS）
+                    self.last_validation_failure = v2.issues
+                    return None
+            else:
+                return None
+        else:
+            self.last_validation_failure = []
         # 5b) "本神" 校准 Gate（§21-25）：抑制语境出现"本神"或触发 cooldown → 软拦截（不强制替换）
         gated = self.god_gate.gate_output(speech, cal=god_cal)
         if gated is None:

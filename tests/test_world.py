@@ -13,17 +13,25 @@ def _wp():
     return WorldPerception()
 
 
+def _settle(wp, app, title="x", idle=2, typing=True, hour=14, dt=3.0, ticks=12):
+    """Phase 13 终审 §2.5：类别转换需稳定 _STABLE_ACTIVITY_MIN 才生效 —— 先跑满稳定性窗口。"""
+    for _ in range(ticks):
+        wp.update(app=app, title=title, idle_seconds=idle, hour=hour, minute=0,
+                  typing=typing, dt=dt)
+    return wp
+
+
 def test_activity_classification():
     wp = _wp()
-    wp.update(app="Code.exe", title="main.py", idle_seconds=2, hour=14, minute=0, typing=True, dt=3)
+    _settle(wp, "Code.exe", "main.py", typing=True)
     assert wp.state.user_activity == UserActivity.CODING, "IDE+输入→coding"
-    wp.update(app="chrome", title="tab", idle_seconds=4, hour=14, minute=1, typing=False, dt=3)
+    _settle(wp, "chrome", "tab", idle=4, typing=False)
     assert wp.state.user_activity == UserActivity.BROWSING, "浏览器→browsing"
 
 
 def test_focus_estimation():
     wp = _wp()
-    wp.update(app="Code.exe", title="a.py", idle_seconds=1, hour=14, minute=0, typing=True, dt=3)
+    _settle(wp, "Code.exe", "a.py", typing=True)
     assert wp.state.user_focus_level > 0.7, "深度工作 focus 高"
     assert wp.state.interruption_cost > 0.6, "深度工作打扰成本高"
     assert wp.state.interaction_availability < 0.3, "深度工作可用低"
@@ -31,10 +39,10 @@ def test_focus_estimation():
 
 def test_interaction_availability_distinct():
     wp = _wp()
-    wp.update(app="chrome", title="youtube", idle_seconds=5, hour=14, minute=0, typing=False, dt=3)
+    _settle(wp, "chrome", "youtube", idle=5, typing=False)
     assert wp.state.user_activity in (UserActivity.WATCHING_MEDIA, UserActivity.BROWSING)
     wp2 = _wp()
-    wp2.update(app="chrome", title="tab", idle_seconds=120, hour=14, minute=0, typing=False, dt=3)
+    _settle(wp2, "chrome", "tab", idle=120, typing=False)
     # idle(120s,仍在场) 可用 > activity 时；或分类为 idle 且 avail 比 deep 高
     assert wp2.state.user_activity == UserActivity.IDLE, f"应为 idle: {wp2.state.user_activity}"
     assert wp2.state.interaction_availability > 0.6, "idle 可用应高"
@@ -43,9 +51,9 @@ def test_interaction_availability_distinct():
 
 def test_world_event_transition():
     wp = _wp()
-    wp.update(app="Code.exe", title="a.py", idle_seconds=2, hour=14, minute=0, typing=True, dt=3)
+    _settle(wp, "Code.exe", "a.py", typing=True)
     assert "WORK_STARTED" in wp.state.recent_world_events
-    wp.update(app="chrome", title="tab", idle_seconds=5, hour=14, minute=1, typing=False, dt=3)
+    _settle(wp, "chrome", "tab", idle=5, typing=False)
     assert "WORK_ENDED" in wp.state.recent_world_events
 
 
@@ -62,7 +70,7 @@ def test_event_debounce():
 
 def test_user_return_event():
     wp = _wp()
-    wp.update(app="Code.exe", title="a.py", idle_seconds=2, hour=14, minute=0, typing=True, dt=3)
+    _settle(wp, "Code.exe", "a.py", typing=True)
     wp.update(app="Code.exe", title="a.py", idle_seconds=900, hour=14, minute=5, typing=False, dt=3)
     wp.update(app="Code.exe", title="a.py", idle_seconds=3, hour=14, minute=6, typing=True, dt=3)
     assert "USER_LEFT" in wp.state.recent_world_events
@@ -71,9 +79,9 @@ def test_user_return_event():
 
 def test_work_start_end():
     wp = _wp()
-    wp.update(app="Code.exe", title="a.py", idle_seconds=2, hour=14, minute=0, typing=True, dt=3)
+    _settle(wp, "Code.exe", "a.py", typing=True)
     assert "WORK_STARTED" in wp.state.recent_world_events
-    wp.update(app="chrome", title="tab", idle_seconds=4, hour=14, minute=1, typing=False, dt=3)
+    _settle(wp, "chrome", "tab", idle=4, typing=False)
     assert "WORK_ENDED" in wp.state.recent_world_events
 
 
@@ -81,7 +89,7 @@ def test_world_to_motivation():
     """World → Motivation：深度工作时 talk 被压,单独空闲时 talk 高。"""
     def talk_score(idle, typing, app="Code.exe"):
         wp = _wp()
-        wp.update(app=app, title="x", idle_seconds=idle, hour=14, minute=0, typing=typing, dt=3)
+        _settle(wp, app, "x", idle=idle, typing=typing)
         st = CharacterState(); st.clock_hour = 14; st.needs.social_need = 70; st.world = wp
         ee = EmotionEngine(st.emotion)
         m = BehaviorMotivation(personality=P)
@@ -95,7 +103,7 @@ def test_world_to_motivation():
 def test_world_off_control():
     """World OFF（ctx world_off=True）→ 不产生 world-specific 动机差异。"""
     wp = _wp()
-    wp.update(app="Code.exe", title="a.py", idle_seconds=2, hour=14, minute=0, typing=True, dt=3)
+    _settle(wp, "Code.exe", "a.py", typing=True)
     st = CharacterState(); st.clock_hour = 14; st.needs.social_need = 70; st.world = wp
     ee = EmotionEngine(st.emotion)
     m = BehaviorMotivation(personality=P)
@@ -112,7 +120,7 @@ def test_world_off_control():
 def test_world_counterfactual():
     """同一角色,只改 World(深工作 vs 空闲) → 行为变化。"""
     def top_act(app, idle, typing):
-        wp = _wp(); wp.update(app=app, title="x", idle_seconds=idle, hour=14, minute=0, typing=typing, dt=3)
+        wp = _wp(); _settle(wp, app, "x", idle=idle, typing=typing)
         st = CharacterState(); st.clock_hour = 14; st.needs.social_need = 70; st.world = wp
         ee = EmotionEngine(st.emotion)
         m = BehaviorMotivation(personality=P)
@@ -148,10 +156,10 @@ def test_no_observation_collapse():
 def test_assistance_opportunity():
     """深度工作+可帮 app → assistance_opportunity>0, 但不等于"请求帮忙"。"""
     wp = _wp()
-    wp.update(app="Code.exe", title="a.py", idle_seconds=2, hour=14, minute=0, typing=True, dt=3)
+    _settle(wp, "Code.exe", "a.py", typing=True)
     assert wp.state.assistance_opportunity > 0, "深度工作应产生 help_possible"
     wp2 = _wp()
-    wp2.update(app="chrome", title="tab", idle_seconds=300, hour=14, minute=0, typing=False, dt=3)
+    _settle(wp2, "chrome", "tab", idle=300, typing=False)
     assert wp2.state.assistance_opportunity == 0, "空闲/离开不应有帮忙机会"
     # 有 help_possible 的 offer_help 动机抬升，但非强制
     st = CharacterState(); st.clock_hour = 14; st.world = wp

@@ -120,24 +120,31 @@ class RuntimeTruthPanel(QWidget):
             # §3：在 GUI 线程 drain 背景事件队列（QWidget mutation 只在此线程）
             for role, text in self.controller.drain_chat():
                 self.append_chat(role, text)
-            # §1：徽章来自真实健康指标（不许假绿）
+            # §1/§14：徽章来自真实运行时事实（不许假绿）：AVAILABLE/UNAVAILABLE/LAST_OK/LAST_FAILED/FALLBACK
             health = self.controller.runtime_health()
             life_h = health["life"]; dia = health["dialogue"]; agent = health["agent"]
-            life_badge = ("glm ✓" if (life_h.get("success", 0) and not life_h.get("fallback", 0))
-                          else "glm ✓" if life_h.get("success", 0) else "FALLBACK")
-            if life_h.get("fallback", 0) and not life_h.get("success", 0):
-                life_badge = "FALLBACK"
-            dlg_badge = ("glm ✓" if dia.get("outcome") == "SPOKE" else ("FALLBACK" if dia.get("outcome") == "MODEL_FAILURE" else "idle"))
+            mem = health.get("memory", {})
+            life_badge = self.controller.life_badge()
+            dlg_badge = self.controller.dialogue_badge()
+            mem_badge = f"{mem.get('status','?')} COUNT={mem.get('count',-1)}"
             self.badges.setText(
-                f"BACKEND RC1  |  Life:{life_badge}  |  Dialogue:{dlg_badge}  |  Agent:{agent}  |  ● LIVE")
+                f"BACKEND RC1  |  Life:{life_badge}  |  Dialogue:{dlg_badge}  |  Agent:{agent}  |  Memory:{mem_badge}  |  ● LIVE")
             life = self.vm.current_life()
+            # §14：诊断字段（真实只读）
+            diag = health.get("diagnostics", {})
+            d_lines = []
+            for k in ("clock", "idle_seconds", "user_working", "world", "emotion_recent_events",
+                      "life_next_think", "activity_finish", "activity_instance", "spatial"):
+                if k in diag:
+                    d_lines.append(f"{k} {diag[k]}")
             self.life.setText(
                 f"Activity     {life['activity']}\n"
                 f"Brain        {life['brain']}   Fallback {life['fallback']}\n"
                 f"Emotion      {life['emotion']}\n"
                 f"Relationship {life['relationship']}\n"
                 f"Body         {life['body']}\n"
-                f"Spatial      {life['spatial']}")
+                f"Spatial      {life['spatial']}\n"
+                + ("\n".join(f"Diag: {x}" for x in d_lines) if d_lines else ""))
             if self._trace_expanded:
                 self.trace.setPlainText(self.controller.render_trace(expanded=True))
             else:

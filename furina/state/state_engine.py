@@ -45,29 +45,66 @@ def _drift(value: float, rate: float, dt: float) -> float:
     return value + rate * dt
 
 
-def _rising_drive(n, field: str, peak: float, k: float) -> None:
+# ---------------------------------------------------------------- 被动需求时间尺度（§3 终审）
+# Phase 13 终审 §3：所有被动需求漂移用 **分钟级产品时间常数**，不再是"每秒漂移"。
+# 之前 rate 是 per-second（working 120s 就把 fatigue 推到 ~86、boredom 到 100）→ 时间流逝感失真。
+# 现在统一 per-minute，线性换算为 per-second（/60），保证 dt 不变性：
+#   600×1s 与 200×3s 近似等价（线性项完全等价；指数项小 k 下近似等价）。
+#
+# 目标时间尺度（从健康基线出发，仅被动漂移，不含行为反馈）：
+#   - 30 分钟普通使用：无生理需求达到饱和（不 emergency）
+#   - 2 小时连续工作：fatigue 显著升高（~60-75），但未到危机
+#   - 4-8 小时：fatigue 达到高值（饱和）
+#   - hunger：小时级演化（~0.32/min → 4h 左右明显饥饿）
+#   - sleepiness：与昼夜兼容（白天慢、深夜快）
+_PER_MIN = {
+    "fatigue_working":    0.42,   # 工作 2h → +50（基线 20 → ~70 显著疲劳）；4h → 饱和
+    "fatigue_idle":       0.04,   # 不忙疲劳温和上升（不立刻恢复，恢复靠 rest/sleep 行为）
+    "boredom_working":    0.35,   # 工作 2h → +42（驱动型，配合 peak=72 封顶）
+    "boredom_idle":      -0.12,   # 闲适缓释
+    "work_interest_working": 0.25,
+    "work_interest_idle":   -0.18,
+    "energy":             0.25,   # 2h → -30（基线 80 → ~50）；4h → ~20；恢复靠 rest/sleep
+    "sleepiness_day":     0.12,   # 白天 8h → +58（配合 12 基线 → ~70，可困但非危机）
+    "sleepiness_night":   0.38,   # 深夜（23-6）→ 8h 饱和
+    "hunger":             0.18,   # 2h → +22（~42 微饿）；4h → +43（~63 明显饿）；8h → 饱和
+}
+
+
+def _per_sec(per_min: float) -> float:
+    """per-minute 常数 → per-second 漂移率（线性，dt 不变性）。"""
+    return per_min / 60.0
+
+
+def _rising_drive(n, field: str, peak: float, rate_per_sec: float, dt: float) -> None:
     """驱动型需求向上积累：越久没被行为释放，越接近 peak（但封顶，不贴 100）。
 
     这是"积累→达到驱动阈值→行为释放→下降→重新积累"的振荡来源。
     当 behavior 已把它降下（曲线下降），这里负责让它慢慢回升。
+    **精确指数积累**（Phase 13 终审 §3）：k = 1-exp(-rate·dt)，dt 不变性
+    （旧版 min(1.0, rate*dt) 在 dt=30 时 k=1 → 需求被瞬间钉在 peak，振荡消失）。
     """
     cur = getattr(n, field)
     if cur < peak:
+        import math
+        k = 1.0 - math.exp(-rate_per_sec * dt)
         diff = peak - cur
-        setattr(n, field, cur + diff * min(1.0, k))
+        setattr(n, field, cur + diff * k)
 
 
-def _recharge(n, field: str, baseline: float, k: float) -> None:
+def _recharge(n, field: str, baseline: float, rate_per_sec: float, dt: float) -> None:
     """稳态再生：字段若低于基线，则向基线回升；距离基线越远 => 越快（非线性）。
 
     这是"需求重新积累"的核心 —— 让一次 play 不会把 boredom 永久清空；
     而是 boredom 会随时间重新积累，从而再次驱动 play。
+    精确指数形式（同 _rising_drive，dt 不变性）。
     """
     cur = getattr(n, field)
     if cur < baseline:
-        # 越远离基线(低于基线越多)回升越快；靠近基线时变慢（diminishing recharge）
+        import math
+        k = 1.0 - math.exp(-rate_per_sec * dt)
         diff = baseline - cur
-        setattr(n, field, cur + diff * min(1.0, k))
+        setattr(n, field, cur + diff * k)
     # 高于基线时不强制拉回（让"积累型"需求自然走 _drift 的方向）
 
 
@@ -89,24 +126,33 @@ class IntentCandidate:
 
 
 # 常见开发/办公应用 → 用户是否在工作（plan/1 §21 感知）
-_WORK_APPS = ("code", "vscode", "winword", "excel", "powerpnt", "chrome", "msedge", "firefox",
-              "pycharm", "idea", "terminal", "conhost", "notepad", "obsidian", "typora")
+# Phase 13 终审 §2.4：只接受**进程可执行名**（精确/整词），绝不做短 token 子串匹配
+# （"et" 匹配 "Chrome_WidgetWin_1" 之类的类名会造成假 office/表格误判）。
+_WORK_APPS = ("code", "vscode", "winword", "excel", "powerpnt", "pycharm", "idea",
+              "terminal", "conhost", "notepad", "obsidian", "typora", "cmd", "powershell")
 _STUDY_TITLE = ("论文", "文档", "报告", "学习", "教程", "题目", "ppt", "word", "excel")
 
 
+def _proc_name(app: str) -> str:
+    n = (app or "").strip().lower()
+    if n.endswith(".exe"):
+        n = n[:-4]
+    return n
+
+
 def classify_activity(app: str, title: str = "") -> dict:
-    """把窗口分类为用户活动（plan/1 §21，§4 感知）。"""
-    a = (app or "").lower()
+    """把窗口进程分类为用户活动（plan/1 §21，§4 感知）。输入必须是进程名，不是窗口类名。"""
+    a = _proc_name(app)
     t = (title or "").lower()
-    if any(k in a for k in ("code", "vscode", "pycharm", "idea", "terminal", "conhost")):
+    if a in ("code", "vscode", "pycharm", "idea", "terminal", "conhost", "cmd", "powershell", "wt"):
         return {"working": True, "category": "coding", "label": "编程"}
-    if any(k in a for k in ("winword", "word", "wps")):
+    if a in ("winword", "word", "wps"):
         return {"working": True, "category": "writing", "label": "写作"}
-    if any(k in a for k in ("excel", "et")):
+    if a in ("excel", "et"):
         return {"working": True, "category": "sheet", "label": "表格"}
-    if any(k in a for k in ("powerpnt", "ppt")):
+    if a in ("powerpnt", "ppt"):
         return {"working": True, "category": "slides", "label": "演示"}
-    if any(k in a for k in ("chrome", "msedge", "firefox")):
+    if a in ("chrome", "msedge", "firefox", "brave", "opera"):
         return {"working": False, "category": "browse", "label": "浏览器"}
     if any(k in t for k in _STUDY_TITLE):
         return {"working": True, "category": "study", "label": "学习"}
@@ -125,20 +171,23 @@ class StateEngine:
     # ---- 需求漂移（被动，本地，无需 LLM） ----
     def update_needs(self, dt: float, user_working: bool, user_idle: float) -> None:
         n = self.state.needs
-        # ---- 自然积累（随时间变化；距离基线越远变化越缓 = 类稳态 homeostasis）----
-        # 疲惫：工作积累、休息恢复
+        hour = self.state.clock_hour
+        # ---- 自然积累（Phase 13 终审 §3：per-minute 产品时间常数，/60 → per-second）----
+        # 疲惫：工作积累（小时级）、休息恢复（行为）；不忙时温和（绝不分钟级饱和）
         if user_working:
-            n.fatigue = _drift(n.fatigue, +0.55, dt)
-            n.boredom = _drift(n.boredom, +0.4, dt)
-            # social_need 不在此无界积累（由上方 rising_drive 封顶积累，避免跑到 100 霸占系统）
-            n.work_interest = _drift(n.work_interest, +0.3, dt)
+            n.fatigue = _drift(n.fatigue, _per_sec(_PER_MIN["fatigue_working"]), dt)
+            n.boredom = _drift(n.boredom, _per_sec(_PER_MIN["boredom_working"]), dt)
+            n.work_interest = _drift(n.work_interest, _per_sec(_PER_MIN["work_interest_working"]), dt)
         else:
-            n.fatigue = _drift(n.fatigue, +0.06, dt)   # 不忙 fatigue 温和回升（慢，不立刻清空）
-            n.boredom = _drift(n.boredom, -0.2, dt)    # 不忙无聊缓和（闲适，但不过度降）
-            n.work_interest = _drift(n.work_interest, -0.2, dt)
-        n.energy = _drift(n.energy, -0.18, dt)          # 精力缓慢消耗
-        n.sleepiness = _drift(n.sleepiness, +0.07, dt)  # 困倦积累
-        n.hunger = _drift(n.hunger, +0.11, dt)          # 饥饿积累
+            n.fatigue = _drift(n.fatigue, _per_sec(_PER_MIN["fatigue_idle"]), dt)
+            n.boredom = _drift(n.boredom, _per_sec(_PER_MIN["boredom_idle"]), dt)
+            n.work_interest = _drift(n.work_interest, _per_sec(_PER_MIN["work_interest_idle"]), dt)
+        n.energy = _drift(n.energy, -_per_sec(_PER_MIN["energy"]), dt)
+        # 困倦：昼夜兼容（深夜积累显著加快；白天慢）
+        night = (hour >= 23) or (0 <= hour < 6)
+        sleepy_rate = _PER_MIN["sleepiness_night"] if night else _PER_MIN["sleepiness_day"]
+        n.sleepiness = _drift(n.sleepiness, _per_sec(sleepy_rate), dt)
+        n.hunger = _drift(n.hunger, _per_sec(_PER_MIN["hunger"]), dt)
 
         # ---- 稳态再生（homeostasis）：被行为"满足/消耗"的需求随时间**重新积累**回基线。
         # 关键：距离基线越远 → 恢复越快（非线性），避免"一次行为永久清空某需求"。
@@ -146,19 +195,26 @@ class StateEngine:
         # 还要**向上积累**成驱动（积累到一定程度才产生 Motivation，行为释放后又重新积累）。
         # 注意：social_need 不再用无界 _drift 积累，而是由 rising_drive 向上限积累（封顶），
         # 避免它跑到 100 并永远霸占系统（crowd-out）。
-        _recharge(n, "boredom", _BASELINE["boredom"], 0.03 * dt)
-        _recharge(n, "playfulness", _BASELINE["playfulness"], 0.02 * dt)
-        _recharge(n, "curiosity", _BASELINE["curiosity"], 0.02 * dt)
-        _recharge(n, "satisfaction", _BASELINE["satisfaction"], 0.015 * dt)
-        _recharge(n, "social_need", _BASELINE["social_need"], 0.028 * dt)
-        _recharge(n, "energy", _BASELINE["energy"], 0.04 * dt)
-        _recharge(n, "sleepiness", _BASELINE["sleepiness"], 0.012 * dt)
-        _recharge(n, "hunger", _BASELINE["hunger"], 0.015 * dt)
+        # 速率仍为 per-second 指数常数（0.03/s → ~30s 回 63% 差距；驱动几分钟内就绪，但不贴 100）。
+        _recharge(n, "boredom", _BASELINE["boredom"], 0.03, dt)
+        _recharge(n, "playfulness", _BASELINE["playfulness"], 0.02, dt)
+        _recharge(n, "curiosity", _BASELINE["curiosity"], 0.02, dt)
+        _recharge(n, "satisfaction", _BASELINE["satisfaction"], 0.015, dt)
+        _recharge(n, "social_need", _BASELINE["social_need"], 0.028, dt)
+        _recharge(n, "energy", _BASELINE["energy"], 0.04, dt)
+        _recharge(n, "sleepiness", _BASELINE["sleepiness"], 0.012, dt)
+        _recharge(n, "hunger", _BASELINE["hunger"], 0.015, dt)
         # 驱动型需求会"向上积累"：越久没被行为释放，越往上爬（但封顶到中等值，形成自然振荡）。
-        _rising_drive(n, "playfulness", _DRIVE_PEAK["playfulness"], 0.03 * dt)
-        _rising_drive(n, "curiosity", _DRIVE_PEAK["curiosity"], 0.03 * dt)
-        _rising_drive(n, "boredom", _DRIVE_PEAK["boredom"], 0.035 * dt)
-        _rising_drive(n, "social_need", _DRIVE_PEAK["social_need"], 0.035 * dt)
+        _rising_drive(n, "playfulness", _DRIVE_PEAK["playfulness"], 0.03, dt)
+        _rising_drive(n, "curiosity", _DRIVE_PEAK["curiosity"], 0.03, dt)
+        _rising_drive(n, "boredom", _DRIVE_PEAK["boredom"], 0.035, dt)
+        _rising_drive(n, "social_need", _DRIVE_PEAK["social_need"], 0.035, dt)
+        # Phase 13 终审 §3：**驱动型需求封顶于各自 peak**（rising_drive 只负责向上收敛，
+        # 但 drift 会在超过 peak 后继续无界积累 → 2h 就把 boredom 推到 100）。
+        # 驱动型需求只在 [行为释放后, peak] 带内振荡，绝不贴 100 霸占系统。
+        for _k, _peak in _DRIVE_PEAK.items():
+            if getattr(n, _k) > _peak:
+                setattr(n, _k, _peak)
         n.clamp()
         self.state.user_working = user_working
         self.state.user_idle_seconds = user_idle

@@ -1,7 +1,11 @@
 """窗口感知（plan/7 §6, plan/5 §7）。
 
-用 ctypes 直接调 user32 获取前台窗口（无需 pywin32）。
-非 Windows 环境返回占位信息。
+用 ctypes 直接调 user32/kernel32 获取前台窗口（无需 pywin32）。
+Phase 13 终审 §2.2-2.4：补充**真实 Windows 感知边界**：
+  - 前台 HWND 的**进程可执行名**（GetWindowThreadProcessId → OpenProcess → QueryFullProcessImageNameW），
+    与窗口类名分离（类名不能当 app 分类，避免 Chrome_WidgetWin_1 被 "et" 误判为表格）；
+  - 真实输入空闲秒（GetLastInputInfo，系统级，非自喂）。
+非 Windows 环境返回占位信息（idle 0，不假装知道）。
 """
 from __future__ import annotations
 
@@ -17,13 +21,61 @@ log = get_logger("runtime.winaware")
 
 @dataclass
 class WindowInfo:
-    app: str = ""
+    app: str = ""          # 窗口类名（识别 UI 归属用，不做业务分类）
     title: str = ""
+    process: str = ""      # 进程可执行名（如 chrome / notepad / Code）—— 业务分类的唯一输入
+    idle: float = 0.0      # 真实输入空闲秒（GetLastInputInfo）
     rect: Optional[Rect] = None
 
     def to_dict(self) -> dict:
-        return {"app": self.app, "title": self.title,
+        return {"app": self.app, "title": self.title, "process": self.process, "idle": round(self.idle, 1),
                 "rect": (None if not self.rect else [self.rect.x, self.rect.y, self.rect.w, self.rect.h])}
+
+
+def _get_idle_seconds() -> Optional[float]:
+    """真实输入空闲秒：GetLastInputInfo（系统级真相，非估算）。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+        lii = LASTINPUTINFO()
+        lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if not user32.GetLastInputInfo(ctypes.byref(lii)):
+            return None
+        ticks = user32.GetTickCount()
+        return max(0.0, (ticks - lii.dwTime) / 1000.0)
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _get_process_name(hwnd) -> str:
+    """前台窗口所属进程可执行名（无扩展名，小写），失败返回 ""。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                name = buf.value.replace("\\", "/").rsplit("/", 1)[-1]
+                return name[:-4] if name.lower().endswith(".exe") else name
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:  # pragma: no cover
+        pass
+    return ""
 
 
 def _active_window_windows() -> Optional[WindowInfo]:
@@ -38,7 +90,7 @@ def _active_window_windows() -> Optional[WindowInfo]:
     length = user32.GetWindowTextLengthW(hwnd)
     buf = ctypes.create_unicode_buffer(length + 1)
     user32.GetWindowTextW(hwnd, buf, length + 1)
-    # 类名（可推断应用）
+    # 类名（识别 UI 归属用，**不做业务分类**）
     cls = ctypes.create_unicode_buffer(256)
     user32.GetClassNameW(hwnd, cls, 256)
     # 矩形
@@ -47,6 +99,8 @@ def _active_window_windows() -> Optional[WindowInfo]:
     return WindowInfo(
         app=cls.value,
         title=buf.value,
+        process=_get_process_name(hwnd),
+        idle=_get_idle_seconds() or 0.0,
         rect=Rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top),
     )
 
@@ -56,6 +110,7 @@ class WindowAwareness:
 
     def __init__(self, update_cb) -> None:
         self.update_cb = update_cb   # callable(WindowInfo)
+        self.last_idle: float = 0.0  # 最近一次真实 idle（供 Scheduler 读取）
 
     def poll(self) -> Optional[WindowInfo]:
         info = None
@@ -65,6 +120,10 @@ class WindowAwareness:
             except Exception as e:  # pragma: no cover
                 log.debug("winaware error: %s", e)
         else:
-            info = WindowInfo(app="unknown", title="", rect=Rect(0, 0, 1920, 1080))
+            # 非 Windows：占位（不假装知道进程/输入）
+            info = WindowInfo(app="unknown", title="", process="unknown",
+                              idle=0.0, rect=Rect(0, 0, 1920, 1080))
+        if info is not None:
+            self.last_idle = info.idle
         self.update_cb(info)
         return info

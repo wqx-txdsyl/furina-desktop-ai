@@ -40,10 +40,13 @@ class AgentRuntime:
     def execute(self, user_request: str, extra_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self.bus.emit(EventType.AGENT_STARTED, payload={"request": user_request}, source="agent")
         log.info("agent: %s", user_request)
+        # Phase 13 终审 §10.2：**任务局部上下文** —— 每次 execute 用全新 AgentContext，
+        # 绝不把任务 A 的 path/vars 泄漏进任务 B（持久 context 只允许显式安全全局设置）。
+        task_ctx = AgentContext()
         if extra_context:
-            self.context.vars.update(extra_context)
+            task_ctx.vars.update(extra_context)
         self._body("approach")           # 走向屏幕
-        plan = self.planner.build_plan(user_request, self.context.vars)
+        plan = self.planner.build_plan(user_request, task_ctx.vars)
         log.info("agent plan: goal=%s steps=%d status=%s", plan.goal, len(plan.steps), plan.status)
         # 计划不可行（无法映射工具/缺参数）→ 如实失败，绝不假装成功（plan/5 §24）
         if plan.status in ("unable", "failed"):
@@ -86,22 +89,34 @@ class AgentRuntime:
                 self.bus.emit(EventType.AGENT_FAILED, payload={"step": i, "error": res.error}, source="agent")
                 self._body("confused")
                 return {"status": "failed", "reason": res.error, "results": results}
+            # Phase 13 终审 §10.3：**verified=False 不得 COMPLETED**（ok 只是"没抛错"，不是"完成"）
+            if not verified:
+                reason = f"unverified_step:{i}:{step.tool}"
+                self.bus.emit(EventType.AGENT_FAILED, payload={"step": i, "reason": reason}, source="agent")
+                self._body("confused")
+                return {"status": "unverified", "reason": reason, "results": results}
 
         self._body("report")
-        self.bus.emit(EventType.AGENT_COMPLETED, payload={"goal": plan.goal, "results": results}, source="agent")
-        return {"status": "completed", "goal": plan.goal, "results": results}
+        # Phase 13 终审 §10.6：结构化事实摘要来自**已验证**结果（DialogueBrain 只能角色化事实，不得发明成功）
+        ok_verified = [r for r in results if r["ok"] and r["verified"]]
+        summary = (f"完成了 {len(ok_verified)}/{len(results)} 个步骤："
+                   f"{plan.goal}（已验证 {len(ok_verified)} 步）")
+        self.bus.emit(EventType.AGENT_COMPLETED,
+                      payload={"goal": plan.goal, "results": results, "summary": summary,
+                               "verified": True},
+                      source="agent")
+        return {"status": "completed", "goal": plan.goal, "results": results, "summary": summary}
 
     # -------------------------------------------------- Verify（§5）
     def _verify(self, step, res: ToolResult) -> bool:
         # 简单骨架验证：失败必 false
         if not res.ok:
             return False
-        # 需有数据的只读/写操作，data 为空视为未验证成功
-        if step.tool in ("fs.list_dir", "fs.make_dirs") and not res.data:
-            return False
-        # fs.organize：dry_run 预览本身成功即可（如实标 verified），但真实移动必须看到实际移动结果
-        if step.tool == "fs.organize":
-            return res.ok and res.data is not None
+        # 需有数据的只读/写操作，data 缺失视为未验证成功；
+        # **空列表/空 dict 是合法的"确实为空"结果**（如空目录列出 0 项），不算未验证。
+        if step.tool in ("fs.list_dir", "fs.make_dirs", "fs.organize"):
+            return res.data is not None
+        # fs.organize 的 dry_run 预览：data 非 None（可观察的预览结果）即可
         return True
 
     # -------------------------------------------------- 身体同步（plan/5 §15）

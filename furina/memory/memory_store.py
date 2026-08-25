@@ -101,6 +101,17 @@ class MemoryStore:
         return m.mem_id
 
     # -------------------------------------------------- read
+    def count(self, *, status: Optional[MemoryStatus] = MemoryStatus.ACTIVE) -> int:
+        """真实记忆条数（Phase 13 终审 §14：Harness 展示 COUNT=n 用真数，不用 query(limit=1) 的 0/1）。"""
+        sql = "SELECT COUNT(*) FROM memories WHERE 1=1"
+        args: List = []
+        if status is not None:
+            sql += " AND status=?"
+            args.append(status.value)
+        with self._lock:
+            cur = self._conn.execute(sql, args)
+            return int(cur.fetchone()[0])
+
     def query(self, *, level: Optional[MemoryLevel] = None, status: Optional[MemoryStatus] = MemoryStatus.ACTIVE,
               source: Optional[MemorySource] = None, limit: int = 50,
               content_like: Optional[str] = None) -> List[Memory]:

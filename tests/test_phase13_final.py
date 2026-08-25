@@ -65,6 +65,46 @@ def test_no_autonomy_stagnation_interrupt_for_quiet_idle():
     assert "_interrupt_life(\"autonomy_stagnation\")" not in kpi, "安静 idle 不得强制唤醒 LifeBrain"
 
 
+def _motivation_top(state, history_acts=()):
+    from furina.behavior import BehaviorMotivation
+    from furina.emotion import EmotionEngine
+    m = BehaviorMotivation()
+    t = 100.0
+    for a in history_acts:
+        m.mark_done(a, t)
+        t += 60.0
+    ee = EmotionEngine(state.emotion)
+    cands = m.candidates(state, ee)
+    return cands[0].activity, cands[0].score
+
+
+def test_unchanged_state_history_alone_does_not_force_category_switch():
+    """同一状态下，**仅靠**近期历史不同不得改变 top 候选（多样性只能来自 Needs/Emotion/World…）。"""
+    from furina.state import CharacterState
+    st = CharacterState(); st.needs.boredom = 90; st.needs.curiosity = 80; st.needs.playfulness = 80
+    a1, s1 = _motivation_top(st, history_acts=("play", "play", "play"))
+    a2, s2 = _motivation_top(st, history_acts=("read", "read", "read"))
+    assert a1 == a2, f"仅历史不同不得改变 top: {a1} vs {a2}"
+    assert abs(s1 - s2) < 1e-6, "仅历史不同不得改变分数"
+
+
+def test_repeated_read_can_remain_top_candidate():
+    """反复做 read 后，read 仍可保持 top（无多样性惩罚强制换类）。"""
+    from furina.state import CharacterState
+    st = CharacterState(); st.needs.curiosity = 90; st.needs.boredom = 80
+    top, _ = _motivation_top(st, history_acts=("read", "read", "read", "read", "read"))
+    assert top == "read", f"read 不应因做过多次被强制换掉: {top}"
+
+
+def test_observation_ratio_does_not_boost_unrelated_categories():
+    """观察占比高不得因此抬高其它类别（observation crush guard 已禁用）。"""
+    from furina.state import CharacterState
+    st = CharacterState(); st.needs.boredom = 90; st.needs.curiosity = 80
+    hist = ["observe_user", "observe_work", "watch_user", "observe_user", "observe_work"] * 2
+    top, _ = _motivation_top(st, history_acts=hist)
+    assert top in ("play", "explore", "read"), f"观察历史不得把无关类别抬成 top: {top}"
+
+
 def test_life_decision_does_not_write_emotion_truth():
     """§4.5：LifeDecision 的 emotion 只是表达提示，不得覆盖 EmotionEngine 拥有的 label。"""
     from types import SimpleNamespace

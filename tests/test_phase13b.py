@@ -106,14 +106,16 @@ def test_cross_root_no_contamination(qapp):
         assert not (has_a and has_b), f"root {r} 不应同时含 A/B 回复（跨根污染）"
 
 
-# ================================================================ §13 memory badge honest
+# ================================================================ §13/§14 memory badge honest
 def test_memory_badge_honest(qapp):
-    """runtime_health['memory'] 只显示 AVAILABLE/EMPTY/UNAVAILABLE（不展示假精确数字）。"""
+    """runtime_health['memory'] 显示真实 COUNT=n（§14：用真实 count，不展示假精确数字）。"""
     app, calls = _harness_app()
-    app.memory = SimpleNamespace(store=SimpleNamespace(query=lambda limit=1, status=None: []))
+    app.memory = SimpleNamespace(store=SimpleNamespace(count=lambda: 0))
     h = RuntimeHarness(app)
-    status = h.runtime_health()["memory"]
-    assert status in ("AVAILABLE", "EMPTY", "UNAVAILABLE"), f"memory badge 应只显示状态，实际 {status}"
+    mem = h.runtime_health()["memory"]
+    assert isinstance(mem, dict) and mem["status"] in ("AVAILABLE", "EMPTY", "UNAVAILABLE"), \
+        f"memory badge 应有真实状态，实际 {mem}"
+    assert mem["count"] == 0, "COUNT 必须来自真实 count()"
 
 
 # ================================================================ §10 causal trace before/after

@@ -69,18 +69,17 @@ OUTCOMES: Dict[str, Outcome] = {
     "daydream": Outcome(needs={"boredom": -5}, emotion={"calm": +4, "happiness": +2}, note="发呆"),
     "wander": Outcome(needs={"boredom": -8, "curiosity": -5}, note="随便溜达"),
     "idle":   Outcome(needs={"boredom": +1}, note="随意待着"),
-    # ---- SOCIAL（需求反馈：满足社交需求 + 关系）----
-    "approach_user": Outcome(needs={"social_need": -40}, emotion={"happiness": +3},
-                          relationship={"familiarity": +1}, social_need=-40, note="靠近了用户"),
-    "talk":    Outcome(social_need=-45, emotion={"happiness": +5, "loneliness": -6},
-                       relationship={"familiarity": +1, "comfort": +1}, note="和用户聊了聊"),
-    "invite_user": Outcome(social_need=-38, emotion={"happiness": +4, "excitement": +3},
-                        relationship={"familiarity": +1}, note="邀请用户一起"),
+    # ---- SOCIAL（需求反馈：满足社交需求）----
+    # Phase 13 终审 §6.2：**活动 Outcome 不再携带 relationship delta**（自我农场：芙宁娜不能因"自己
+    # 选择靠近/搭话/帮忙"就自动涨 trust/comfort）。关系只能由 RelationshipEngine 从真实关系证据写入
+    # （用户回应 / 接受-拒绝互动 / 已验证的 Agent 帮助等）。
+    # §6.3：social_need 只经唯一字段结算一次（不在 needs dict 重复出现）。
+    "approach_user": Outcome(needs={}, social_need=-40, emotion={"happiness": +3}, note="靠近了用户"),
+    "talk":    Outcome(social_need=-45, emotion={"happiness": +5, "loneliness": -6}, note="和用户聊了聊"),
+    "invite_user": Outcome(social_need=-38, emotion={"happiness": +4, "excitement": +3}, note="邀请用户一起"),
     "greet":   Outcome(social_need=-12, emotion={"happiness": +4}, note="和用户打了个招呼"),
-    "comfort": Outcome(emotion={"happiness": +3, "calm": +2}, social_need=-10,
-                       relationship={"trust": +1, "comfort": +1}, note="安慰用户"),
-    "celebrate": Outcome(emotion={"happiness": +6, "excitement": +5}, social_need=-8,
-                        relationship={"familiarity": +1}, note="一起庆祝"),
+    "comfort": Outcome(emotion={"happiness": +3, "calm": +2}, social_need=-10, note="安慰用户"),
+    "celebrate": Outcome(emotion={"happiness": +6, "excitement": +5}, social_need=-8, note="一起庆祝"),
     "seek_attention": Outcome(social_need=-16, emotion={"happiness": +3}, note="引起用户注意"),
     "ask_user":  Outcome(social_need=-12, emotion={"curiosity": +2}, note="问了用户一句"),
     "comment":   Outcome(social_need=-8, note="随口说了句"),
@@ -89,11 +88,9 @@ OUTCOMES: Dict[str, Outcome] = {
     "observe_user": Outcome(emotion={"loneliness": -2}, social_need=+3, note="看看用户在干嘛"),
     "observe_work": Outcome(emotion={"curiosity": +2}, note="看用户工作"),
     "look_around":  Outcome(needs={"curiosity": -6}, note="环顾四周"),
-    # ---- ASSISTANCE ----
-    "offer_help": Outcome(emotion={"pride": +4, "happiness": +3}, social_need=-6,
-                         relationship={"trust": +1, "respect": +1}, note="主动想帮忙"),
-    "assist_user": Outcome(emotion={"pride": +4}, social_need=-4,
-                          relationship={"trust": +1}, note="帮忙做事"),
+    # ---- ASSISTANCE（无关系奖励：帮不帮忙是她的选择，信任来自真实结果）----
+    "offer_help": Outcome(emotion={"pride": +4, "happiness": +3}, social_need=-6, note="主动想帮忙"),
+    "assist_user": Outcome(emotion={"pride": +4}, social_need=-4, note="帮忙做事"),
 }
 
 
@@ -102,10 +99,14 @@ def _clamp01(v: float) -> float:
 
 
 def outcome_for(activity: str, success: bool = True) -> Outcome:
-    """取活动的因果影响；未知活动给空反馈（不改变状态，避免凭空造因果）。"""
+    """取活动的因果影响；未知活动给空反馈（不改变状态，避免凭空造因果）。
+
+    Phase 13 终审 §6.4：**返回新鲜副本**（dataclasses.replace）—— 绝不修改全局 OUTCOMES 共享对象，
+    否则 success=False 的一次调用会污染另一个调用持有的同一 spec。
+    """
+    from dataclasses import replace
     o = OUTCOMES.get(activity, Outcome())
-    o.success = success
-    return o
+    return replace(o, success=success)
 
 
 def apply_outcome(state: CharacterState, activity: str, emotion: EmotionEngine,
@@ -148,16 +149,12 @@ def apply_outcome(state: CharacterState, activity: str, emotion: EmotionEngine,
     for k, v in o.emotion.items():
         if hasattr(st_e, k):
             setattr(st_e, k, max(0.0, min(100.0, getattr(st_e, k) + v * rep_scale * scale)))
-    # 社交需求单独结算（同样递减）
+    # 社交需求单独结算（同样递减）—— §6.3：唯一字段，恰好一次
     if o.social_need:
         cur_s = n.social_need
         avail = _clamp01(cur_s / 100.0 + 0.12) if o.social_need < 0 else 1.0
         n.social_need = max(0.0, min(100.0, cur_s + o.social_need * avail * rep_scale * scale))
-    # 关系反馈（successful interaction → relationship evolves）
-    if relationship is not None and o.relationship and o.success:
-        for k, v in o.relationship.items():
-            if hasattr(relationship, k):
-                cur = getattr(relationship, k)
-                setattr(relationship, k, max(0.0, min(100.0, cur + v)))
+    # Phase 13 终审 §6.2：**活动 Outcome 不写关系**（OUTCOMES 已不含 relationship delta）。
+    # 关系只由 RelationshipEngine 从真实关系证据写入；relationship 参数保留仅为签名兼容。
     n.clamp()
     return o

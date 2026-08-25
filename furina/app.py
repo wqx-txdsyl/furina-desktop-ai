@@ -224,6 +224,14 @@ class Furina:
                          "observe_user": "working"}
             macro = st_macro(macro_map.get(req.action, "idle"))
         st = self.state.state
+        # Phase 13 终审 §10.5：Agent 动作（source=agent）只表达"我在做事"，
+        # 不写情绪真相、不覆盖 LifeBrain 的活动语义 —— 保持 WORKING 宏状态。
+        if getattr(req, "source", "") == "agent":
+            st.life.macro = MacroState.WORKING
+            st.life.activity = req.action
+            st.attention.target = AttentionTarget.ACTIVE_WINDOW
+            st.intent.action = req.action
+            return
         st.life.macro = macro
         st.life.activity = req.action
         st.intent.action = req.action
@@ -264,10 +272,17 @@ class Furina:
 
     # -------------------------------------------------- Agent → 角色身体同步（plan/5 §15）
     def _on_agent_body(self, phase: str) -> None:
+        # Phase 13 终审 §10.5：Agent 身体/动作所有权必须经 Director（source=agent, P_AGENT_TASK），
+        # 由唯一 executor 在运行时主线程落地 —— 回调线程（Agent worker）**不得直接写 CharacterState**。
         # phase: approach / work / report / confused
-        self.state.state.life.macro = MacroState.WORKING
-        self.state.state.life.activity = f"agent_{phase}"
-        self.state.state.attention.target = AttentionTarget.ACTIVE_WINDOW
+        try:
+            from furina.director import ActionRequest
+            from furina.director.director import P_AGENT_TASK
+            self.director.submit(ActionRequest(
+                source="agent", action=f"agent_{phase}",
+                priority=P_AGENT_TASK, reason=f"agent body: {phase}"))
+        except Exception:
+            pass
 
     # -------------------------------------------------- 用户命令（右键菜单触发）
     AGENT_TASKS = {
@@ -295,39 +310,50 @@ class Furina:
         from furina.feeding import apply_food, default_food
         food = default_food(food_name)
         res = apply_food(self.state.state, food)
-        # FIX G：喂食台词交给 DialogueBrain（三脑：语言只负责怎么说），不直接锁状态/用固定 reaction
+        # §4.4：喂食 → EVENT_FEED（EmotionEngine 唯一 owner，恰好一次）
+        try:
+            from furina.emotion import EVENT_FEED
+            self.emotion.apply(EVENT_FEED)
+        except Exception:
+            pass
+        # Phase 13 终审 §11：**喂食台词在后台线程执行**（LLM 慢调用不阻塞 Qt/调用方）。
+        # GUI 与 Harness 都走本方法（同一生产路径），喂食效果（食物效应/情绪/记忆/打断）同步完成，
+        # DialogueBrain 结果经 BRAIN_SPOKE 在运行时主线程落地（§8 apply 边界）。
         if self.dialogue_brain:
-            try:
-                mem_objs = []
+            def _feed_dialogue():
                 try:
-                    mem_objs = self.memory.retrieve(query=food.name, limit=3)
-                except Exception:
                     mem_objs = []
-                mems = [m.content for m in mem_objs]
-                wf = self._runtime_world_factors()   # §4 真实 Scheduler world
-                rel = {}
-                try:
-                    rel = self.relationship.factors() if self.relationship else {}   # C-R1.2 归一化
+                    try:
+                        mem_objs = self.memory.retrieve(query=food.name, limit=3)
+                    except Exception:
+                        mem_objs = []
+                    mems = [m.content for m in mem_objs]
+                    wf = self._runtime_world_factors()   # §4 真实 Scheduler world
+                    rel = {}
+                    try:
+                        rel = self.relationship.factors() if self.relationship else {}   # C-R1.2 归一化
+                    except Exception:
+                        pass
+                    minterp = {}
+                    try:
+                        if self.memory is not None:
+                            minterp = self.memory.interpret(mem_objs, context=food.name)   # §5 real objects
+                    except Exception:
+                        pass
+                    speech = self.dialogue_brain.say(
+                        intent="eat", emotion=self.state.state.emotion.label,
+                        user_initiated=True, context=f"用户喂了我{food.name}",
+                        activity="eat", memories=mems, world=wf, relationship=rel,
+                        memory_interp=minterp, user_present=True)
+                    if speech:
+                        self.bus.emit(EventType.BRAIN_SPOKE,
+                                      payload=type("_O", (), {"speech": speech,
+                                                              "emotion": self.state.state.emotion.label})(),
+                                      source="app")
                 except Exception:
                     pass
-                minterp = {}
-                try:
-                    if self.memory is not None:
-                        minterp = self.memory.interpret(mem_objs, context=food.name)   # §5 real objects
-                except Exception:
-                    pass
-                speech = self.dialogue_brain.say(
-                    intent="eat", emotion=self.state.state.emotion.label,
-                    user_initiated=True, context=f"用户喂了我{food.name}",
-                    activity="eat", memories=mems, world=wf, relationship=rel,
-                    memory_interp=minterp, user_present=True)
-                if speech:
-                    self.bus.emit(EventType.BRAIN_SPOKE,
-                                  payload=type("_O", (), {"speech": speech,
-                                                          "emotion": self.state.state.emotion.label})(),
-                                  source="app")
-            except Exception:
-                pass
+            import threading
+            threading.Thread(target=_feed_dialogue, daemon=True).start()
         # 生活记忆（plan/6）
         self.memory.observe(f"用户喂了我{food.name}", level=MemoryLevel.EPISODIC,
                             source=MemorySource.INTERACTION, importance=0.4,
@@ -385,7 +411,14 @@ class Furina:
         log.info("avatar conversation: %s", text)
         # Phase 13C §32-36：文本→互动因果（exactly-once per message；无新 LLM）。§28-31 观察放**对话后**，
         # 避免"本轮刚存的记忆立即被同一 prompt 检索回显"（C-R1.3.2）。
-        self._apply_user_text_fx(text)
+        fx = self._apply_user_text_fx(text)
+        # §4.4：普通对话 → EVENT_TALK（reject/praise 已用更强语义事件，不叠加 talk）
+        if not fx:
+            try:
+                from furina.emotion import EVENT_TALK
+                self.emotion.apply(EVENT_TALK)
+            except Exception:
+                pass
         # FIX H：完整 runtime context（user_initiated / activity / world / relationship / memory interp / 在场）
         mem_objs = []
         try:
@@ -418,6 +451,17 @@ class Furina:
                           payload=type("_O", (), {"speech": speech, "intent": "talk",
                                                   "emotion": self.state.state.emotion.label})(),
                           source="app")
+        else:
+            # Phase 13 终审 §9：用户直接消息的校验失败必须**可观察**（不得静默永久失声）。
+            # 经确定性 SYSTEM_STATUS 路径（非角色化、非固定句池）暴露"这句话没通过人格校验"。
+            try:
+                db = getattr(self, "dialogue_brain", None)
+                if db is not None and getattr(db, "last_validation_failure", None):
+                    sched = getattr(self, "_sched", None)
+                    if sched is not None and hasattr(sched, "_say"):
+                        sched._say("（系统状态：刚才那句话没通过人格校验，没有展示。）", dur=4.0)
+            except Exception:
+                pass
         # C-R1.3.2：记忆候选观察放在**对话回复完成之后**，避免当前轮记忆被同一 prompt 检索回显。
         self._maybe_observe_conversation(text)
 
@@ -439,13 +483,14 @@ class Furina:
         return {}
 
     # -------------------------------------------------- Phase 13C §32-36：高置信文本 → 互动因果（conservative）
-    def _apply_user_text_fx(self, text: str) -> None:
+    def _apply_user_text_fx(self, text: str) -> str:
         """用户**对芙宁娜**的高置信语言意义 → 统一语义执行入口（不做第二套 Interaction System）。
 
         C-R1.5：拒绝 = 与 Reject 按钮**共享同一 route**（on_user_reject → RelationshipEngine.apply +
         persistence + rejection stats + LifeBrain tolerance + life interrupt）。
         Praise/gratitude 用正确语义事件（EV_POSITIVE_RESPONSE），**不得伪装成 EV_POSITIVE_TOUCH**。
         保守阈值：只有强匹配"直接对象是芙宁娜"才触发；不确定 → 不触发（§34）。
+        返回语义分类："reject" / "praise" / ""（供调用方决定 EVENT_TALK 是否叠加）。
         """
         import re
         t = (text or "").strip()
@@ -455,14 +500,20 @@ class Furina:
         if re.search(r"别烦我|别吵我|走开|离我远点|不要烦我|先别理我|我要忙|我要专心|没空理你们|别打扰我", t):
             sched = getattr(self, "_sched", None)
             if sched is not None and hasattr(sched, "on_user_reject"):
-                sched.on_user_reject()   # 唯一 reject 语义执行入口
-            elif self.relationship is not None:
+                sched.on_user_reject()   # 唯一 reject 语义执行入口（含 §4.4 EVENT_REJECT 恰好一次）
+            else:
                 try:
                     from furina.relationship.engine import EV_REJECT
                     self.relationship.apply(EV_REJECT)
                 except Exception:
                     pass
-            return
+                # 无 Scheduler 兜底：情绪语义事件（EmotionEngine 唯一 owner）
+                try:
+                    from furina.emotion import EVENT_REJECT
+                    self.emotion.apply(EVENT_REJECT)
+                except Exception:
+                    pass
+            return "reject"
         # 2. 高置信称赞/谢意（对芙宁娜）→ 正确语义事件（非 POSITIVE_TOUCH）+ 持久化一次（C-R2 §10）
         if re.search(r"(你真|你挺|你好|你).*(可爱|好看|喜欢|棒|厉害|贴心)|我喜欢你|谢谢你|感谢|多谢", t):
             try:
@@ -479,6 +530,13 @@ class Furina:
                         pass
             except Exception:
                 pass
+            # §4.4：夸奖 → EVENT_PRAISE（恰好一次）
+            try:
+                from furina.emotion import EVENT_PRAISE
+                self.emotion.apply(EVENT_PRAISE)
+            except Exception:
+                pass
+            return "praise"
 
     # -------------------------------------------------- Phase 13C §28-31：对话→记忆（conservative）
     def _maybe_observe_conversation(self, text: str) -> None:

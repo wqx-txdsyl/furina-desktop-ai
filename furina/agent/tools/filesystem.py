@@ -102,7 +102,14 @@ class OrganizeTool(BaseTool):
             shutil.move(str(f), str(dest))
             moved += 1
             results.append({"from": f.name, "to": group})
-        return ToolResult(True, data=results, verified=False,
+        # Phase 13 终审 §10：verified 必须反映真实可观察结果
+        #   - dry_run：预览本身就是真实结果（data 列出全部可归类项）
+        #   - 真实移动：验证文件确实不在根目录（确实被移走）
+        if dry_run:
+            verified = True
+        else:
+            verified = all(not (base_path / r["from"]).exists() for r in results)
+        return ToolResult(True, data=results, verified=verified,
                           note=f"dry_run={dry_run} 移动 {moved}")
 
     @staticmethod

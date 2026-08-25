@@ -164,15 +164,73 @@ class SpatialPlanner:
             style = "REPOSITION_SHORT"
         else:
             # NONE + wander_allowed / 其它自主 → WANDER_MEANDER 或 EXPLORE_MULTI_POINT
+            # Phase 13 终审 §12：**所有自主路径都经角圆化平滑**，消除中间点处的瞬时折角
+            # （评审轨迹探针曾出现 72°~167° 相邻航向跳变 = 折线机器人）。
+            # Catmull-Rom 对稀疏、相距很远的控制点会 overshoot/回折（~165°），
+            # 因此探索/漫步改用 **二次贝塞尔角圆化**（路径贴在折线上，只圆转角，保证不回折）。
             if getattr(self, "_wander_multi", False) and dist > 260:
                 style = "EXPLORE_MULTI_POINT"
-                waypoints = self._explore_waypoints(start, target, char_w, char_h)
+                picks = self._explore_waypoints(start, target, char_w, char_h)
+                poly = [start] + list(picks) + [target]
+                waypoints = self._round_polyline(poly, radius=90.0, per_corner=10)
             else:
                 style = "WANDER_MEANDER"
                 mid = SpatialPoint((start.x + target.x) / 2 + self.rng.uniform(-40, 40),
                                    (start.y + target.y) / 2 + self.rng.uniform(-40, 40))
-                waypoints = [self._clamp_point(mid, char_w, char_h)]
+                waypoints = self._round_polyline([start, self._clamp_point(mid, char_w, char_h), target],
+                                                 radius=60.0, per_corner=8)
         return style, waypoints
+
+    def _round_polyline(self, pts: list, radius: float, per_corner: int,
+                        straight_step: float = 26.0) -> list:
+        """折线角圆化：内部顶点用二次贝塞尔圆弧，直线段保持直线（密集采样）。
+
+        - 输出**完整路径采样**（起点 → 直线段 → 圆弧 → 直线段 → … → 终点）；
+        - 航向变化只发生在圆弧内部（每角转角 ≈ 折角/per_corner，远小于 45°）；
+        - 圆弧在凸包内，无 Catmull-Rom 式 overshoot/回折。
+        """
+        if len(pts) < 3:
+            return [p for p in pts[1:-1]]
+        import math
+        # 先算出每个角的两端切点 ua/uc
+        corners = []
+        for i in range(1, len(pts) - 1):
+            a, b, c = pts[i - 1], pts[i], pts[i + 1]
+            d1 = max(1e-6, b.distance(a))
+            d2 = max(1e-6, b.distance(c))
+            r = min(radius, d1 / 3.0, d2 / 3.0)
+            ua = SpatialPoint(b.x + (a.x - b.x) / d1 * r, b.y + (a.y - b.y) / d1 * r)
+            uc = SpatialPoint(b.x + (c.x - b.x) / d2 * r, b.y + (c.y - b.y) / d2 * r)
+            corners.append((ua, b, uc))
+
+        def _line(p: SpatialPoint, q: SpatialPoint) -> list:
+            seg = []
+            d = p.distance(q)
+            n = max(1, int(d / straight_step))
+            for s in range(1, n + 1):
+                t = s / n
+                seg.append(SpatialPoint(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t))
+            return seg
+
+        out: list = []   # 不含起点本身（runtime 从当前位置出发，起点重复会产生零长段/伪转角）
+        for i, (ua, b, uc) in enumerate(corners):
+            # 上一段 → 本角入口切点（直线）
+            prev = corners[i - 1][2] if i > 0 else pts[0]
+            out.extend(_line(prev, ua))
+            # 圆弧 ua → uc（二次贝塞尔，控制点 b）
+            for s in range(1, per_corner + 1):
+                t = s / per_corner
+                mt = 1.0 - t
+                out.append(SpatialPoint(mt * mt * ua.x + 2 * mt * t * b.x + t * t * uc.x,
+                                        mt * mt * ua.y + 2 * mt * t * b.y + t * t * uc.y))
+        # 最后一个角出口切点 → 终点（不含终点本身：runtime 以 target 为最终目标到达，避免零长段）
+        out.extend(_line(corners[-1][2], pts[-1])[:-1])
+        # 去重紧邻点，避免零步长
+        dedup = []
+        for p in out:
+            if not dedup or dedup[-1].distance(p) > 3.0:
+                dedup.append(p)
+        return dedup
 
     def _smooth_curve(self, pts: list, n: int = 10) -> list:
         """C-R1.7：Catmull-Rom 把稀疏控制点平滑为密集采样点（方向连续，无尖锐折角）。"""
@@ -209,21 +267,35 @@ class SpatialPlanner:
 
     def _explore_waypoints(self, start: SpatialPoint, target: SpatialPoint,
                            char_w: float, char_h: float) -> list:
-        cands = self._open_area_targets(start, char_w, char_h, n=20)
-        if not cands:
+        """探索路径中间点：沿 start→target 轴的正弦摆动（monotonic，不回折）。
+
+        Phase 13 终审 §12：旧的"走廊内随机 2-3 点"可能产生 ~176° 折返（picks 可绕回起点侧），
+        圆化也无法挽救。改为**沿轴单调 + 垂直正弦摆**：
+          - 只前进不回折（方向投影单调）；
+          - 摆动幅度有界（≤ min(70, dist*0.14)），转角天然 < ~120°，圆化后远小于 45°；
+          - 幅度带随机（非固定网格/固定曲线）。
+        """
+        import math
+        axis_x = target.x - start.x
+        axis_y = target.y - start.y
+        dist = math.hypot(axis_x, axis_y)
+        if dist < 1e-6:
             return []
-        # 取 2-3 个在"起点与目标之间走廊"附近的点，制造有头有尾的探索感
-        mid_x = (start.x + target.x) / 2
-        mid_y = (start.y + target.y) / 2
-        near = [p for p in cands if abs(p.x - mid_x) < 320 and abs(p.y - mid_y) < 320]
-        pool = near or cands
-        picks = []
-        for _ in range(min(3, len(pool))):
-            p = pool.pop(self.rng.randrange(len(pool)))
-            # C-R1.7：有界抖动 + 安全校验（explore 非固定网格点）
-            jit = SpatialPoint(p.x + self.rng.uniform(-60, 60), p.y + self.rng.uniform(-60, 60))
-            picks.append(self._clamp_point(jit, char_w, char_h))
-        return picks
+        ux, uy = axis_x / dist, axis_y / dist
+        px, py = -uy, ux                      # 垂直单位向量
+        max_swing = min(70.0, dist * 0.14)
+        # 2-3 个摆动：符号交替，幅度带随机（保持探索感，但不折返）
+        signs = (1.0, -1.0) if dist < 520 else (0.8, -1.0, 0.5)
+        out: list = []
+        n = len(signs)
+        for k, s in enumerate(signs):
+            t = (k + 1) / (n + 1)
+            along_x = start.x + ux * dist * t
+            along_y = start.y + uy * dist * t
+            off = max_swing * s * self.rng.uniform(0.65, 1.0)
+            out.append(self._clamp_point(SpatialPoint(along_x + px * off, along_y + py * off),
+                                         char_w, char_h))
+        return out
 
     def _clamp_point(self, p: SpatialPoint, char_w: float, char_h: float) -> SpatialPoint:
         if self._foot_valid(p.x, p.y, char_w, char_h):

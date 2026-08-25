@@ -90,15 +90,27 @@ class WorldState:
 
 
 # ---------------------------------------------------------------- 配置（阈值集中，不散落 magic number）
-_APP_CATEGORY_RULES = [
-    (("code", "vscode", "pycharm", "idea", "terminal", "conhost", "cmd", "powershell"), "coding"),
-    (("winword", "word", "wps", "notepad", "editor", "obsidian", "typora"), "writing"),
-    (("excel", "et", "powerpnt", "ppt", "acrobat", "pdf", "libreoffice"), "working"),
-    (("chrome", "msedge", "firefox", "brave", "opera"), "browsing"),
-    (("wechat", "weixin", "qq", "telegram", "discord", "slack", "outlook"), "communication"),
-    (("vlc", "potplayer", "mpv", "wmplayer", "youtube"), "watching_media"),
-    (("steam", "game", "epicgames", "wuthering"), "gaming"),
-]
+# Phase 13 终审 §2.4：分类输入 = **进程可执行名**（精确/整词匹配），不再拿窗口类名做子串匹配。
+# 窗口类（Chrome_WidgetWin_1 之类）含 "et" 等短 token 会误判（如假 office/表格）。
+# "et" 仅作为 WPS 表格的真实进程名保留（精确匹配）。
+_APP_CATEGORY_EXACT = {
+    # 精确名（进程名去 .exe 后小写）
+    "code": "coding", "vscode": "coding", "pycharm": "coding", "idea": "coding",
+    "terminal": "coding", "conhost": "coding", "cmd": "coding", "powershell": "coding",
+    "wt": "coding", "alacritty": "coding", "wezterm": "coding",
+    "winword": "writing", "word": "writing", "wps": "writing", "notepad": "writing",
+    "obsidian": "writing", "typora": "writing", "marktext": "writing",
+    "excel": "working", "et": "working", "powerpnt": "working", "ppt": "working",
+    "acrobat": "working", "pdf": "working", "wpp": "working",
+    "chrome": "browsing", "msedge": "browsing", "firefox": "browsing",
+    "brave": "browsing", "opera": "browsing", "vivaldi": "browsing",
+    "wechat": "communication", "weixin": "communication", "qq": "communication",
+    "telegram": "communication", "discord": "communication", "slack": "communication",
+    "outlook": "communication",
+    "vlc": "watching_media", "potplayer": "watching_media", "mpv": "watching_media",
+    "wmplayer": "watching_media", "youtube": "watching_media",
+    "steam": "gaming", "epicgames": "gaming", "wuthering": "gaming",
+}
 _READING_HINT = ("read", "pdf", "document", "小说", "article", "manga", "comic", "doc")
 _AWAY_IDLE_THRESHOLD = 300.0       # 5min 无输入 → away
 _STABLE_ACTIVITY_MIN = 30.0        # 活动需稳定 30s 才算 significant transition
@@ -106,11 +118,20 @@ _LONG_FOCUS_THRESHOLD = 600.0      # 10min 连续 focus
 _LONG_SILENCE_THRESHOLD = 900.0    # 15min
 
 
-def _cat(app: str, title: str) -> str:
-    a = (app or "").lower(); t = (title or "").lower()
-    for keys, cat in _APP_CATEGORY_RULES:
-        if any(k in a for k in keys):
-            return cat
+def _norm_process(process: str) -> str:
+    n = (process or "").strip().lower()
+    if n.endswith(".exe"):
+        n = n[:-4]
+    return n
+
+
+def _cat(process: str, title: str) -> str:
+    """按**进程可执行名**做精确分类（整词，绝不做短 token 子串匹配）。"""
+    t = (title or "").lower()
+    name = _norm_process(process)
+    if name in _APP_CATEGORY_EXACT:
+        return _APP_CATEGORY_EXACT[name]
+    # 标题提示（阅读/学习/文档），仅在进程未知时兜底
     if any(k in t for k in _READING_HINT):
         return "reading"
     return "unknown"
@@ -139,6 +160,9 @@ class WorldPerception:
         self._context_since = 0.0
         self._focus_since = 0.0
         self._last_emit: Dict[str, float] = {}   # event -> 上次 emit 时间
+        # Phase 13 终审 §2.5：稳定性窗口 —— 新活动候选需持续 _STABLE_ACTIVITY_MIN 才真正切换
+        self._pending_activity: Optional[UserActivity] = None
+        self._pending_duration: float = 0.0
 
     def _emit(self, out: List[str], ev: WorldEvent, w: WorldState) -> None:
         """debounce / stability：同一事件需间隔最少 20s 才再发。"""
@@ -151,27 +175,50 @@ class WorldPerception:
         out.append(key)
 
     def update(self, *, app: str, title: str, idle_seconds: float,
-               hour: int, minute: int, typing: bool = False, dt: float = 3.0) -> WorldState:
+               hour: int, minute: int, typing: bool = False, dt: float = 3.0,
+               process: str = "") -> WorldState:
         w = self.state
         w.timestamp = time.time()
         w.day_period = _period(hour)
         w.user_idle_seconds = idle_seconds
-        w.foreground_app = app
+        w.foreground_app = app          # 窗口类名（原始信号）
         w.foreground_title = title
-        w.foreground_process = app
-        w.app_category = _cat(app, title)
+        w.foreground_process = process or app   # 进程可执行名（分类唯一输入）
+        w.app_category = _cat(w.foreground_process, title)
 
         # 用户在场/活跃
         w.user_present = idle_seconds < _AWAY_IDLE_THRESHOLD
         w.user_active = (typing or idle_seconds < 30) and w.user_present
 
-        # 活动：away > idle > 由 app 类别
+        # 活动：away > idle > 由 app 类别（Phase 13 终审 §2.5：类别间切换需稳定性窗口，防一次误判抖动）
         if not w.user_present:
             w.user_activity = UserActivity.AWAY
+            self._pending_activity = None
+            self._pending_duration = 0.0
         elif idle_seconds >= 30 and not typing:
             w.user_activity = UserActivity.IDLE
+            self._pending_activity = None
+            self._pending_duration = 0.0
         else:
-            w.user_activity = _activity_from_category(w.app_category, title)
+            candidate = _activity_from_category(w.app_category, title)
+            if w.user_activity == UserActivity.UNKNOWN:
+                # 初始化：首次分类直接生效（这不是"切换"，稳定性只约束已知活动间的转换）
+                w.user_activity = candidate
+                self._pending_activity = None
+                self._pending_duration = 0.0
+            elif candidate == w.user_activity:
+                self._pending_activity = None
+                self._pending_duration = 0.0
+            elif candidate != self._pending_activity:
+                # 新候选开始观察：**不立即切换**，稳定满 _STABLE_ACTIVITY_MIN 才生效
+                self._pending_activity = candidate
+                self._pending_duration = 0.0
+            else:
+                self._pending_duration += dt
+                if self._pending_duration >= _STABLE_ACTIVITY_MIN:
+                    w.user_activity = candidate
+                    self._pending_activity = None
+                    self._pending_duration = 0.0
 
         # Focus / availability / interruption（§6 三者不同）
         focus, avail, cost = _focus_availability(w.user_activity, typing, idle_seconds, w.app_category)

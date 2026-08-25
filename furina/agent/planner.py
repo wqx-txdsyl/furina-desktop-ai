@@ -64,8 +64,14 @@ class Planner:
                 AgentStep(tool="fs.list_dir", args={"path": base_path}, expect="验证归类后的目录"),
             ]
         elif "打开" in user_request or "open" in user_request.lower():
+            app = _guess_app(user_request)
+            if app is None:
+                # Phase 13 终审 §10.1：未知应用必须失败/澄清，绝不默认 notepad（诚实，不假装知道）。
+                plan.status = "unable"
+                plan.constraints.append("无法识别要打开的应用，请明确指定（如：记事本 / 计算器 / 浏览器）")
+                return plan
             plan.steps = [
-                AgentStep(tool="app.launch", args={"name": _guess_app(user_request)}, expect="应用启动"),
+                AgentStep(tool="app.launch", args={"name": app}, expect="应用启动且进程可观察"),
             ]
         elif any(k in user_request.lower() for k in ("看", "观察", "屏幕", "看看", "observe", "screenshot", "桌面")):
             # “看软件 / 看屏幕” → 抓屏（只读），供后续视觉观察
@@ -78,10 +84,13 @@ class Planner:
         return plan
 
 
-def _guess_app(text: str) -> str:
+def _guess_app(text: str) -> str | None:
+    """把用户请求映射到已知应用；**未知返回 None**（绝不默认 notepad，§10.1）。"""
+    t = text.lower()
     for kw, app in (("vscode", "code"), ("word", "winword"), ("excel", "excel"),
                     ("ppt", "powerpnt"), ("chrome", "chrome"), ("浏览器", "chrome"),
-                    ("记事本", "notepad")):
-        if kw in text.lower():
+                    ("记事本", "notepad"), ("计算器", "calc"), ("calculator", "calc"),
+                    ("calc", "calc")):
+        if kw in t:
             return app
-    return "notepad"
+    return None

@@ -259,8 +259,10 @@ class RuntimeHarness:
     def on_ignore(self) -> None:
         self.recorder.start_root(trigger_type="IGNORE", trigger_source="harness",
                                  subsystem="interaction", stage="USER_ACTION", input_summary="user_ignore")
-        # 映射到既有 interaction 语义（不新建后端体系 §41）
-        self.app.interaction.emit_event("leave", "whole")
+        # Phase 13 终审 §7/§14：语义忽略（不是指针 leave）。
+        # 与生产语义同一 route：Emotion EVENT_IGNORE + Relationship EV_IGNORE + Life + Memory（恰好一次）。
+        if hasattr(self.app, "_sched") and hasattr(self.app._sched, "on_user_ignore"):
+            self.app._sched.on_user_ignore()
 
     def on_agent(self, task: str) -> None:
         label = {"notepad": "打开记事本", "calc": "打开计算器"}.get(task, task)
@@ -317,26 +319,59 @@ class RuntimeHarness:
         except Exception:
             pass
 
-    # ---- 真实健康指标（§1：不许假绿）----
+    # ---- 真实健康指标（§1/§14：不许假绿）----
     def runtime_health(self) -> dict:
         self._agent_state = self._read_agent_state()
         return {
             "life": dict(self._life_last),
             "dialogue": dict(self._dialog_last),
             "agent": self._agent_state,
-            "memory": self._memory_status(),   # §13：不展示假精确数字
+            "memory": self._memory_status(),   # COUNT=n 真实条数
+            "diagnostics": self._diagnostics(),  # §14：Manual 所需真实诊断字段
         }
 
-    def _memory_status(self) -> str:
+    # -------------------------------------------------- §14：真实徽章语义
+    def life_badge(self) -> str:
+        lf = dict(self._life_last)
+        if lf.get("attempt", 0) == 0:
+            return "UNAVAILABLE"                    # 从未尝试 = 不绿
+        if lf.get("fallback", 0) and not lf.get("success", 0):
+            return "FALLBACK"
+        if lf.get("success", 0):
+            return "LAST_OK"
+        if lf.get("failure", 0):
+            return "LAST_FAILED"
+        return "UNAVAILABLE"
+
+    def dialogue_badge(self) -> str:
+        dl = dict(self._dialog_last)
+        try:
+            db = getattr(self.app, "dialogue_brain", None)
+            if db is None or not getattr(getattr(db, "llm", None), "is_available", lambda: False)():
+                return "UNAVAILABLE"
+        except Exception:
+            return "UNAVAILABLE"
+        if dl.get("attempt", 0) == 0:
+            return "AVAILABLE"                      # 适配器可用但尚未调用
+        if dl.get("outcome") == "SPOKE":
+            return "LAST_OK"
+        if dl.get("outcome") == "MODEL_FAILURE":
+            return "LAST_FAILED"
+        return "IDLE"                               # SILENT_BY_POLICY 等
+
+    def _memory_status(self) -> dict:
         try:
             store = getattr(getattr(self.app, "memory", None), "store", None)
             if store is None:
-                return "UNAVAILABLE"
-            # 只判 AVAILABLE / EMPTY（不展示假精确行数）
-            has = len(store.query(limit=1, status=None)) > 0
-            return "AVAILABLE" if has else "EMPTY"
+                return {"status": "UNAVAILABLE", "count": -1}
+            if hasattr(store, "count"):
+                n = store.count()
+                return {"status": "AVAILABLE" if n > 0 else "EMPTY", "count": n}
+            # 兜底：真实查全量（不展示假精确数字）
+            rows = store.query(limit=10000)
+            return {"status": "AVAILABLE" if rows else "EMPTY", "count": len(rows)}
         except Exception:
-            return "UNAVAILABLE"
+            return {"status": "UNAVAILABLE", "count": -1}
 
     def _read_agent_state(self) -> str:
         try:
@@ -348,10 +383,66 @@ class RuntimeHarness:
             if getattr(agent, "_last_err", None):
                 return "FAILED"
             if getattr(agent, "_last_success", False):
-                return "SUCCESS"
+                return "COMPLETED_VERIFIED"
             return "IDLE"
         except Exception:
             return "IDLE"
+
+    def _diagnostics(self) -> dict:
+        """§14：Manual 所需的真实运行时诊断字段（全部只读）。"""
+        d: dict = {}
+        try:
+            sched = getattr(self.app, "_sched", None)
+            st = getattr(getattr(sched, "se", None), "state", None)
+            if st is not None:
+                d["clock"] = {"hour": st.clock_hour, "minute": st.clock_minute}
+                d["idle_seconds"] = round(float(st.user_idle_seconds), 1)
+                d["user_working"] = bool(st.user_working)
+                d["emotion_label"] = st.emotion.label
+                d["activity"] = st.life.activity
+            wp = getattr(sched, "world_perc", None)
+            if wp is not None and hasattr(wp, "state"):
+                d["world"] = {"process": wp.state.foreground_process,
+                              "category": wp.state.app_category,
+                              "activity": getattr(wp.state.user_activity, "value", "")}
+            if sched is not None:
+                d["life_next_think"] = round(float(getattr(sched, "_life_next_think", 0.0)), 1)
+                fin = getattr(sched, "_last_activity_finish", None)
+                if isinstance(fin, dict):
+                    d["activity_finish"] = fin
+                inst = getattr(sched, "_activity_instance", None)
+                if isinstance(inst, dict):
+                    d["activity_instance"] = {"activity": inst.get("activity"),
+                                              "planned_duration": round(float(inst.get("planned_duration", 0.0)), 1)}
+            emo = getattr(self.app, "emotion", None)
+            if emo is not None and hasattr(emo, "_recent"):
+                d["emotion_recent_events"] = dict(emo._recent)
+        except Exception:
+            pass
+        # 空间诊断（§12）：path style / waypoint 数 / max heading delta
+        try:
+            sp = getattr(self, "spatial", None)
+            if sp is not None:
+                p = getattr(sp, "_current_plan", None)
+                if p is not None:
+                    d["spatial"] = {"path_style": p.path_style,
+                                    "waypoints": len(getattr(p, "waypoints", []) or []),
+                                    "max_heading_delta_deg": self._spatial_max_turn(p)}
+        except Exception:
+            pass
+        return d
+
+    @staticmethod
+    def _spatial_max_turn(plan) -> float:
+        import math
+        wps = list(getattr(plan, "waypoints", []) or [])
+        pts = [plan.start] + wps + [plan.target]
+        m = 0.0
+        for i in range(2, len(pts)):
+            a = math.atan2(pts[i - 1].y - pts[i - 2].y, pts[i - 1].x - pts[i - 2].x)
+            b = math.atan2(pts[i].y - pts[i - 1].y, pts[i].x - pts[i - 1].x)
+            m = max(m, abs((b - a + math.pi) % (2 * math.pi) - math.pi))
+        return round(math.degrees(m), 1)
 
     def _on_brain_spoke(self, ev) -> None:
         # BRAIN_SPOKE 作为上游 trace 事件；Conversation UI 以 Frame.speech 为准（§8）。
@@ -366,12 +457,18 @@ class RuntimeHarness:
         self._trace_agent("REQUEST", (ev.payload or {}).get("request", ""), success=True)
 
     def _on_agent_completed(self, ev) -> None:
-        self._agent_state = "SUCCESS"
-        self._trace_agent("RESULT", f"goal={(ev.payload or {}).get('goal','')}", success=True)
+        # §10：AGENT_COMPLETED 只在全部步骤已验证时发出 → COMPLETED_VERIFIED（真值，非 import 即绿）
+        self._agent_state = "COMPLETED_VERIFIED"
+        self._trace_agent("RESULT", f"goal={(ev.payload or {}).get('goal','')} verified",
+                          success=True)
 
     def _on_agent_failed(self, ev) -> None:
-        self._agent_state = "FAILED"
         err = (ev.payload or {}).get("error") or (ev.payload or {}).get("reason", "")
+        # §10.3：unverified_step 失败 → UNVERIFIED（不是普通 FAILED，也不可能是 COMPLETED）
+        if "unverified" in err:
+            self._agent_state = "UNVERIFIED"
+        else:
+            self._agent_state = "FAILED"
         self._trace_agent("RESULT", f"error={err}", success=False)
 
     def _trace_agent(self, stage: str, summary: str, success: bool) -> None:
@@ -381,11 +478,17 @@ class RuntimeHarness:
                                         output_summary=summary, success=success, trigger_type="AGENT")
         else:
             self.recorder.start_root(trigger_type="AGENT", trigger_source="agent",
-                                     subsystem="agent", stage=stage, output_summary=summary,
-                                     success=success)
+                                     subsystem="agent", stage=stage, output_summary=summary)
 
     # ================================================== 空间 tick（由外部 timer 驱动）
     def tick_spatial(self) -> None:
+        # §8：GUI/主线程 = 运行时 owner 线程 —— 先落地后台排队的运行时变更，再走空间 tick
+        try:
+            sched = getattr(self.app, "_sched", None)
+            if sched is not None and hasattr(sched, "drain_apply"):
+                sched.drain_apply()
+        except Exception:
+            pass
         try:
             self.spatial.tick(now=time.monotonic())
         except Exception:
