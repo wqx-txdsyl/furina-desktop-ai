@@ -186,20 +186,13 @@ class LifeBrain:
                 "name": state.life.activity or state.intent.action or "idle",
                 "duration": max(0, int(time.time() - _last_change(state))),
             },
-            "user": {
-                "active": bool(state.user_working or state.user_idle_seconds < 300),
-                "idle_seconds": int(state.user_idle_seconds),
-                "application": state.active_window_app,
-                "working": bool(state.user_working),
-                # 任务书 §23：用户对主动的接纳度 & 关系
-                "interaction_tolerance": int(getattr(self, "_tolerance", 50)),
-            },
+            "user": self._user_snapshot(state),
             "relationship": self.relationship_traits(),
             "environment": {"screen": True, "desktop": True},
             # 任务书 §21：互动机会评分（0~100）——Brain 判断“现在适不适合主动”
             "interaction_opportunity": self.interaction_opportunity(state, memory_engine),
         }
-        # 结构化世界感知（Phase 06 §18：给 Brain 结构化 world，不是原始 OS 信息）
+        # 结构化世界感知（Pre-Manual §1：canonical 快照接口 = WorldPerception.to_dict()）
         wp = getattr(state, "world", None)
         if wp is not None and hasattr(wp, "to_dict"):
             try:
@@ -235,11 +228,13 @@ class LifeBrain:
         if getattr(self, "identity", None) is not None:
             try:
                 from furina.persona.character_identity import appraise
+                from furina.world_perception import presence_facts
+                pf = presence_facts(getattr(state, "world", None))
                 ap = appraise(self.identity,
-                              user_present=bool(getattr(state, "user_present", True)),
-                              user_working=bool(getattr(state, "user_working", False)),
+                              user_present=pf["present"],   # Pre-Manual §3：canonical 在场（unknown→False，非默认 True）
+                              user_working=bool(state.user_working),
                               recent_events=list(recent_events or []),
-                              user_idle=float(getattr(state, "user_idle_seconds", 0)),
+                              user_idle=float(pf["idle_seconds"] or 0),
                               relationship_factors=_relationship_factors(state),
                               emotion_label=getattr(state.emotion, "label", "calm"))
                 snapshot["character_appraisal"] = ap.as_dict()
@@ -247,6 +242,22 @@ class LifeBrain:
             except Exception:
                 pass
         return snapshot
+
+    def _user_snapshot(self, state) -> dict:
+        """Pre-Manual §3：用户真相块 —— 消费 canonical PresenceFacts，不再从 raw idle 占位推断。"""
+        from furina.world_perception import presence_facts
+        pf = presence_facts(getattr(state, "world", None))
+        return {
+            "presence_known": pf["known"],
+            "present": pf["present"],
+            "active": pf["active"],
+            "idle_available": pf["known"],   # 有效 OS 空闲样本即可用（presence_facts 的 known 来源）
+            "idle_seconds": None if pf["idle_seconds"] is None else int(pf["idle_seconds"]),
+            "application": state.active_window_app,
+            "working": bool(state.user_working),
+            # 任务书 §23：用户对主动的接纳度 & 关系
+            "interaction_tolerance": int(getattr(self, "_tolerance", 50)),
+        }
 
     def _record_activity(self, activity: str) -> None:
         """记录一次被选中的活动（供多样性判断）。"""
@@ -257,11 +268,17 @@ class LifeBrain:
         """0~100：现在是不是好时机去主动接近/说话（任务书 §21）。
 
         用户忙+高强度→低；用户空闲→中；用户刚完成/看向她→高；加上关系亲密度与时间。
+        Pre-Manual §4：**在场未知（presence_known=False）→ 0**（宁可 unknown，不要假装知道）；
+        显式用户事件由上层即时反应路径处理（不依赖此机会分）。
         """
         if state is None:
             return 50
+        from furina.world_perception import presence_facts
+        pf = presence_facts(getattr(state, "world", None))
+        if not pf["known"]:
+            return 0   # 无有效 OS 空闲样本：不主动互动（未知 ≠ 可用）
         score = 50
-        idle = state.user_idle_seconds
+        idle = float(pf["idle_seconds"] or 0.0)
         # 用户忙碌强度
         if state.user_working:
             score -= 28          # 工作时不主动打扰

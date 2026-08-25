@@ -251,6 +251,13 @@ def _feasible(activity: str, state, ctx=None) -> tuple[bool, List[str]]:
     present = wf.get("user_present", 1.0)
     availability = wf.get("availability", 1.0)
     user_working = wf.get("user_working", 0.0)
+    presence_known = wf.get("presence_known", 1.0)
+    # Pre-Manual §5：**在场未知（presence_known=0，OS idle 不可用）→ 用户定向行为不可行**
+    # （unknown ≠ away，但也不得主动假设用户可用；reason 用 user_presence_unknown）
+    if presence_known < 0.5:
+        if activity in _NEEDS_USER:
+            return False, ["user_presence_unknown", "world_idle_unavailable"]
+        return True, []
     # 用户不在场 → 用户定向行为 infeasible
     if present < 0.5:
         if activity in _NEEDS_USER:

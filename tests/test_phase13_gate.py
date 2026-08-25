@@ -116,6 +116,12 @@ def _gate_integration(db):
     sched.dispatcher.bind_owner()
     se.state.user_idle_seconds = 10.0
     sched._llm_speech_at = 0.0
+    # Pre-Manual §7：社交 bid 测试需要有效在场
+    sched.world_perc.state.idle_available = True
+    sched.world_perc.state.user_present = True
+    sched.world_perc.state.user_active = True
+    sched.world_perc.state.user_idle_seconds = 10.0
+    sched.world_perc._has_valid_idle = True
     return sched, bus, se, director, ActionRequest
 
 

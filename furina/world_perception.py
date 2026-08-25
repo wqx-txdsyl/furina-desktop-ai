@@ -127,6 +127,35 @@ def _norm_process(process: str) -> str:
     return n
 
 
+def presence_facts(world, *, explicit_user_event: bool = False) -> dict:
+    """**唯一权威在场真相**（Pre-Manual §2）：known / present / active / idle_seconds / source。
+
+    来源优先级：
+      A. 显式用户事件（直接消息/喂食/点击/摸头/戳/拖拽）→ 对该事件 known=True, present=True, active=True
+         （不伪造/不覆盖 OS idle 测量值）；
+      B. 有效 OS 世界（idle_available=True）→ 用 WorldState.user_present/user_active/user_idle_seconds；
+      C. 无有效 OS 样本且无显式事件 → known=False, present=False, active=False, idle_seconds=None。
+
+    **unknown ≠ away**：known=False 表示"未知，不要主动假设用户可用"，
+    不得被当作"测量到用户离开"。
+    world 可为 WorldPerception 或 WorldState（有 .state 则取 .state）。
+    """
+    if explicit_user_event:
+        return {"known": True, "present": True, "active": True,
+                "idle_seconds": None, "source": "explicit_user_event"}
+    w = world
+    if w is not None and hasattr(w, "state"):
+        w = w.state
+    if w is not None and bool(getattr(w, "idle_available", False)):
+        return {"known": True,
+                "present": bool(getattr(w, "user_present", True)),
+                "active": bool(getattr(w, "user_active", True)),
+                "idle_seconds": float(getattr(w, "user_idle_seconds", 0.0)),
+                "source": "world"}
+    return {"known": False, "present": False, "active": False,
+            "idle_seconds": None, "source": "unknown"}
+
+
 def _cat(process: str, title: str) -> str:
     """按**进程可执行名**做精确分类（整词，绝不做短 token 子串匹配）。"""
     t = (title or "").lower()
@@ -172,6 +201,7 @@ class WorldPerception:
         self.last_events: List[str] = []
         self._event_seq = 0   # 全局单调事件实例序号（诊断/去重用）
         self._has_valid_idle = False   # H1-FINAL §7：是否已有过有效空闲样本
+        self._prev_present = True      # Pre-Manual §6：上一 tick 在场真值（避免首 tick 假 RETURNED）
 
     def _emit(self, out: List[str], ev: WorldEvent, w: WorldState) -> None:
         """debounce / stability：同一事件需间隔最少 20s 才再发。"""
@@ -273,15 +303,17 @@ class WorldPerception:
         self._prev_activity = w.user_activity
         self._prev_app = app
         self._prev_period = w.day_period
+        self._prev_present = bool(w.user_present)   # Pre-Manual §6：在场真值翻转跟踪
         self._focus_since = self._focus_since + dt if w.user_focus_level > 0.7 else 0.0
         return w
 
     def _derive_events(self, w: WorldState) -> List[str]:
         ev: List[str] = []
-        # 用户在场状态转变
-        if self._prev_activity in (UserActivity.AWAY,) and w.user_present:
+        # 用户在场状态转变（Pre-Manual §6：基于**在场真值翻转**，与活动稳定性窗口无关 ——
+        # 否则 pending 期间 w.user_activity 仍为 AWAY 会每 20s 重发 USER_RETURNED）
+        if self._prev_present is False and w.user_present:
             self._emit(ev, WorldEvent.USER_RETURNED, w)
-        elif self._prev_activity != UserActivity.AWAY and not w.user_present:
+        elif self._prev_present is True and not w.user_present:
             self._emit(ev, WorldEvent.USER_LEFT, w)
         if self._prev_activity == UserActivity.IDLE and w.user_active:
             self._emit(ev, WorldEvent.USER_BECAME_ACTIVE, w)
@@ -324,7 +356,17 @@ class WorldPerception:
             "user_present": 1.0 if w.user_present else 0.0,
             "user_idle": min(1.0, w.user_idle_seconds / _AWAY_IDLE_THRESHOLD),
             "interesting_context": 1.0 if w.interesting_context else 0.0,
+            # Pre-Manual §5：在场真相可用性（unknown ≠ away）
+            "idle_available": 1.0 if w.idle_available else 0.0,
+            "presence_known": 1.0 if w.idle_available else 0.0,
         }
+
+    def to_dict(self) -> dict:
+        """Pre-Manual §1：**规范世界快照接口**（= WorldState 真值）。
+
+        所有下游（LifeBrain 等）都走这一 canonical 接口；不再有"一处附 WorldState、一处附 WorldPerception"的分裂。
+        """
+        return self.state.to_dict()
 
     def event_tags(self) -> List[str]:
         return list(self.state.recent_world_events[-4:])

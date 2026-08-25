@@ -222,14 +222,23 @@ def test_variety_preserves_strong_need():
 
 
 # ---------------------------------------------------------------- 互动机会评分 + 注意力预算（任务书 §21-22）
+def _attach_valid_world(st, idle=10.0):
+    """Pre-Manual：有效 OS 空闲样本（idle_available=True）→ 在场已知。"""
+    from furina.world_perception import WorldPerception
+    wp = WorldPerception()
+    wp.update(app="code", title="", idle_seconds=idle, hour=st.clock_hour, minute=0, idle_available=True)
+    st.world = wp
+    return st
+
+
 def test_interaction_opportunity_scoring():
     """§21：用户忙→低分；闲→高分；深夜→更低。"""
     lb = LifeBrain(FakeAdapter())
-    st = CharacterState(); st.clock_hour = 14; st.user_working = True
+    st = _attach_valid_world(CharacterState()); st.clock_hour = 14; st.user_working = True
     assert lb.interaction_opportunity(st) < 50, "用户忙应低机会"
-    st2 = CharacterState(); st2.clock_hour = 14; st2.user_working = False
+    st2 = _attach_valid_world(CharacterState()); st2.clock_hour = 14; st2.user_working = False
     assert lb.interaction_opportunity(st2) > 50, "用户闲应高机会"
-    st3 = CharacterState(); st3.clock_hour = 23; st3.user_working = False
+    st3 = _attach_valid_world(CharacterState()); st3.clock_hour = 23; st3.user_working = False
     assert lb.interaction_opportunity(st3) < lb.interaction_opportunity(st2), "深夜应更低"
 
 
@@ -292,7 +301,7 @@ def test_low_tolerance_reduces_social_proactivity():
 
 def test_high_annoyance_reduces_proactivity():
     from furina.memory.memory_types import RelationshipState
-    st = CharacterState(); st.clock_hour = 14; st.user_working = False
+    st = _attach_valid_world(CharacterState()); st.clock_hour = 14; st.user_working = False
     lb = LifeBrain(FakeAdapter())
     lb._budget = 12.0
     lb._relationships_memory = RelationshipState()

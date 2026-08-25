@@ -21,6 +21,7 @@ class DialogueContextSnapshot:
     task_mode: bool = False
     solitude: bool = False
     user_present: bool = True
+    presence_known: bool = True   # Pre-Manual §8：在场真相已知？（unknown → present=False, solitude=False）
     channel: str = "DIRECT_USER_TURN"
     seq: int = 0
     ingress_seq: Optional[int] = None   # H1-FINAL §2：owner 入口预留的 FIFO 序号（经 say(ingress_seq=) 消费）
@@ -59,6 +60,7 @@ class DialogueContextSnapshot:
             "task_mode": self.task_mode,
             "solitude": self.solitude,
             "user_present": self.user_present,
+            "presence_known": self.presence_known,   # Pre-Manual §8
             "channel": self.channel,
         }
         if self.ingress_seq is not None:

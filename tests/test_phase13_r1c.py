@@ -33,6 +33,12 @@ def _sched():
     sched = Scheduler(bus, se, None, None, None, None, None)
     sched.emotion = emo
     sched.relationship = rel
+    # Pre-Manual §7：社交 bid 测试需要有效在场（idle_available=True + present）
+    sched.world_perc.state.idle_available = True
+    sched.world_perc.state.user_present = True
+    sched.world_perc.state.user_active = True
+    sched.world_perc.state.user_idle_seconds = 10.0
+    sched.world_perc._has_valid_idle = True
     return sched, bus, se
 
 
@@ -91,7 +97,9 @@ def test_autonomous_ambient_speech_does_not_start_ignore_window():
 
 def test_user_absent_does_not_create_fake_ignore():
     sched, bus, se = _sched()
-    se.state.user_idle_seconds = 400.0   # 用户缺席
+    se.state.user_idle_seconds = 400.0   # 用户缺席（canonical World 也标记 away）
+    sched.world_perc.state.user_idle_seconds = 400.0
+    sched.world_perc.state.user_present = False
     sched.begin_social_bid(reason="life:talk")
     assert sched._pending_social_bid is None, "用户缺席不得开启响应窗口（不制造假 ignore）"
 

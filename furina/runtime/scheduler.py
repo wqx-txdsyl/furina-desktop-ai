@@ -443,15 +443,16 @@ class Scheduler:
                 self.emotion.derive_label(tired_hint=max(0.0, min(1.0, tired)))
             except Exception:
                 pass
-        # §4.4/FINAL-R1 §2.2：用户返回（idle → active 边界）→ EVENT_RETURN，apply + 立即派生
+        # Pre-Manual §6：**删除 raw-idle return 检测器**（idle 占位会伪造 EVENT_RETURN）。
+        # USER_RETURNED 由 WorldPerception 在真实 away→active 转换时以**事件实例**发出，
+        # 与 WORK_STARTED/WORK_ENDED 同一消费边界（last_events 恰好一次）。
         try:
-            idle = float(getattr(self.se.state, "user_idle_seconds", 0.0))
-            was_idle = bool(getattr(self, "_was_user_absent", False))
-            if idle < 300 and was_idle and self.emotion is not None:
+            w = self.world_perc.state
+            n = getattr(self.world_perc, "last_events", []).count("USER_RETURNED")
+            for _ in range(n):
                 from furina.emotion import EVENT_RETURN
                 self.emotion.apply_event(EVENT_RETURN, tired_hint=self._tired_hint())
                 self._recent_events.append("user_return")
-            self._was_user_absent = idle >= 300
         except Exception:
             pass
         # FINAL-R1 §7：社交响应窗口到期检查（owner 线程，medium tick）
@@ -774,18 +775,22 @@ class Scheduler:
             minterp = self.me.interpret(mems_ctx, context=wctx or "")
         except Exception:
             pass
+        # Pre-Manual §8：自主台词用 canonical 在场 —— unknown → present=False, solitude=False, presence_known=False
+        from furina.world_perception import presence_facts
+        pf = presence_facts(self.world_perc)
         return DialogueContextSnapshot(
             intent=intent or activity,
             emotion_label=emotion,
             context=speech_intent or intent or activity,
             activity=activity,
             channel="AMBIENT_AUTONOMOUS",   # FINAL-R1 §4.2：自主台词不进直接对话历史
+            presence_known=pf["known"],
+            user_present=pf["present"],
+            solitude=False if not pf["known"] else (not pf["present"]),
             memories=tuple(mems),
             world=freeze_flat({**wf, "user_activity": wctx, "recent_events": list(self._recent_events)}),
             relationship=freeze_flat(self._rel_factors()),
             memory_interp=freeze_flat(minterp),
-            solitude=bool(st.user_idle_seconds > 300),
-            user_present=bool(st.user_idle_seconds < 300),
         )
 
     # -------------------------------------------------- FINAL-R1 §5：Director 实际执行时才启动实例
@@ -1030,12 +1035,16 @@ class Scheduler:
         """芙宁娜发起**合格的直接社交尝试** → 开启响应窗口（pending token + deadline）。
 
         不合格（不开启）：自主自说自话（AMBIENT）、非社交环境台词、指针离开、
-        用户从一开始就缺席、Agent/系统状态台词。
+        **用户在场未知或缺席**（Pre-Manual §7：无有效 OS 空闲样本时绝不开启 —— 否则 60s 后
+        会制造假的 USER_IGNORE）、Agent/系统状态台词。
+        显式用户事件触发的社交反应不走此路径（事件本身证明在场）。
         """
         if getattr(self, "_pending_social_bid", None) is not None:
             return   # 已有 pending，不重复
-        if self.se.state.user_idle_seconds >= 300:
-            return   # 用户缺席从起点就不开窗口（不制造假 ignore）
+        from furina.world_perception import presence_facts
+        pf = presence_facts(getattr(self, "world_perc", None))
+        if not (pf["known"] and pf["present"]):
+            return   # 在场未知/缺席：不开响应窗口（unknown ≠ 可用；不制造假 ignore）
         self._pending_social_bid = {
             "token": f"bid-{time.time_ns() % 10 ** 8}",
             "deadline": time.time() + self._social_bid_window,
@@ -1149,6 +1158,13 @@ class Scheduler:
         except Exception:
             pass
         idle = float(getattr(self.se.state, "user_idle_seconds", 0))
+        # Pre-Manual §8/§9：互动反应 = 显式用户事件（known/present）；Agent 报告 = canonical 在场
+        from furina.world_perception import presence_facts
+        if interaction != "agent":
+            pf = {"known": True, "present": True, "active": True,
+                  "idle_seconds": None, "source": "explicit_user_event"}
+        else:
+            pf = presence_facts(self.world_perc)
         return DialogueContextSnapshot(
             intent=intent,
             emotion_label=emotion,
@@ -1156,8 +1172,9 @@ class Scheduler:
             activity=activity,
             user_initiated=user_initiated,
             task_mode=bool(interaction == "agent"),
-            user_present=idle < 300,
-            solitude=idle > 300,
+            presence_known=pf["known"],
+            user_present=pf["present"],
+            solitude=False if not pf["known"] else (not pf["present"]),
             channel="AGENT_REPORT" if interaction == "agent" else "INTERACTION_REACTION",
             memories=tuple(mems),
             world=freeze_flat(wf),
@@ -1202,6 +1219,12 @@ class Scheduler:
         speech = self._speech
         silence = not speech
 
+        # Pre-Manual §8：canonical 在场（unknown → present=False, solitude=False, presence_known=False）
+        from furina.world_perception import presence_facts
+        _pf = presence_facts(self.world_perc)
+        _u_present = _pf["present"]
+        _solitude = False if not _pf["known"] else (not _pf["present"])
+
         # ------- BodyExpressionState（Phase 09）：语义身体层 -------
         body = None
         body_snap = {}
@@ -1221,8 +1244,8 @@ class Scheduler:
                             relationship=rel,
                             world=self.world_perc.factors(),
                             activity=activity,
-                            solitude=bool(state.user_idle_seconds > 300),
-                            user_present=bool(state.user_idle_seconds < 300),
+                            solitude=_solitude,
+                            user_present=_u_present,
                             user_working=bool(state.user_working))
                         mode = getattr(app, "mode", "CASUAL")
                         dialogue_act = getattr(app, "dialogue_act", "COMMENT")
@@ -1235,7 +1258,7 @@ class Scheduler:
                     world=self.world_perc.factors(),
                     fatigue=getattr(state.needs, "fatigue", 20.0),
                     needs={k: getattr(state.needs, k) for k in state.needs.__dataclass_fields__},
-                    user_present=bool(state.user_idle_seconds < 300),
+                    user_present=_u_present,
                     user_working=bool(state.user_working),
                     silence=silence,
                 )
@@ -1262,16 +1285,16 @@ class Scheduler:
                     emotion=state.emotion.label or "calm", intent=state.intent.action or "",
                     relationship=self._rel_factors(),   # C-R1.2 归一化
                     world=self.world_perc.factors(), activity=activity,
-                    solitude=bool(state.user_idle_seconds > 300),
-                    user_present=bool(state.user_idle_seconds < 300),
+                    solitude=_solitude,
+                    user_present=_u_present,
                     user_working=bool(state.user_working)).dialogue_act
                     if self.dialogue_brain is not None and hasattr(self.dialogue_brain, "expression") else "COMMENT"),
                 "mode": (self.dialogue_brain.expression.appraise(
                     emotion=state.emotion.label or "calm",
                     activity=activity, relationship=self._rel_factors(),   # C-R1.2 归一化
                     world=self.world_perc.factors(),
-                    solitude=bool(state.user_idle_seconds > 300),
-                    user_present=bool(state.user_idle_seconds < 300),
+                    solitude=_solitude,
+                    user_present=_u_present,
                     user_working=bool(state.user_working)).mode
                     if self.dialogue_brain is not None and hasattr(self.dialogue_brain, "expression") else "CASUAL"),
                 "initiative": 0.5 if not silence else 0.0,

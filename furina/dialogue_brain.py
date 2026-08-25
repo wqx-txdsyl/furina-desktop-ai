@@ -175,6 +175,7 @@ class DialogueBrain:
             relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
             user_initiated: bool = False, task_mode: bool = False,
             solitude: bool = False, user_present: bool = True,
+            presence_known: bool = True,   # Pre-Manual §8：接受 canonical 在场（快照携带）
             channel: str = "DIRECT_USER_TURN",
             ingress_seq: Optional[int] = None) -> Optional[str]:
         """生成一句符合人格、有真实上下文的中文台词，或 None（沉默，§5/§39）。
@@ -192,7 +193,7 @@ class DialogueBrain:
                                       activity=activity, relationship=relationship,
                                       memory_interp=memory_interp, user_initiated=user_initiated,
                                       task_mode=task_mode, solitude=solitude, user_present=user_present,
-                                      channel=channel, _seq=seq)
+                                      presence_known=presence_known, channel=channel, _seq=seq)
         finally:
             # FINAL-R1 §4.1：无论成功/沉默/环境/校验失败，本回合槽位（2s-1, 2s）必须推进，
             # 否则后续直接回合会死锁等待不存在的 seq（幂等：已消费的槽自动跳过）。
@@ -207,6 +208,7 @@ class DialogueBrain:
                   relationship: Optional[dict] = None, memory_interp: Optional[dict] = None,
                   user_initiated: bool = False, task_mode: bool = False,
                   solitude: bool = False, user_present: bool = True,
+                  presence_known: bool = True,
                   channel: str = "DIRECT_USER_TURN", _seq: Optional[int] = None) -> Optional[str]:
         """say() 的实现体（由 FIFO 入口包裹；_seq 为入队序号）。"""
         # 1) Expression Appraisal（确定性）：ShouldSpeak / Mode / Intent / Strategy

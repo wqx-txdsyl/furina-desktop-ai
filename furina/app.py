@@ -457,7 +457,10 @@ class Furina:
             context=f"用户喂了我{food_name}",
             activity="eat",
             user_initiated=True,
+            # Pre-Manual §9：显式用户事件 = 在场证据
+            presence_known=True,
             user_present=True,
+            solitude=False,
             channel="FEED_REACTION",   # FINAL-R1 §4.2：喂食台词不进直接对话历史
             memories=tuple(mems),
             world=freeze_flat(wf),
@@ -611,8 +614,10 @@ class Furina:
             user_text=text,
             activity=str(getattr(self.state.state.life, "activity", "")),
             user_initiated=True,
-            solitude=idle > 300,
-            user_present=idle < 300,
+            # Pre-Manual §9：**显式用户事件 = 在场证据**（该事件快照 known/present，不伪造 OS idle）
+            presence_known=True,
+            user_present=True,
+            solitude=False,
             channel="DIRECT_USER_TURN",
             ingress_seq=ingress_seq,   # H1-FINAL §2：owner 入口预留的 FIFO 序号
             memories=tuple(mems),

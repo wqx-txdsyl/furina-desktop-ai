@@ -224,6 +224,10 @@ class StateEngine:
     def evaluate_attention(self) -> None:
         st = self.state
         att = st.attention
+        # Pre-Manual §10：OS idle 不可用（在场未知）→ 不假设用户在场/在工作（回退到 SELF）
+        if not getattr(st, "idle_available", True) and st.user_idle_seconds == 0:
+            att.target = AttentionTarget.SELF
+            return
         if st.user_idle_seconds > 180 or st.active_window_app in ("", "unknown"):
             att.target = AttentionTarget.SELF
         elif classify_activity(st.active_window_app, st.active_window_title)["working"]:
@@ -240,6 +244,9 @@ class StateEngine:
         hour = state.clock_hour
         idle = state.user_idle_seconds
         now = time.monotonic()
+        # Pre-Manual §10：本地回退（无 LifeBrain）也不得把未知当可用 ——
+        # OS idle 不可用 + 占位 0 → 不产生 proactive 用户定向社交（SELF/survival 保持）
+        presence_known = getattr(state, "idle_available", True) or bool(idle != 0 or state.user_working)
 
         cands: List[IntentCandidate] = []
         # 睡眠（survive, P_NEED）
@@ -257,7 +264,8 @@ class StateEngine:
             cands.append(IntentCandidate(Intent(IntentCategory.SELF, "rest", priority=P_SELF,
                                                 reason=f"疲劳{n.fatigue:.0f}"), n.fatigue * 0.8))
         # 陪伴/搭话（social, 考虑打扰成本 plan/3 §10）
-        if n.social_need > 65:
+        # Pre-Manual §10：在场未知时**不**仅凭 social_need 产生 proactive 用户定向社交
+        if n.social_need > 65 and presence_known:
             u = n.social_need
             if working:
                 u -= 45      # 打扰成本
