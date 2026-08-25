@@ -291,11 +291,15 @@ class Furina:
         st.life.reason = req.reason
         # R2.2.1 §8：recent activity truth —— activity 变化时把上一 current 记入 recent（确定性事实）。
         # current_activity=req.action；recent_activity=上一个 current；recent_activity_finished_at=此刻。
+        # Phase 13 Final Residual 0.1（clock domain）：recent freshness 统一使用 **monotonic** 时钟
+        # （与 `_grounded_fact_recovery` 的 `now = time.monotonic()` 同一 clock domain）。
+        # 绝不拿 epoch wall time 与 monotonic 做差；如需持久化 wall-clock，另行存 `_recent_activity_finished_wall`。
         try:
             prev = getattr(self, "_current_activity_truth", "") or ""
             if prev and prev != req.action:
                 self._recent_activity = prev
-                self._recent_activity_finished_at = __import__("time").time()
+                self._recent_activity_finished_at = time.monotonic()
+                self._recent_activity_finished_wall = time.time()
             self._current_activity_truth = req.action
         except Exception:
             pass
@@ -602,8 +606,10 @@ class Furina:
         只有 hard_issues 明确含 ungrounded_activity（且无其它 HARD）时才恢复：
         - **只读 snapshot**（owner ingress 冻结的 current/recent activity truth），**不读 live runtime state**；
         - "现在/正在/你在干嘛" → current activity，文案表达"现在"（如"嗯，我现在在看书。"）；
-        - "刚才/刚刚" → ingress 冻结的 recent activity，文案表达"刚才"；recent 超过 freshness
-          秒数（快照携带）→ 不得冒充"刚才"（回落 current 或返回空）。
+        - "刚才/刚刚" → ingress 冻结的 recent activity，文案表达"刚才"；
+        - **Phase 13 Final Residual 0.2**：不存在 authoritative recent truth（recent 缺失或超过 freshness）
+          → **不得**把 current 冒充为过去事实（禁止"刚才我在看书"）。允许：明确说明没有可靠 recent 记录，
+          再补 current（"刚才那段我没有可靠记录；我现在在看书。"）；或返回 ""（走其它诚实 fallback）。
         返回恢复文本或 ""（不恢复）。
         """
         try:
@@ -630,9 +636,12 @@ class Furina:
                 picked = recent_act
                 temporal = "刚才"
             elif asks_recent:
-                # 用户问"刚才"但 recent 缺失/过期 → 回落 current（stale 不冒充"刚才"）
-                picked = activity
-                temporal = "刚才"
+                # 0.2：recent 缺失/过期 → **不得**声称"刚才我在 current"（那是伪造过去事实）。
+                # 允许 A：明确说明没有可靠 recent 记录，再补 current；不允许把 current 说成"刚才"。
+                desc_now = self._activity_fact_line(activity)
+                if desc_now:
+                    return f"嗯，刚才那段我没有可靠记录；我现在在{desc_now}。"
+                return ""
             # authoritative activity → 事实描述（确定性，不依赖 LLM）
             desc = self._activity_fact_line(picked)
             if not desc:

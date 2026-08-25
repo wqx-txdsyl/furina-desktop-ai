@@ -151,7 +151,10 @@ class Scheduler:
         self._agent_last_request = ""
         # R2.2 FINAL §16：前台对话所有权 —— 通过 DIRECT_TURN_TRACE 跟踪 direct 回合是否活跃。
         # DIRECT_USER_TURN active 时 AMBIENT 不得 surface 插话；direct terminal 后有短 grace window。
-        self._direct_active = False          # 有 DIRECT 回合正在生成/排队
+        # Phase 13 Final Residual 0.3：bool → **按 turn_id 的 active set**（可表达多个 queued/generating 回合）。
+        # `_direct_active` 派生为 bool(_active_direct_turns)；grace 只在 active set 从 non-empty → empty 时建立
+        # （任一回合 terminal 时若其它回合仍活跃 → 不重开 grace，foreground 仍 direct-owned）。
+        self._active_direct_turns: Set[int] = set()
         self._direct_grace_until = 0.0       # direct 终态后的对话宽限窗（monotonic）
         self._ambient_deferred: List[Dict] = []   # IMPORTANT ambient 台词延迟到 grace 后（freshness 检查）
         bus.on(EventType.DIRECT_TURN_TRACE, self._on_direct_turn_trace_ev)
@@ -267,6 +270,15 @@ class Scheduler:
             pass
 
     # -------------------------------------------------- R2.2 FINAL §16：前台对话所有权
+    @property
+    def _direct_active(self) -> bool:
+        """派生：有任一 DIRECT 回合（queued/generating）活跃 → foreground 仍 direct-owned。
+
+        Phase 13 Final Residual 0.3：`_direct_active` 不再是"最后一条 trace"决定的全局 bool，
+        而是 `bool(_active_direct_turns)` 的派生视图（多回合重叠时任何活跃回合都保持 direct 所有权）。
+        """
+        return bool(self._active_direct_turns)
+
     def _on_direct_turn_trace_ev(self, ev) -> None:
         """跟踪 DIRECT_USER_TURN 生命周期：active 相位 → ambient 禁入；终态 → 开 grace window。
 
@@ -275,7 +287,7 @@ class Scheduler:
           - 高价值 IMPORTANT ambient 台词 defer 到 grace 结束后再做 freshness 检查（stale drop）。
 
         R2.2.1 FINAL §3（owner boundary）：EventBus 是同步总线，DIRECT_TURN_TRACE 可能由
-        DirectDialogueQueue **worker 线程** emit。`_direct_active` / `_direct_grace_until` /
+        DirectDialogueQueue **worker 线程** emit。`_active_direct_turns` / `_direct_grace_until` /
         `_ambient_deferred` 是 Scheduler runtime state，**只允许 owner 线程修改**（不依赖 GIL）：
           - handler 在 owner 线程 → 立即 apply；
           - handler 在非 owner（worker emit）→ 经 RuntimeDispatcher.submit 提交回 owner drain。
@@ -291,17 +303,34 @@ class Scheduler:
                 pass
 
     def _apply_direct_trace(self, p: dict) -> None:
-        """owner 线程：根据 DIRECT_TURN_TRACE 相位更新前台所有权状态（唯一修改点）。"""
+        """owner 线程：根据 DIRECT_TURN_TRACE 相位更新前台所有权状态（唯一修改点）。
+
+        Phase 13 Final Residual 0.3：按 turn_id 维护 active set：
+          - DIRECT_INGRESS / QUEUED / GENERATION_STARTED → add(turn_id)；
+          - REPLIED / FAILED / CANCELLED → discard(turn_id)；
+          - **grace 只在 active set 从 non-empty → empty 时建立** —— 任一回合 terminal 时
+            若还有其它 queued/generating 回合，direct 仍 active（不开 grace，不重开）。
+            无任何被跟踪活跃回合时的终态（legacy/合成直发终态）同样视为 direct 对话结束 → 开 grace。
+        """
         phase = p.get("phase", "")
         status = p.get("status", "")
         now = time.monotonic()
+        try:
+            turn_id = int(p.get("turn_id", 0) or 0)
+        except Exception:
+            turn_id = 0
         if phase in ("DIRECT_INGRESS", "QUEUED", "GENERATION_STARTED") or status in ("QUEUED", "GENERATING"):
-            self._direct_active = True
+            if turn_id:
+                self._active_direct_turns.add(turn_id)
             # R2.2.1 §6：**不清空 deferred** —— 连续 direct 回合期间被挡的 IMPORTANT ambient
             # 保留在队列，等所有 direct 结束、grace 过期后统一 drain（exactly-once replay）。
         elif phase in ("REPLIED", "FAILED", "CANCELLED") or status in ("REPLIED", "FAILED", "CANCELLED"):
-            self._direct_active = False
-            # Direct terminal + visible 完成后 → 短 conversational grace window（§16）
+            was_active = bool(self._active_direct_turns)
+            if turn_id:
+                self._active_direct_turns.discard(turn_id)
+            if was_active and self._active_direct_turns:
+                return        # 其它回合仍 queued/generating → foreground 仍 direct-owned，不开 grace
+            # active set 已空（non-empty → empty，或 legacy 直发终态）→ 建立短 conversational grace window
             self._direct_grace_until = now + self._direct_grace_window()
             # R2.2.1 §6：**不清空 deferred** —— IMPORTANT ambient 保留到 grace 真正结束后
             # 由 `_tick_deferred_ambient`（medium tick）drain + freshness 检查（replay exactly-once）。
