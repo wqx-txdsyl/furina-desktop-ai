@@ -130,8 +130,12 @@ class Furina:
 
         # Director executor：把仲裁动作路由到表现/状态（仅 Director 能调用）
         self.director.set_executor(self._on_execute)
+        # H1 §8：实际抢占回调 —— 高优先级请求接管当前动作时，立即 finalize 被抢占的 mind 实例
+        self.director.on_before_replace = self._on_director_replace
 
-        # 纵向集成：互动→记忆/关系；Agent→角色身体同步（保持模块边界）
+        # 纵向集成：互动→记忆/关系；Agent→角色身体同步（保持模块边界）。
+        # H1 §9：Emotion 语义钩子（先于广播完成情绪效果）
+        self.interaction.on_emotion_semantic = self._on_interaction_emotion
         self.interaction.on_meaningful_interaction = self._on_meaningful_interaction
         self.agent.on_body_sync = self._on_agent_body
         # 互动 hitbox：由素材锚点定义（plan/4 §5），否则摸头/拖拽/点击都无法识别
@@ -142,17 +146,24 @@ class Furina:
 
     # -------------------------------------------------- FINAL-R1 §2.2/§2.4：互动 → 情绪语义
     def _on_interaction_emotion(self, ev) -> None:
-        """INTERACTION_INPUT → 显式语义情绪事件（无映射 → 不调用 EmotionEngine）。"""
-        if not ev or not ev.payload:
+        """INTERACTION_INPUT → 显式语义情绪事件（无映射 → 不调用 EmotionEngine）。
+
+        接受两种输入：bus 包装（ev.payload=InteractionEvent）或 InteractionEngine 钩子直传的
+        原始 InteractionEvent（H1 §9：on_emotion_semantic 在广播前调用）。
+        """
+        payload = getattr(ev, "payload", None)
+        event = payload if payload is not None else ev
+        if event is None:
             return None
         from furina.emotion import EVENT_PET, EVENT_POKE, EVENT_CLICK, EVENT_DRAG
         _map = {"petting": EVENT_PET, "poke": EVENT_POKE,
                 "click": EVENT_CLICK, "drag": EVENT_DRAG}
-        event = _map.get(getattr(ev.payload.type, "value", ""), None)
-        if event is None:
+        kind = getattr(getattr(event, "type", None), "value", "")
+        mapped = _map.get(kind, None)
+        if mapped is None:
             return None   # 未映射 → 不进入 emotion._recent（§2.4）
         # §2.2：apply + 立即派生权威 label（owner 线程语义事件边界）
-        self.emotion.apply_event(event, tired_hint=self._tired_hint())
+        self.emotion.apply_event(mapped, tired_hint=self._tired_hint())
         return None
 
     def _load_assets(self) -> None:
@@ -268,15 +279,38 @@ class Furina:
         st.intent.priority = 1.0 if req.action != "idle" else 0.2
         log.debug("director execute: %s -> %s", req.action, macro.value)
 
+    # -------------------------------------------------- H1 §8：Director 实际替换 → finalize 被抢占 mind
+    def _on_director_replace(self, old, new) -> None:
+        """高优先级请求（Agent/用户）实际接管当前动作时，立即 finalize 运行中的 mind 实例。
+
+        owner 线程（Director.drain 在运行时主线程调用）。
+        """
+        try:
+            if old is None or getattr(old, "source", "") != "mind":
+                return
+            new_src = getattr(new, "source", "")
+            if new_src == "agent":
+                reason = "preempted_by_agent"
+            elif new_src == "interaction":
+                reason = "preempted_by_user"
+            else:
+                reason = "interrupted"
+            sched = getattr(self, "_sched", None)
+            if sched is not None and hasattr(sched, "on_mind_preempted"):
+                sched.on_mind_preempted(reason=reason)
+        except Exception:
+            pass
+
     # -------------------------------------------------- 互动 → 记忆/关系（plan/4 §27）
     def _on_meaningful_interaction(self, ev) -> None:
         kind = ev.type.value
         # 关系：唯一写入口 = RelationshipEngine.apply(event)（§12：Relationship → RelationshipEngine owns）。
         # 事件同一份，关系引擎与记忆各自消费，**不做 Memory → Relationship**。
-        if kind in ("petting", "poke"):
+        if kind in ("petting", "poke", "drag"):
             try:
                 from furina.relationship import (EV_POSITIVE_TOUCH, EV_NEGATIVE_RESPONSE, EV_REJECT)
-                rel_ev = EV_POSITIVE_TOUCH if kind == "petting" else EV_NEGATIVE_RESPONSE
+                # H1 §9：drag 也是定型语义互动 → 关系事件（拖拽通常逗趣 → 正面触碰）
+                rel_ev = EV_POSITIVE_TOUCH if kind in ("petting", "drag") else EV_NEGATIVE_RESPONSE
                 if kind == "poke" and ev.count > 5:
                     # 重复戳 → 按拒绝级（更明显负面）；仍走 RelationshipEngine 的正式规则。
                     rel_ev = EV_REJECT
@@ -333,8 +367,9 @@ class Furina:
     def _feed(self, food_name: str) -> None:
         """给芙宁娜喂食（M3）。喂食是一个“事件”，由 LifeBrain 决定她做什么（三脑原则）。
 
-        不硬锁状态：只应用食物效应 + 触发一次性吃东西的表现 + 记记忆，
-        并让 LifeBrain 立即重决策（饥饿已下降 → 她吃完会自然退出 eat，而不是永远吃）。
+        H1 §11 owner 顺序（全部域效果**先于** dialogue worker）：
+          食物效应 → 情绪 apply+derive → 记忆 → life/activity/intent → interrupt → 取消 social bid
+          → **冻结 DialogueContextSnapshot** → 再启动 worker（只读快照，不读 live 状态）。
         """
         from furina.feeding import apply_food, default_food
         food = default_food(food_name)
@@ -345,45 +380,6 @@ class Furina:
             self.emotion.apply_event(EVENT_FEED, tired_hint=self._tired_hint())
         except Exception:
             pass
-        # Phase 13 终审 §11：**喂食台词在后台线程执行**（LLM 慢调用不阻塞 Qt/调用方）。
-        # GUI 与 Harness 都走本方法（同一生产路径），喂食效果（食物效应/情绪/记忆/打断）同步完成，
-        # DialogueBrain 结果经 BRAIN_SPOKE 在运行时主线程落地（§8 apply 边界）。
-        if self.dialogue_brain:
-            def _feed_dialogue():
-                try:
-                    mem_objs = []
-                    try:
-                        mem_objs = self.memory.retrieve(query=food.name, limit=3)
-                    except Exception:
-                        mem_objs = []
-                    mems = [m.content for m in mem_objs]
-                    wf = self._runtime_world_factors()   # §4 真实 Scheduler world
-                    rel = {}
-                    try:
-                        rel = self.relationship.factors() if self.relationship else {}   # C-R1.2 归一化
-                    except Exception:
-                        pass
-                    minterp = {}
-                    try:
-                        if self.memory is not None:
-                            minterp = self.memory.interpret(mem_objs, context=food.name)   # §5 real objects
-                    except Exception:
-                        pass
-                    speech = self.dialogue_brain.say(
-                        intent="eat", emotion=self.state.state.emotion.label,
-                        user_initiated=True, context=f"用户喂了我{food.name}",
-                        activity="eat", memories=mems, world=wf, relationship=rel,
-                        memory_interp=minterp, user_present=True,
-                        channel="FEED_REACTION")   # FINAL-R1 §4.2：喂食台词不进直接对话历史
-                    if speech:
-                        self.bus.emit(EventType.BRAIN_SPOKE,
-                                      payload=type("_O", (), {"speech": speech,
-                                                              "emotion": self.state.state.emotion.label})(),
-                                      source="app")
-                except Exception:
-                    pass
-            import threading
-            threading.Thread(target=_feed_dialogue, daemon=True).start()
         # 生活记忆（plan/6）
         self.memory.observe(f"用户喂了我{food.name}", level=MemoryLevel.EPISODIC,
                             source=MemorySource.INTERACTION, importance=0.4,
@@ -396,7 +392,66 @@ class Furina:
         self.state.state._activity_started_at = __import__("time").time()
         if hasattr(self, "_sched"):
             self._sched.interrupt_life("user_fed")
+        # H1 §7：喂食 = 用户回应 → 取消 pending social bid
+        try:
+            sched = getattr(self, "_sched", None)
+            if sched is not None and hasattr(sched, "on_user_response"):
+                sched.on_user_response()
+        except Exception:
+            pass
+        # H1 §11：**全部域效果完成后**，owner 冻结快照，再启动 dialogue worker
+        if self.dialogue_brain:
+            snap = self._freeze_feed_snapshot(food.name)
+            import threading
+            threading.Thread(target=self._feed_dialogue_worker, args=(snap,), daemon=True).start()
         log.info("feed %s -> %s", food.name, res)
+
+    # -------------------------------------------------- H1 §10/§11：Feed 冻结快照 + worker
+    def _freeze_feed_snapshot(self, food_name: str):
+        from furina.runtime.dialogue_snapshot import DialogueContextSnapshot, freeze_flat
+        mem_objs = []
+        try:
+            mem_objs = self.memory.retrieve(query=food_name, limit=3)
+        except Exception:
+            mem_objs = []
+        mems = [m.content for m in mem_objs]
+        wf = self._runtime_world_factors()
+        rel = {}
+        try:
+            rel = self.relationship.factors() if self.relationship else {}
+        except Exception:
+            pass
+        minterp = {}
+        try:
+            if self.memory is not None:
+                minterp = self.memory.interpret(mem_objs, context=food_name)
+        except Exception:
+            pass
+        return DialogueContextSnapshot(
+            intent="eat",
+            emotion_label=self.state.state.emotion.label,
+            context=f"用户喂了我{food_name}",
+            activity="eat",
+            user_initiated=True,
+            user_present=True,
+            channel="FEED_REACTION",   # FINAL-R1 §4.2：喂食台词不进直接对话历史
+            memories=tuple(mems),
+            world=freeze_flat(wf),
+            relationship=freeze_flat(rel),
+            memory_interp=freeze_flat(minterp),
+        )
+
+    def _feed_dialogue_worker(self, snap) -> None:
+        """worker：只读冻结快照调 DialogueBrain；结果经 BRAIN_SPOKE → dispatcher 回 owner。"""
+        try:
+            speech = self.dialogue_brain.say(**snap.say_kwargs())
+            if speech:
+                self.bus.emit(EventType.BRAIN_SPOKE,
+                              payload=type("_O", (), {"speech": speech,
+                                                      "emotion": snap.emotion_label})(),
+                              source="app")
+        except Exception:
+            pass
 
     # -------------------------------------------------- FINAL-R1 §3：生产入口（GUI + Harness 共用）
     def _rt_dispatcher(self):
@@ -445,9 +500,11 @@ class Furina:
                 self.emotion.apply_event(EVENT_TALK, tired_hint=self._tired_hint())
             except Exception:
                 pass
-        # 2. worker：LLM 对话（_brain_worker 只做 LLM/快照，域变更经 dispatcher 回 owner）
+        # 2. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
+        snap = self._freeze_direct_snapshot(text)
+        # 3. worker：LLM 对话（只读快照）；结果经 BRAIN_SPOKE → dispatcher 回 owner 应用
         import threading
-        threading.Thread(target=self._brain_worker, args=(text,), daemon=True).start()
+        threading.Thread(target=self._brain_worker, args=(text, snap), daemon=True).start()
 
     def _confirm_agent_permission(self, description: str, level) -> bool:
         """角色化权限确认（plan/5 §20）：用户主动点的菜单任务直接放行，给出认可台词。"""
@@ -484,23 +541,19 @@ class Furina:
                 res = self.agent.execute(req, dict(extra_context or {}))
             # §7：AgentRuntime.execute 已发出 AGENT_STARTED/COMPLETED/FAILED（唯一 owner）；
             # App 层**不重复 emit**，只做记忆整合。
+            # H1 §4.1：**记忆写入是域变更** → 经 dispatcher 回 owner 线程执行（worker 不直写 DB）。
             if res.get("status") == "completed" and res.get("goal"):
-                self.memory.observe(f"我帮用户{text}", level=MemoryLevel.EPISODIC,
-                                    source=MemorySource.AGENT_TASK, importance=0.55,
-                                    outcome=str(res.get("goal")))
+                goal = str(res.get("goal"))
+                self._rt_dispatcher().submit(
+                    lambda: self.memory.observe(f"我帮用户{text}", level=MemoryLevel.EPISODIC,
+                                                source=MemorySource.AGENT_TASK, importance=0.55,
+                                                outcome=goal))
         except Exception as e:
             log.warning("agent worker err: %s", e)
 
-    def _brain_worker(self, text: str) -> None:
-        """用户直接对话 → DialogueBrain（worker 线程：只做 LLM + 只读快照）。
-
-        FINAL-R1 §3：**域变更**（文本语义因果/关系/情绪）已由生产入口 `submit_user_message`
-        在 owner 线程完成；本 worker 不再触碰域状态。对话后的记忆提交经 dispatcher 回 owner。
-        """
-        if not self.dialogue_brain:
-            return
-        log.info("avatar conversation: %s", text)
-        # FIX H：完整 runtime context（user_initiated / activity / world / relationship / memory interp / 在场）
+    def _freeze_direct_snapshot(self, text: str):
+        """H1 §10：owner 线程冻结直接对话上下文（只读事实副本，不引用 live 可变运行时对象）。"""
+        from furina.runtime.dialogue_snapshot import DialogueContextSnapshot, freeze_flat
         mem_objs = []
         try:
             mem_objs = self.memory.retrieve(query=text, limit=3)
@@ -519,17 +572,39 @@ class Furina:
                 minterp = self.memory.interpret(mem_objs, context=text)   # §5：传 List[Memory] 而非 List[str]
         except Exception:
             pass
-        speech = self.dialogue_brain.say(
-            intent="talk", emotion=self.state.state.emotion.label,
-            user_text=text, memories=mems, user_initiated=True,
+        idle = float(getattr(self.state.state, "user_idle_seconds", 0.0))
+        return DialogueContextSnapshot(
+            intent="talk",
+            emotion_label=self.state.state.emotion.label,
+            user_text=text,
             activity=str(getattr(self.state.state.life, "activity", "")),
-            world=wf, relationship=rel, memory_interp=minterp,
-            user_present=bool(self.state.state.user_idle_seconds < 300),
-            solitude=bool(self.state.state.user_idle_seconds > 300))
+            user_initiated=True,
+            solitude=idle > 300,
+            user_present=idle < 300,
+            channel="DIRECT_USER_TURN",
+            memories=tuple(mems),
+            world=freeze_flat(wf),
+            relationship=freeze_flat(rel),
+            memory_interp=freeze_flat(minterp),
+        )
+
+    def _brain_worker(self, text: str, snapshot=None) -> None:
+        """用户直接对话 → DialogueBrain（worker 线程：只读**冻结快照**，不读 live 状态）。
+
+        FINAL-R1 §3 + H1 §10：域变更（文本语义/关系/情绪）由 owner 在 submit_user_message 完成；
+        owner 冻结 DialogueContextSnapshot；本 worker 只调 say(快照)。对话后记忆提交经 dispatcher 回 owner。
+        """
+        if not self.dialogue_brain:
+            return
+        log.info("avatar conversation: %s", text)
+        if snapshot is None:
+            # 兼容旧直调（非生产路径）：worker 内冻结（生产一律经 submit_user_message 在 owner 冻结）
+            snapshot = self._freeze_direct_snapshot(text)
+        speech = self.dialogue_brain.say(**snapshot.say_kwargs())
         if speech:
             self.bus.emit(EventType.BRAIN_SPOKE,
                           payload=type("_O", (), {"speech": speech, "intent": "talk",
-                                                  "emotion": self.state.state.emotion.label})(),
+                                                  "emotion": snapshot.emotion_label})(),
                           source="app")
         else:
             # Phase 13 终审 §9：用户直接消息的校验失败必须**可观察**（不得静默永久失声）。
@@ -780,6 +855,8 @@ def launch(cfg: AppConfig | None = None) -> Furina:
                       emotion_engine=furina.emotion, motivation=furina.motivation,
                       relationship_engine=furina.relationship, embodiment=furina.embodiment)
     sched.start(win)
+    # H1 §12：启动时在 Qt/runtime 线程**显式绑定 owner**（先于任何 worker 请求守卫变更）
+    sched.dispatcher.bind_owner()
     furina.spawn(sw, sh, win)
 
     # Phase 11：前端唯一动画时钟（30 FPS）+ Frame Consumer（Window 由 Consumer 驱动，Scheduler 不再直写）。

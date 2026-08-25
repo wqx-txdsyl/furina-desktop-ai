@@ -20,9 +20,11 @@ from furina.runtime.scheduler import Scheduler
 
 # ================================================================ §1.1 idle tick source
 def test_windows_idle_nonzero_sample_exact():
-    """确定性样本：now=120000ms, last=90000ms → idle=30.0s。"""
+    """确定性样本：now=120000ms, last=90000ms → idle=30.0s（H1 §2.2 wrap 兼容）。"""
     assert _idle_from_ticks(90000.0, 120000.0) == 30.0
-    assert _idle_from_ticks(120000.0, 90000.0) == 0.0   # 负差夹到 0
+    # now < last = 32 位回绕场景：结果为 (now32-last32)&0xFFFFFFFF，是真实回绕后的 idle，不是 0
+    wrapped = _idle_from_ticks(120000.0, 90000.0)
+    assert wrapped > 1000.0, f"now<last 是回绕（大值），不是假装 0: {wrapped}"
 
 
 def test_windows_idle_uses_kernel32_tick_source():

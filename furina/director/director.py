@@ -35,6 +35,9 @@ class Director:
         self._queue: List[ActionRequest] = []
         self._current: Optional[ActionRequest] = None
         self._on_execute: Optional[Callable[[ActionRequest], None]] = None
+        # H1 §8：实际替换回调（on_before_replace(old, new)）—— 高优先级请求接管当前动作时触发，
+        # 让运行时能立即 finalize 被抢占的活动实例（elapsed 停在接管时刻）。
+        self.on_before_replace: Optional[Callable[[Optional[ActionRequest], ActionRequest], None]] = None
         # 订阅其它模块的 ActionRequest
         bus.on(EventType.ACTION_REQUEST, lambda ev: self.submit(
             ActionRequest(source=ev.payload.get("source", ev.source),
@@ -69,6 +72,12 @@ class Director:
         if self._current and req.priority >= self._current.priority and self._current.interruptible is False:
             heapq.heappush(self._queue, (req.priority, _seq(), req))
             return
+        # H1 §8：真正发生**替换**（旧动作被新动作接管）→ 先通知回调（finalize 被抢占的活动）
+        if self._current is not None and self._current is not req and self.on_before_replace is not None:
+            try:
+                self.on_before_replace(self._current, req)
+            except Exception:  # pragma: no cover
+                pass
         self._current = req
         log.debug("director: -> %s", req.describe())
         if self._on_execute:

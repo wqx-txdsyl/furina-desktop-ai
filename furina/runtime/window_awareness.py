@@ -33,9 +33,18 @@ class WindowInfo:
                 "rect": (None if not self.rect else [self.rect.x, self.rect.y, self.rect.w, self.rect.h])}
 
 
-def _idle_from_ticks(last_input_ms: float, now_ms: float) -> float:
-    """纯函数：tick 差 → 空闲秒（FINAL-R1 §1.1 可测性）。"""
-    return max(0.0, (now_ms - last_input_ms) / 1000.0)
+def _idle_from_ticks(last32_ms: float, now64_ms: float) -> float:
+    """H1 §2.2：32 位 wrap 兼容的空闲秒计算。
+
+    LASTINPUTINFO.dwTime 是 DWORD（32 位 tick）；GetTickCount64 是 64 位。
+    先取 now64 的低 32 位，再按 mod 2^32 求差 —— 长 uptime（now64 高位非 0）不会产生巨大假空闲，
+    且跨 0xFFFFFFFF→0 回绕仍正确（&0xFFFFFFFF 使差为正）。
+    """
+    _MASK32 = 0xFFFFFFFF
+    now32 = int(now64_ms) & _MASK32
+    last32 = int(last32_ms) & _MASK32
+    elapsed_ms = (now32 - last32) & _MASK32
+    return max(0.0, elapsed_ms / 1000.0)
 
 
 def _get_idle_seconds() -> Optional[float]:
@@ -113,7 +122,8 @@ def _active_window_windows() -> Optional[WindowInfo]:
         app=cls.value,
         title=buf.value,
         process=_get_process_name(hwnd),
-        idle=_get_idle_seconds() or 0.0,
+        # H1 §2.1：**保留 None**（API 失败 = 空闲真相不可用，绝不 `or 0.0` 假装用户刚互动）
+        idle=_get_idle_seconds(),
         rect=Rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top),
     )
 

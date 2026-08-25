@@ -392,22 +392,19 @@ class Scheduler:
             # §2.3：user_working 来自 World 感知（进程分类），不再用上一帧值自喂
             self.se.state.user_working = bool(
                 self.world_perc.factors().get("user_working", False))
-            # Phase 13 FINAL-R1 §2.3：**稳定**的 WORK_STARTED/WORK_ENDED → 情绪语义事件，恰好一次。
-            # World 事件本身有 20s debounce + 30s 稳定性窗口（不会从 pending 候选发出）；
-            # 这里再用时间戳去重，避免 recent 列表连续多 tick 重复消费。
+            # H1 §3：**稳定**的 WORK_STARTED/WORK_ENDED → 情绪语义事件，恰好一次。
+            # 消费 `world_perc.last_events`（本次 update 新发出的事件实例，全局单调 seq），
+            # **绝不从 recent_world_events 历史串推断**（旧串残留在列表里会反复重触发）。
+            # World 事件本身有 20s debounce + 30s 稳定性窗口；每个实例在此恰好 apply 一次。
             try:
                 w = self.world_perc.state
                 for ev_key, emo_ev in (("WORK_STARTED", "user_work_start"),
                                        ("WORK_ENDED", "user_work_end")):
-                    if ev_key in w.recent_world_events and self.emotion is not None:
-                        last = getattr(self, "_last_world_emo_consumed", {}).get(ev_key, 0.0)
-                        if w.timestamp - last > 20.0:
-                            from furina.emotion import EVENT_WORK_START, EVENT_WORK_END
-                            self.emotion.apply_event(emo_ev, tired_hint=self._tired_hint())
-                            d = dict(getattr(self, "_last_world_emo_consumed", {}))
-                            d[ev_key] = w.timestamp
-                            self._last_world_emo_consumed = d
-                            self._recent_events.append(ev_key)
+                    n = getattr(self.world_perc, "last_events", []).count(ev_key)
+                    for _ in range(n):
+                        from furina.emotion import EVENT_WORK_START, EVENT_WORK_END
+                        self.emotion.apply_event(emo_ev, tired_hint=self._tired_hint())
+                        self._recent_events.append(ev_key)
             except Exception:
                 pass
         except Exception:
@@ -693,7 +690,8 @@ class Scheduler:
         self._current_activity_duration = max(float(getattr(d, "duration", 0.0) or 0.0), 1.0)
         self._life_next_think = max(15.0, d.next_think_in)
 
-        # 需要说话 → 交给 DialogueBrain（三脑：语言只负责怎么说；此处仅产出台词，不决定行为）
+        # 需要说话 → 交给 DialogueBrain（三脑：语言只负责怎么说；此处仅产出台词，不决定行为）。
+        # H1 §4.2/§10：**LLM 不得在 owner 线程执行** —— owner 冻结快照 → worker say → 结果经 dispatcher 回 owner。
         speech_level = getattr(d, "speech_level", 0) or 0
         voiced = d.activity in SPEAKABLE_ACTIVITIES
         speak = d.dialogue_needed or speech_level >= 1 or voiced
@@ -705,53 +703,67 @@ class Scheduler:
                 # 只有高 speech_level(>=3 深聊) 或明确 dialogue_needed 且过了 15s 才放行。
                 min_gap = 15.0 if (speech_level >= 3 or (d.dialogue_needed and speech_level >= 2)) else 35.0
                 if (now - last) >= min_gap:
-                    mems = [m.content for m in self.me.retrieve(query=d.intent, limit=3)] if self.me else []
-                    # 上下文（Phase 08B：给 Dialogue 真正的 runtime 状态）
-                    wf = {}
-                    try:
-                        wf = self.world_perc.factors()
-                    except Exception:
-                        pass
-                    wctx = ""
-                    try:
-                        ua = getattr(self.world_perc.state, "user_activity", None)
-                        wctx = ua.value if hasattr(ua, "value") else (ua or "")
-                    except Exception:
-                        pass
-                    minterp = {}
-                    try:
-                        window = None
-                        mems_ctx = self.me.retrieve(query="", limit=3, context=wctx or None)
-                        minterp = self.me.interpret(mems_ctx, context=wctx or "")
-                    except Exception:
-                        pass
-                    speech = self.dialogue_brain.say(
-                        intent=d.activity, emotion=d.emotion,
-                        context=getattr(d, "speech_intent", "") or d.intent,
-                        memories=mems,
-                        world={**wf, "user_activity": wctx, "recent_events": list(self._recent_events)},
-                        activity=d.activity,
-                        relationship=self._rel_factors(),   # C-R1.2 归一化
-                        memory_interp=minterp,
-                        solitude=bool(st.user_idle_seconds > 300),
-                        user_present=bool(st.user_idle_seconds < 300),
-                        channel="AMBIENT_AUTONOMOUS",   # FINAL-R1 §4.2：自主台词不进直接对话历史
-                    )
-                    if speech:
-                        self._say(speech, dur=min(6.0, d.duration) if d.duration else 4.0)
-                        self._llm_speech_at = now
-                        self._last_speech_at = now
+                    snap = self._freeze_ambient_snapshot(d)
+                    dur = min(6.0, d.duration) if d.duration else 4.0
+                    social = d.activity in self._SOCIAL_BID_KINDS
+                    def _ambient_work(snapshot, _dur, _social):
+                        try:
+                            speech = self.dialogue_brain.say(**snapshot.say_kwargs())
+                            if speech:
+                                # 结果经 dispatcher 在 owner 线程应用（worker 不直改 _speech）
+                                self._enqueue_apply(lambda sp=speech, dd=_dur: (
+                                    self._say(sp, dur=dd),
+                                    setattr(self, "_llm_speech_at", time.monotonic()),
+                                    setattr(self, "_last_speech_at", time.monotonic())))
+                                # H1 §7：社交类**可见台词成功出话**后才开响应窗口（owner 线程）
+                                if _social:
+                                    self._enqueue_apply(lambda: self.begin_social_bid(
+                                        reason=f"spoken:{snapshot.activity}"))
+                        except Exception:
+                            pass
+                    import threading
+                    threading.Thread(target=_ambient_work, args=(snap, dur, social), daemon=True).start()
             except Exception as e:  # pragma: no cover
                 log.warning("dialogue say err: %s", e)
         # 需要操作电脑 → 交给 Tool Agent（三脑：手）
         if d.tool_needed:
             log.info("life decision requested tool, but tool task needs explicit user goal; 交给用户或在 Agent 菜单触发")
-        # FINAL-R1 §7：芙宁娜主动选择社交类活动（approach/talk/greet/…）→ 开启响应窗口
-        if d.activity in self._SOCIAL_BID_KINDS:
-            try:
-                self.begin_social_bid(reason=f"life:{d.activity}")
-            except Exception:
-                pass
+
+    def _freeze_ambient_snapshot(self, d):
+        """H1 §10：owner 冻结自主环境台词快照（只读事实副本，不引用 live 对象）。"""
+        from furina.runtime.dialogue_snapshot import DialogueContextSnapshot, freeze_flat
+        st = self.se.state
+        mems = [m.content for m in self.me.retrieve(query=d.intent, limit=3)] if self.me else []
+        wf = {}
+        try:
+            wf = self.world_perc.factors()
+        except Exception:
+            pass
+        wctx = ""
+        try:
+            ua = getattr(self.world_perc.state, "user_activity", None)
+            wctx = ua.value if hasattr(ua, "value") else (ua or "")
+        except Exception:
+            pass
+        minterp = {}
+        try:
+            mems_ctx = self.me.retrieve(query="", limit=3, context=wctx or None) if self.me else []
+            minterp = self.me.interpret(mems_ctx, context=wctx or "")
+        except Exception:
+            pass
+        return DialogueContextSnapshot(
+            intent=d.activity,
+            emotion_label=d.emotion,
+            context=getattr(d, "speech_intent", "") or d.intent,
+            activity=d.activity,
+            channel="AMBIENT_AUTONOMOUS",   # FINAL-R1 §4.2：自主台词不进直接对话历史
+            memories=tuple(mems),
+            world=freeze_flat({**wf, "user_activity": wctx, "recent_events": list(self._recent_events)}),
+            relationship=freeze_flat(self._rel_factors()),
+            memory_interp=freeze_flat(minterp),
+            solitude=bool(st.user_idle_seconds > 300),
+            user_present=bool(st.user_idle_seconds < 300),
+        )
 
     # -------------------------------------------------- FINAL-R1 §5：Director 实际执行时才启动实例
     def on_mind_action_started(self, activity: str, planned_duration: float = 0.0) -> None:
@@ -776,6 +788,41 @@ class Scheduler:
                 self.motivation.mark_done(activity, time.monotonic())
             except Exception:
                 pass
+        # H1 §7：社交响应窗口只在**可见执行**时开启。
+        # - approach_user：走过去本身可见 → 执行即开 bid；
+        # - 其它社交类（talk/greet/invite/…）：等**可见台词成功出话**后再开（ambient worker 提交），
+        #   无效/被抑制的台词不开启；被阻塞的决策根本不会到这里。
+        if activity == "approach_user":
+            try:
+                self.begin_social_bid(reason=f"executed:{activity}")
+            except Exception:
+                pass
+
+    def on_mind_preempted(self, reason: str = "interrupted") -> None:
+        """H1 §8：**实际抢占发生时**立即 finalize 运行中的 mind 实例（owner 线程）。
+
+        Director 通过 on_before_replace 在接管瞬间调用：
+          - elapsed 停在抢占时刻（之后 Agent/用户时间**不计入** mind 活动）；
+          - progress 按当时计算；status → INTERRUPTED/ABORTED；
+          - 部分奖励恰好一次（success=False + progress 感知）；
+          - 之后的 Life 决策结算会跳过（实例已非 RUNNING），不会把抢占后时间算作 mind 时间。
+        """
+        self.require_owner("mind_preempt")
+        inst = getattr(self, "_activity_instance", None)
+        if inst is None or inst.get("source") != "mind" or inst.get("status") != "RUNNING":
+            return   # 无运行中的 mind 实例 → 无操作
+        now = time.time()
+        elapsed = max(0.0, now - float(inst.get("started_at", now)))
+        planned = float(inst.get("planned_duration", 0.0) or 1.0)
+        progress = min(1.0, elapsed / planned) if planned > 0 else 1.0
+        inst.update({"status": reason.upper(), "elapsed": round(elapsed, 1),
+                     "progress": round(progress, 2), "finish_reason": reason})
+        self._last_activity_finish = {
+            "activity": inst["activity"], "reason": reason,
+            "elapsed": round(elapsed, 1), "planned_duration": round(planned, 1),
+            "progress": round(progress, 2),
+        }
+        self._apply_activity_outcome(inst["activity"], success=False, reason=reason, progress=progress)
 
     # -------------------------------------------------- 经历→状态反馈（Life Simulation 闭环）
     def _apply_activity_outcome(self, activity: str, success: bool = True,
@@ -1010,39 +1057,16 @@ class Scheduler:
 
         唯一语言源 = DialogueBrain → Frame.speech。DialogueBrain 失败/无 LLM → 沉默（§9），
         不回退固定句池。仅 Agent fail 的确定性错误事实显示为 SYSTEM_STATUS（非角色人格化）。
+        H1 §10：**owner 线程冻结 DialogueContextSnapshot**（互动/Agent 报告通道），worker 只读快照。
         """
         if self.dialogue_brain is None:
             return
-        def _work():
+        snap = self._freeze_reaction_snapshot(intent=intent, emotion=emotion,
+                                              user_initiated=user_initiated, context=context,
+                                              activity=activity, interaction=interaction)
+        def _work(snapshot):
             try:
-                wf = {}
-                try:
-                    wf = self.world_perc.factors() if self.world_perc is not None else {}
-                except Exception:
-                    pass
-                mem_objs = self.me.retrieve(query=activity, limit=3) if self.me else []
-                mems = [m.content for m in mem_objs]
-                rel = {}
-                try:
-                    # §37：归一化 0..1 契约（不把 0-100 tolerance/confidence 混进 0..1 消费者）
-                    rel = self.relationship.factors() if self.relationship is not None else {}
-                except Exception:
-                    rel = {}
-                minterp = {}
-                try:
-                    if mem_objs:
-                        minterp = self.me.interpret(mem_objs, context=context)   # §5: List[Memory]
-                except Exception:
-                    pass
-                speech = self.dialogue_brain.say(
-                    intent=intent, emotion=emotion, user_initiated=user_initiated,
-                    context=context, activity=activity, memories=mems, world=wf,
-                    relationship=rel, memory_interp=minterp,
-                    user_present=bool(getattr(self.se.state, "user_idle_seconds", 0) < 300),
-                    solitude=bool(getattr(self.se.state, "user_idle_seconds", 0) > 300),
-                    task_mode=bool(interaction == "agent"),
-                    # FINAL-R1 §4.2：通道归属（Agent 报告 / 互动反应 → 不进直接对话历史）
-                    channel="AGENT_REPORT" if interaction == "agent" else "INTERACTION_REACTION")
+                speech = self.dialogue_brain.say(**snapshot.say_kwargs())
                 if speech:
                     # §8：对话结果经 apply 队列在 owner 线程落地（worker 线程不直接改 _speech）
                     self._enqueue_apply(lambda sp=speech: (self._say(sp, dur=3.0),
@@ -1050,7 +1074,46 @@ class Scheduler:
             except Exception:
                 pass
         import threading
-        threading.Thread(target=_work, daemon=True).start()
+        threading.Thread(target=_work, args=(snap,), daemon=True).start()
+
+    def _freeze_reaction_snapshot(self, *, intent: str, emotion: str, user_initiated: bool,
+                                  context: str, activity: str, interaction: str = ""):
+        """H1 §10：owner 冻结互动/Agent 报告通道的对话快照（只读事实副本）。"""
+        from furina.runtime.dialogue_snapshot import DialogueContextSnapshot, freeze_flat
+        wf = {}
+        try:
+            wf = self.world_perc.factors() if self.world_perc is not None else {}
+        except Exception:
+            pass
+        mem_objs = self.me.retrieve(query=activity, limit=3) if self.me else []
+        mems = [m.content for m in mem_objs]
+        rel = {}
+        try:
+            rel = self.relationship.factors() if self.relationship is not None else {}
+        except Exception:
+            rel = {}
+        minterp = {}
+        try:
+            if mem_objs:
+                minterp = self.me.interpret(mem_objs, context=context)
+        except Exception:
+            pass
+        idle = float(getattr(self.se.state, "user_idle_seconds", 0))
+        return DialogueContextSnapshot(
+            intent=intent,
+            emotion_label=emotion,
+            context=context,
+            activity=activity,
+            user_initiated=user_initiated,
+            task_mode=bool(interaction == "agent"),
+            user_present=idle < 300,
+            solitude=idle > 300,
+            channel="AGENT_REPORT" if interaction == "agent" else "INTERACTION_REACTION",
+            memories=tuple(mems),
+            world=freeze_flat(wf),
+            relationship=freeze_flat(rel),
+            memory_interp=freeze_flat(minterp),
+        )
 
     def body_snapshot(self) -> Optional[dict]:
         """⚠️ DEPRECATED（Phase 10.5 S4）—— 已收敛到 CharacterRuntimeFrame.body。

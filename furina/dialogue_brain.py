@@ -59,6 +59,25 @@ class DialogueBrain:
         # 自主/喂食/Agent/互动台词进 ambient 池（作为近期上下文事实，不当孤儿 Furina 回合）。
         self._ambient: List[Dict[str, Any]] = []
         self._ambient_limit = 8
+        # H1 §6：直接回合的暂存 user 文本（存在可显示回复时才原子成对提交）
+        self._pending_direct_user: Optional[tuple] = None
+        # H1 §5：**turn FIFO 门**（生成锁之前）—— 前序 turn 未完成时，后续 turn 不得进入生成。
+        # 防止锁反转死锁：turn2 抢到 _say_lock 后等 turn1 槽位，而 turn1 等不到锁。
+        self._fifo_cond = threading.Condition()
+        self._last_done_seq = 0
+
+    # -------------------------------------------------- H1 §5：turn FIFO 门（ticket/Condition）
+    def _gate_wait(self, seq: int) -> None:
+        """进入生成前等待：必须等到所有前序 turn（seq-1）完成。"""
+        with self._fifo_cond:
+            while seq != self._last_done_seq + 1:
+                self._fifo_cond.wait(timeout=1.0)
+
+    def _gate_release(self, seq: int) -> None:
+        """本 turn 完成（含失败/沉默/校验失败）→ 放行下一个 turn。"""
+        with self._fifo_cond:
+            self._last_done_seq = seq
+            self._fifo_cond.notify_all()
 
     # -------------------------------------------------- FINAL-R1 §4.1：显式 FIFO 入口
     def _next_seq(self) -> int:
@@ -159,6 +178,7 @@ class DialogueBrain:
           → 进 ambient 池（近期上下文事实，不当孤儿 Furina 回合）。
         """
         seq = self._next_seq()          # 调用顺序 = seq 顺序（与锁获取顺序无关）
+        self._gate_wait(seq)            # H1 §5：turn FIFO 门 —— 前序 turn 完成前不进入生成（防锁反转）
         try:
             with self._say_lock:            # 内部安全锁（非排序机制）
                 return self._say_impl(intent=intent, emotion=emotion, user_text=user_text,
@@ -170,7 +190,10 @@ class DialogueBrain:
         finally:
             # FINAL-R1 §4.1：无论成功/沉默/环境/校验失败，本回合槽位（2s-1, 2s）必须推进，
             # 否则后续直接回合会死锁等待不存在的 seq（幂等：已消费的槽自动跳过）。
-            self._skip_slots((seq * 2 - 1, seq * 2))
+            try:
+                self._skip_slots((seq * 2 - 1, seq * 2))
+            finally:
+                self._gate_release(seq)   # 本 turn 完成 → 放行下一个（失败/沉默也推进 FIFO）
 
     def _say_impl(self, *, intent: str = "", emotion: str = "", user_text: str = "",
                   context: Optional[str] = "", memories: Optional[List[str]] = None,
@@ -211,9 +234,9 @@ class DialogueBrain:
                                      activity=activity,
                                      history=hist)
         if user_text and channel == "DIRECT_USER_TURN":
-            # 当前轮入历史（供下一轮），但本 prompt 不含它；按入队 seq 严格 FIFO 提交
-            # （同一回合 user/furina 用同一 _seq 的两个子序号：2*seq-1 / 2*seq）
-            self.push_history("user", user_text, seq=(_seq or 1) * 2 - 1)
+            # H1 §6：**不立即提交 user 槽** —— 先暂存，等存在可显示的回复时才原子成对提交，
+            # 避免"模型失败/双重校验失败/输出门抑制 → 孤儿 User 回合（无 Furina 回复）"。
+            self._pending_direct_user = (user_text, (_seq or 1) * 2 - 1)
         # 4b) 注入"本神"语境 advice（非强制）
         prompt += "\n" + self.god_gate.prompt_advice(god_cal)
 
@@ -273,16 +296,22 @@ class DialogueBrain:
         self._recent_acts = self._recent_acts[-3:]
         if not user_initiated and len(self._recent_acts) >= 3 and len(set(self._recent_acts)) == 1:
             return None
-        # FINAL-R1 §4.2：通道归属 —— 只有直接对话回合进直接历史（按 seq FIFO）；环境台词进 ambient 池
+        # H1 §6：原子成对提交 —— 只有存在可显示回复（DIRECT）才提交 user+furina 成对；
+        # 失败/沉默/校验失败的回合**不产生孤儿 User 回合**（槽位由 say() finally 跳过）。
         if channel == "DIRECT_USER_TURN":
-            # 无 user_text 的直接回合先占位槽 2s-1，否则 furina push(2s) 会永远等待缺失的 user 槽（死锁）
-            if not user_text:
-                self._skip_slots(((_seq or 1) * 2 - 1,))
+            pending = getattr(self, "_pending_direct_user", None)
             if speech:
+                if pending is not None:
+                    u_text, u_seq = pending
+                    self.push_history("user", u_text, seq=u_seq)
+                else:
+                    # 无 user_text 的直接回合：先占位槽 2s-1，再推 furina
+                    self._skip_slots(((_seq or 1) * 2 - 1,))
                 self.push_history("furina", speech, seq=(_seq or 1) * 2)
         else:
             if speech:
                 self.push_ambient(channel, speech)
+        self._pending_direct_user = None
         return speech
 
     # -------------------------------------------------- synthetic example 检索（§29 / C-R1.6 路由）

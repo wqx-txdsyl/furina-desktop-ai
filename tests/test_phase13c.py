@@ -146,11 +146,13 @@ def test_relationship_consumer_factors_normalized():
 
 
 def test_raw_relationship_not_passed_to_normalized_consumer():
-    """对话 consumer 使用 factors() 而非 raw as_dict()."""
+    """对话 consumer 使用 factors() 而非 raw as_dict()（H1 §10：owner 冻结快照里归一化）。"""
     import furina.app as A
     src = open(A.__file__, encoding="utf-8").read()
     bw = src[src.index("def _brain_worker"):src.index("def _recent_memories")]
-    assert "relationiship.factors" in bw or "relationship.factors()" in bw, "对话应使用归一化 factors()"
+    assert "snapshot" in bw, "对话 worker 必须用冻结快照（不读 live 关系）"
+    snap_src = src[src.index("def _freeze_direct_snapshot"):src.index("def _brain_worker")]
+    assert "relationship.factors()" in snap_src, "冻结快照必须用归一化 factors()"
 
 
 # ================================================================ D. short-term conversation buffer

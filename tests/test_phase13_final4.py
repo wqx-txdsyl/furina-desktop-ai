@@ -57,6 +57,7 @@ def test_queued_mind_action_does_not_start_activity_instance():
 def test_activity_instance_starts_on_director_execution():
     """Director 执行器确认（on_mind_action_started）时才创建 RUNNING 实例 + mark_done。"""
     sched, bus, se = _sched()
+    sched.dispatcher.bind_owner()   # H1 §12：owner 需显式绑定（require_owner 不再自绑定）
     sched.on_mind_action_started("read", planned_duration=60.0)
     inst = sched._activity_instance
     assert inst is not None and inst["status"] == "RUNNING"

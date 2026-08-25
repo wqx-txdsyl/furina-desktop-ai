@@ -41,9 +41,9 @@ def test_unknown_interaction_not_mapped_to_click():
     import furina.app as A
     src = open(A.__file__, encoding="utf-8").read()
     assert "def _on_interaction_emotion" in src, "语义映射必须在独立方法中"
-    m = src[src.index("def _on_interaction_emotion"):src.index("def _load_assets")]
-    assert ".get(getattr(ev.payload.type, \"value\", \"\"), None)" in m, "未知 kind 必须映射 None"
-    assert "event is None:\n            return None" in m, "无映射 → 不调用 EmotionEngine"
+    m = src[src.index("def _on_interaction_emotion"):src.index("def _tired_hint") or len(src)]
+    assert "_map.get(kind, None)" in m, "未知 kind 必须映射 None"
+    assert "if mapped is None:\n            return None" in m, "无映射 → 不调用 EmotionEngine"
 
 
 def test_forced_diversity_production_calls_zero():

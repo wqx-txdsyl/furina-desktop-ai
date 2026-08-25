@@ -27,11 +27,14 @@ class RuntimeDispatcher:
         self._violations_lock = threading.Lock()
 
     # -------------------------------------------------- owner 绑定
-    def bind_owner(self) -> int:
-        """owner 线程 = 第一次绑定/排空时的线程（GUI/main 或测试主线程）。"""
+    def bind_owner(self, thread_id: Optional[int] = None) -> int:
+        """显式绑定 owner 线程（H1 §12：**启动时**在 Qt/runtime 线程调用，先于任何 worker 请求守卫变更）。
+
+        submit() 绝不建立 owner；drain() 可作为兜底绑定（drain 运行在 owner 线程是契约）。
+        """
         with self._owner_lock:
             if self._owner is None:
-                self._owner = threading.get_ident()
+                self._owner = thread_id if thread_id is not None else threading.get_ident()
             return self._owner
 
     @property
@@ -42,8 +45,11 @@ class RuntimeDispatcher:
         return self._owner is not None and threading.get_ident() == self._owner
 
     def require_owner(self, what: str) -> None:
-        """域变更守卫：非 owner 线程调用 → 记录违规并抛错（生产契约，测试可断言）。"""
-        self.bind_owner()
+        """域变更守卫（H1 §12）：**不再自绑定** —— owner 未绑定时直接报错；
+        非 owner 线程调用 → 记录违规并抛错（生产契约，测试可断言）。"""
+        if self._owner is None:
+            raise RuntimeError(
+                f"domain mutation '{what}' requested before runtime owner was bound")
         if threading.get_ident() != self._owner:
             with self._violations_lock:
                 self._violations.append(f"{what}@thread{threading.get_ident()}")

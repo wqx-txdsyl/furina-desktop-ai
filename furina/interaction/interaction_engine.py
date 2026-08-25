@@ -25,6 +25,8 @@ class InteractionEngine:
         self._saturation = 0.0
         # 关系/记忆接入点（由 app 注入，可选）
         self.on_meaningful_interaction = None   # callable(InteractionEvent) -> 长期层
+        # H1 §9：语义情绪钩子（Emotion 效果先于 INTERACTION_INPUT 广播，见 _apply 顺序）
+        self.on_emotion_semantic = None         # callable(InteractionEvent)
 
     # -------------------------------------------------- hitbox
     def set_hitboxes_from_anchor(self, anchors: Dict[str, List[float]], body_box: Tuple[float, float, float, float]) -> None:
@@ -86,12 +88,20 @@ class InteractionEngine:
         cur = self._counts[key]
         if cur > 3:
             self._saturation = min(1.0, self._saturation + 0.15)
-        # 发事件给 Behavior / Director
+        # H1 §9：**定型互动的 owner 顺序** —— Emotion → Relationship → Memory → 广播/快照/worker。
+        # 先于 INTERACTION_INPUT 广播完成语义效果，Scheduler 的对话快照才能看到 post-event 状态。
+        # 1. owner Emotion（语义映射，apply+立即派生）
+        if self.on_emotion_semantic is not None:
+            try:
+                self.on_emotion_semantic(ev)
+            except Exception:  # pragma: no cover
+                pass
+        # 2. owner Relationship + Memory（长期层，plan/4 §27）
+        if self.on_meaningful_interaction and ev.type in (TouchKind.PETTING, TouchKind.POKE, TouchKind.DRAG):
+            self.on_meaningful_interaction(ev)
+        # 3. 广播给 Behavior / Director（Scheduler 在此消费：Needs/Life 立即效果 + 冻结快照 + worker 对话）
         self.bus.emit(EventType.INTERACTION_INPUT, payload=ev, source="interaction")
         if ev.type == TouchKind.PETTING:
             # 摸头作为独立语义事件
             self.bus.emit(EventType.HEAD_TOUCHED, payload=ev, source="interaction")
-        # 长期层：有意义的互动交给记忆/关系（plan/4 §27）
-        if self.on_meaningful_interaction and ev.type in (TouchKind.PETTING, TouchKind.POKE, TouchKind.DRAG):
-            self.on_meaningful_interaction(ev)
         log.debug("interaction: %s on %s (count=%d sat=%.2f)", ev.type.value, ev.target.value, ev.count, self._saturation)

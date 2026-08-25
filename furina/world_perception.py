@@ -151,7 +151,9 @@ class WorldPerception:
     每 medium tick 调用 update()，内部维护稳定性窗口与 debounce，只发出"有意义"事件。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, now_fn=None) -> None:
+        # H1 §3：可控时钟（测试注入假时钟；生产默认 time.time）。事件 debounce/稳定性用同一时钟。
+        self._now_fn = now_fn or time.time
         self.state = WorldState()
         self._prev_activity = UserActivity.UNKNOWN
         self._prev_app = ""
@@ -163,6 +165,10 @@ class WorldPerception:
         # Phase 13 终审 §2.5：稳定性窗口 —— 新活动候选需持续 _STABLE_ACTIVITY_MIN 才真正切换
         self._pending_activity: Optional[UserActivity] = None
         self._pending_duration: float = 0.0
+        # H1 §3：**本次 update() 新发出的事件实例**（不是历史 recent_world_events 串）。
+        # 消费方只按实例恰好一次；历史串只是诊断，不能用来推断"新事件"。
+        self.last_events: List[str] = []
+        self._event_seq = 0   # 全局单调事件实例序号（诊断/去重用）
 
     def _emit(self, out: List[str], ev: WorldEvent, w: WorldState) -> None:
         """debounce / stability：同一事件需间隔最少 20s 才再发。"""
@@ -178,7 +184,7 @@ class WorldPerception:
                hour: int, minute: int, typing: bool = False, dt: float = 3.0,
                process: str = "") -> WorldState:
         w = self.state
-        w.timestamp = time.time()
+        w.timestamp = self._now_fn()
         w.day_period = _period(hour)
         w.user_idle_seconds = idle_seconds
         w.foreground_app = app          # 窗口类名（原始信号）
@@ -232,8 +238,11 @@ class WorldPerception:
         self._context_since = self._context_since + dt if (app == self._prev_app) else 0.0
         w.same_context_duration = self._context_since
 
-        # 事件（debounce）
+        # 事件（debounce）—— H1 §3：`last_events` = 本次 update 新发出的**事件实例**
         events = self._derive_events(w)
+        for _ev in events:
+            self._event_seq += 1
+        self.last_events = list(events)
         w.recent_world_events = w.recent_world_events[-8:] + list(events)
         w.interesting_context = _interesting(w.app_category, events, w.same_context_duration)
         w.assistance_opportunity = _assistance(w)
