@@ -513,9 +513,11 @@ class Furina:
     def submit_user_message(self, text: str) -> None:
         """FINAL-R1 §3：**唯一用户直接对话生产入口**（GUI 输入框 + Harness 共用）。
 
-        owner（调用线程）：高置信语义事件 / 关系 / 情绪（恰好一次）；
-        worker：DialogueBrain LLM（FIFO）；
-        owner（dispatcher）：最终 speech 应用 + 对话后记忆提交。
+        owner（调用线程）：高置信语义事件 / 关系 / 情绪（恰好一次）+ 预留 direct 序号
+        + 冻结快照 + **入队 DirectDialogueQueue**（立即返回；单 worker 串行 FIFO 消费）；
+        worker：DialogueBrain LLM（有界）；owner（dispatcher）：最终 speech 应用 + 记忆提交。
+        B1（评审基线 0402e7f）：不再每个消息 spawn 独立线程 —— 专用 direct lane 保证
+        每个回合必达终态、ingress FIFO 保序、ambient 不堵 direct。
         """
         d = self._rt_dispatcher()
         d.require_owner("submit_user_message")
@@ -529,17 +531,56 @@ class Furina:
                 pass
         # 2. H1-FINAL §2：**owner 入口预留 FIFO 序号**（用户输入顺序身份，不依赖 worker 执行时序）
         ingress_seq = None
+        db = getattr(self, "dialogue_brain", None)
         try:
-            db = getattr(self, "dialogue_brain", None)
             if db is not None and hasattr(db, "reserve_turn"):
                 ingress_seq = db.reserve_turn()
         except Exception:
             pass
         # 3. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
         snap = self._freeze_direct_snapshot(text, ingress_seq=ingress_seq)
-        # 4. worker：LLM 对话（只读快照）；结果经 BRAIN_SPOKE → dispatcher 回 owner 应用
-        import threading
-        threading.Thread(target=self._brain_worker, args=(text, snap), daemon=True).start()
+        # 4. B1：入队专用直接对话串行队列（owner 立即返回）
+        if db is not None:
+            self._direct_dialogue_queue().submit(snap, ingress_seq=ingress_seq, user_text=text)
+
+    # -------------------------------------------------- B1：DirectDialogueQueue（专用直接 lane）
+    def _direct_dialogue_queue(self):
+        """B1：专用直接对话串行队列（懒创建；owner 提交，单 worker 串行消费，终态可观测）。"""
+        q = getattr(self, "_direct_dq", None)
+        if q is None:
+            from furina.runtime.dialogue_queue import DirectDialogueQueue
+            q = DirectDialogueQueue(bus=getattr(self, "bus", None),
+                                    timeout=self._direct_turn_timeout())
+            q.set_processor(lambda turn, snap: self._direct_job(turn, snap))
+            self._direct_dq = q
+        return q
+
+    def _direct_turn_timeout(self) -> float:
+        """B1：直接回合生成超时 = LLM adapter profile.timeout + 30s 余量（有界，可测试注入）。"""
+        try:
+            db = getattr(self, "dialogue_brain", None)
+            llm = getattr(db, "llm", None)
+            profile = getattr(llm, "profile", None)
+            if profile is not None and float(getattr(profile, "timeout", 0) or 0) > 0:
+                return float(profile.timeout) + 30.0
+        except Exception:
+            pass
+        return 150.0
+
+    def _direct_job(self, turn, snapshot) -> dict:
+        """DirectDialogueQueue 处理器（worker 线程）：真实生产链 → 终态信息（speech/failure_reason）。"""
+        return self._brain_worker(snapshot.user_text, snapshot)
+
+    def _system_status_failure(self) -> None:
+        """B1：直接回合无法产生角色回复 → 可观察 SYSTEM_STATUS（非 Furina 台词，不进 Persona history）。"""
+        try:
+            sched = getattr(self, "_sched", None)
+            if sched is not None and hasattr(sched, "_say"):
+                # §3：SYSTEM_STATUS 也是域变更 → 经 dispatcher 回 owner 应用
+                self._rt_dispatcher().submit(
+                    lambda: sched._say("（系统状态：刚才的回复生成失败。）", dur=4.0))
+        except Exception:
+            pass
 
     def _confirm_agent_permission(self, description: str, level) -> bool:
         """角色化权限确认（plan/5 §20）：用户主动点的菜单任务直接放行，给出认可台词。"""
@@ -626,38 +667,60 @@ class Furina:
             memory_interp=freeze_flat(minterp),
         )
 
-    def _brain_worker(self, text: str, snapshot=None) -> None:
+    def _brain_worker(self, text: str, snapshot=None) -> dict:
         """用户直接对话 → DialogueBrain（worker 线程：只读**冻结快照**，不读 live 状态）。
 
         FINAL-R1 §3 + H1 §10：域变更（文本语义/关系/情绪）由 owner 在 submit_user_message 完成；
         owner 冻结 DialogueContextSnapshot；本 worker 只调 say(快照)。对话后记忆提交经 dispatcher 回 owner。
+        B1（评审基线 0402e7f）：返回 {"speech": ..., "failure_reason": ...} 供 DirectDialogueQueue
+        记录终态；**任何**无法产生角色回复的失败（LLM 不可用/异常/超时/空输出/双重校验失败/
+        god gate 抑制/worker 异常）→ 可观察 SYSTEM_STATUS（不是 Furina 台词，不进 Persona history）。
         """
+        out = {"speech": None, "failure_reason": ""}
         if not self.dialogue_brain:
-            return
+            out["failure_reason"] = "dialogue_brain_unavailable"
+            return out
         log.info("avatar conversation: %s", text)
         if snapshot is None:
             # 兼容旧直调（非生产路径）：worker 内冻结（生产一律经 submit_user_message 在 owner 冻结）
             snapshot = self._freeze_direct_snapshot(text)
-        speech = self.dialogue_brain.say(**snapshot.say_kwargs())
+        try:
+            speech = self.dialogue_brain.say(**snapshot.say_kwargs(),
+                                             timeout=self._direct_turn_timeout())
+        except Exception as e:
+            # worker 异常兜底：回合不得遗留 pending（终态 FAILED/CANCELLED + SYSTEM_STATUS）
+            try:
+                db = getattr(self, "dialogue_brain", None)
+                if db is not None:
+                    db.last_failure_reason = f"worker_exception:{type(e).__name__}"
+            except Exception:
+                pass
+            out["failure_reason"] = f"worker_exception:{type(e).__name__}"
+            self._system_status_failure()
+            return out
         if speech:
             self.bus.emit(EventType.BRAIN_SPOKE,
                           payload=type("_O", (), {"speech": speech, "intent": "talk",
                                                   "emotion": snapshot.emotion_label})(),
                           source="app")
+            out["speech"] = speech
+            out["failure_reason"] = ""
         else:
-            # Phase 13 终审 §9：用户直接消息的校验失败必须**可观察**（不得静默永久失声）。
+            # B1：所有失败模式 → 可观察 SYSTEM_STATUS + 明确 failure_reason
+            reason = ""
             try:
                 db = getattr(self, "dialogue_brain", None)
-                if db is not None and getattr(db, "last_validation_failure", None):
-                    sched = getattr(self, "_sched", None)
-                    if sched is not None and hasattr(sched, "_say"):
-                        # §3：SYSTEM_STATUS 也是域变更 → 经 dispatcher 回 owner 应用
-                        self._rt_dispatcher().submit(
-                            lambda: sched._say("（系统状态：刚才那句话没通过人格校验，没有展示。）", dur=4.0))
+                if db is not None:
+                    reason = str(getattr(db, "last_failure_reason", "") or "")
+                    if not reason and getattr(db, "last_validation_failure", None):
+                        reason = "validation_twice_invalid"
             except Exception:
                 pass
+            out["failure_reason"] = reason or "generation_empty"
+            self._system_status_failure()
         # C-R1.3.2：记忆候选观察放对话后；**记忆写入是域变更** → dispatcher 回 owner 执行
         self._rt_dispatcher().submit(lambda: self._maybe_observe_conversation(text))
+        return out
 
     def _recent_memories(self, query: str = ""):
         try:

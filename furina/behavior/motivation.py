@@ -6,13 +6,16 @@
   → Brain 人格化选择
 
 核心目标：**任何一个安全行为（尤其 observe_user）都不能成为所有场景的隐性 fallback。**
-- 四类行为（SELF / SOCIAL / OBSERVATION / ASSISTANCE）+ 类别重复惩罚（§4）
-- 反塌缩：观察类若占比过高 → 被压制，给 SELF/SOCIAL/ASSISTANCE 加多样性权重（§3, §5）
 - 每个候选带 **grounding why**（§1.2），Brain 能理解分数来源
 - Personality 权重（§2，来自 Persona 配置，不用 LLM）
 - Relationship（familiarity/trust/annoyance + 动态 interaction_frequency）参与 Motivation（§11-12）
 - talk 作为**独立候选**，带 speech_opportunity + speech_reason（§6-7）
 - 拒绝/回应 → interaction_tolerance 真实变化（§13-14）
+- **production anti-collapse = OFF（评审基线 0402e7f）**：不再有类别/活动/观察占比的
+  纯多样性惩罚（§3/§4/§5 的 _category_penalty/_activity_penalty/_observation_crush_guard
+  已整体移除）。多样性只能来自 Needs/Emotion/Personality/Identity/Relationship/World/
+  Memory/可行性；最近行为只作 context/grounding/reason（如 needs outcome、用户拒绝的
+  因果抑制），绝不作"刚做过所以必须换一个"的人工节拍器。
 """
 from __future__ import annotations
 
@@ -455,41 +458,6 @@ class BehaviorMotivation:
     def mark_speech(self, now: float) -> None:
         self._last_speech = now
 
-    # -------------------------------------------------- 反塌缩（§4, §5）
-    def _category_penalty(self, activity: str) -> float:
-        """最近连续同类行为 → 惩罚（observation 尤其重，因为易塌缩）。"""
-        cat = CATEGORY.get(activity, SELF)
-        run = 0
-        for c in reversed(self._category_history):
-            if c == cat:
-                run += 1
-            else:
-                break
-        if run <= 0:
-            return 1.0
-        # 观察类连续 2 次起开始重罚（任务书 §18：observe 不能占>50%）
-        base_pen = 0.5 if cat == OBSERVATION else 0.3
-        return max(0.05, 1.0 - base_pen * run)
-
-    def _activity_penalty(self, activity: str) -> float:
-        run = 0
-        for a in reversed(self._activity_history):
-            if a == activity:
-                run += 1
-            else:
-                break
-        return max(0.05, 1.0 - 0.35 * run)
-
-    def _observation_crush_guard(self, activity: str) -> float:
-        """若观察类在近 8 个决策里占比过高（>50%），压观察、抬其它——硬性反塌缩。"""
-        obs = sum(1 for c in self._category_history if c == OBSERVATION)
-        total = len(self._category_history)
-        if total >= 4 and obs / total > 0.5:
-            if CATEGORY.get(activity) == OBSERVATION:
-                return 0.4
-            return 1.4    # 抬其它类（多样性权重）
-        return 1.0
-
     # -------------------------------------------------- 打分
     def _score(self, state, emotion, activity, rel, ctx, now) -> tuple[float, List[str], float, float, List[str]]:
         n = _needs(state); e = emotion.behavior_tendency()
@@ -607,18 +575,13 @@ class BehaviorMotivation:
         if cat in (SOCIAL, ASSISTANCE):
             tol = _clamp((rel.get("interaction_tolerance", 0.5) - 0.4) / 0.4 + 0.6)
             base *= tol
-        # Phase 13 终审 §5：**禁用强制多样** —— 类别/活动惩罚与观察塌缩守卫不再参与生产打分
-        # （它们只因为"近期展示过某类/某活动"就改排名，属于人工多样性）。
-        # 多样性只能来自 Needs/Emotion/Personality/Identity/Relationship/World/Memory/可行性。
-        # base *= self._observation_crush_guard(activity)   # DISABLED
-        # base *= self._category_penalty(activity)          # DISABLED
-        # base *= self._activity_penalty(activity)          # DISABLED
-        # 近因：仅保留"字面意义上刚做完"的短物理/语义冷却（30s 内 ×0.4，90s 内 ×0.7），
-        # 代表"刚做过、不能立刻原样再来一次"，不是视觉多样惩罚。
-        last = self._last_done.get(activity)
-        if last is not None:
-            since = now - last
-            base *= 0.4 if since < 30 else (0.7 if since < 90 else 1.0)
+        # B4（评审基线 0402e7f）：**production anti-collapse = OFF**。
+        # 类别重复惩罚 / 活动重复惩罚 / 观察占比守卫等纯多样性机制已**整体移除**
+        # （"刚做过所以必须换一个"不是因果；真实人可连续读书）。
+        # 最近行为仅保留**有现实语义**的因果信号：needs outcome（吃后 hunger 降）、
+        # 用户拒绝（§13 tolerance）、活动 cooldown、world 可行性、关系后果。
+        # 30s/90s recency 乘子也已删除 —— 它既非因果，又会混用假时钟/真时钟导致
+        # 环境相关的不确定行为（Windows 全新启动机上 repeated-read 被误压成 explore）。
 
         why = _why_for(activity, state, emotion, rel, ctx)
         fit = self.personality.fit_for(activity)   # 人格契合度 0..1（Debug 用 §六）

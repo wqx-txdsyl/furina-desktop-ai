@@ -47,16 +47,21 @@ def test_unknown_interaction_not_mapped_to_click():
 
 
 def test_forced_diversity_production_calls_zero():
-    """行为打分不再调用 category/activity 惩罚与观察塌缩守卫（注释禁用）；仅保留短物理冷却。"""
+    """行为打分不再存在/调用 category/activity 惩罚与观察塌缩守卫（B4：整体移除，非仅注释）。
+
+    旧断言（注释禁用态）已升级：评审基线 0402e7f 的 B4 要求把纯多样性惩罚**整体删除**，
+    连 _category_penalty/_activity_penalty/_observation_crush_guard 定义都不保留，
+    且 30/90s recency 乘子（混用假时钟/真时钟、属'刚做过所以换一个'）一并移除。
+    """
     import furina.behavior.motivation as M
     src = open(M.__file__, encoding="utf-8").read()
+    assert "def _category_penalty" not in src, "类别惩罚方法必须移除（B4）"
+    assert "def _activity_penalty" not in src, "活动惩罚方法必须移除（B4）"
+    assert "def _observation_crush_guard" not in src, "观察塌缩守卫必须移除（B4）"
     score = src[src.index("def _score"):]
-    # 三个多样机制必须处于注释禁用态（生产打分不得调用）
-    assert "# base *= self._observation_crush_guard(activity)" in score
-    assert "# base *= self._category_penalty(activity)" in score
-    assert "# base *= self._activity_penalty(activity)" in score
-    # 唯一保留的显式时间冷却：30/90s 语义冷却（活动本身，非视觉多样）
-    assert "base *= 0.4 if since < 30 else (0.7 if since < 90 else 1.0)" in score
+    assert "base *= 0.4 if since < 30" not in score, "30/90s recency 乘子必须移除（B4，环境相关非因果）"
+    assert "observation_crush_guard" not in score and "_category_penalty(" not in score \
+        and "_activity_penalty(" not in score, "生产打分不得引用任何多样性惩罚"
 
 
 def test_no_autonomy_stagnation_interrupt_for_quiet_idle():

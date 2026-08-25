@@ -48,6 +48,9 @@ class EventType(str, enum.Enum):
 
     # ---- 大脑/对话 ----
     BRAIN_SPOKE = "brain.spoke"
+    # B1：直接对话回合生命周期 trace（DIRECT_INGRESS/QUEUED/GENERATION_STARTED/
+    # GENERATION_FINISHED → REPLIED/FAILED/CANCELLED；含 turn_id/ingress_seq/latency/failure_reason）
+    DIRECT_TURN_TRACE = "dialogue.turn_trace"
 
     # ---- 生命周期 ----
     SLEEP_STARTED = "life.sleep_started"

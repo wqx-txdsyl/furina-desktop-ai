@@ -27,7 +27,8 @@ class OpenAICompatAdapter(LLMAdapter):
 
     def __init__(self, profile: LLMProfile) -> None:
         self.profile = profile
-        self._client = httpx.Client(base_url=profile.base_url, timeout=90.0)
+        # B1：有界超时（profile.timeout）—— 直接对话回合不得无限等待网络
+        self._client = httpx.Client(base_url=profile.base_url, timeout=profile.timeout)
 
     def _headers(self) -> Dict[str, str]:
         return {

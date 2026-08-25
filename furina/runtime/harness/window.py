@@ -137,6 +137,20 @@ class RuntimeTruthPanel(QWidget):
                       "life_next_think", "activity_finish", "activity_instance", "spatial"):
                 if k in diag:
                     d_lines.append(f"{k} {diag[k]}")
+            # B1：直接对话回合可观测终态（pending/REPLIED/FAILED/CANCELLED + 最近 failure_reason）
+            dt = diag.get("dialogue_turns")
+            if dt:
+                oc = dt.get("outcomes", {})
+                d_lines.append(
+                    f"direct_turns pending={dt.get('pending','?')} "
+                    f"ok={oc.get('REPLIED',0)} fail={oc.get('FAILED',0)} "
+                    f"cancel={oc.get('CANCELLED',0)}")
+                rec = (dt.get("recent") or [])
+                if rec:
+                    r0 = rec[0]
+                    d_lines.append(
+                        f"  last turn#{r0.get('ingress_seq')} {r0.get('status')} "
+                        f"reason={r0.get('failure_reason','') or '-'} {r0.get('latency_ms','?')}ms")
             self.life.setText(
                 f"Activity     {life['activity']}\n"
                 f"Brain        {life['brain']}   Fallback {life['fallback']}\n"

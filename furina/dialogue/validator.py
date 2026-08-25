@@ -30,12 +30,55 @@ _CSONIC_PATTERNS = [
     r"有什么(问题|事情)都可以(随时)?问我",
     r"(很高兴|非常荣幸)(认识你|和你聊天|遇见你)",
 ]
+# B3（评审基线 0402e7f）：通用 AI / 数字助手身份泄漏 —— 把自己当作"AI/助手/模型"服务者
+# （"作为AI…"、"我的功能是…"、"我可以帮助你…"、"我无法真正感受…"）。
+# 只拘"身份自居"框架；不机械禁"AI"字样（她确实住在桌面里，但**不这样自称**）。
+_GENERIC_AI_IDENTITY = [
+    r"作为(一个|一名|你的|我们)?(AI|人工智能|助手|数字助手|智能助手|程序|模型|虚拟助手)",
+    r"我是(一个|一款|你(的|们)的)?(AI|人工智能|助手|数字助手|智能助手|程序|模型|虚拟)",
+    r"我的功能是",
+    r"我可以帮助你(完成|处理|做)|我能帮你(完成|处理|做|实现)",
+    r"我无法(真正|真实)(感受|体验|理解|体会)",
+    r"很高兴(为你|为您)服务",
+]
+# B3：把自己放在"非人类 AI vs 你们人类"的观察者位置（不是简单禁"人类"二字）
+_NONHUMAN_USER_FRAMING = [
+    r"你们人类",
+    r"你们(这些|那些)?人类",
+]
+# B3：stationary 活动却声称在探索/走动（activity grounding 硬约束；PERSONA-L5/L6）
+# 只拘"探索类走动声称"，不要求出现活动名（PERSONA-L6：合法自然描述应通过）。
+_STATIONARY_ACTIVITIES = {
+    "read", "rest", "sleep", "nap", "eat", "drink", "think", "daydream",
+    "tidy", "stretch", "idle", "groom", "write", "sit",
+}
+_EXPLORE_CLAIM = re.compile(
+    r"探索|探索新事物|四处(看看|逛逛|走动|溜达)|到处(逛逛|走走|溜达|看看)|闲逛|正在?散步|出门逛逛|出去走走")
 # 舞台动作描写（§35 禁止）
 _STAGE_DIRECTION = [r"\*.*?\*", r"（.*?(叹气|笑|移|叉腰|眨眼|低头|沉默|看)）", r"\[.*?\]"]
 # 历史 lore 泄漏（§19 普通场景禁）
 _LORE_LEAK = ["五百年", "500年", "扮演神", "水神", "芙卡洛斯", "审判庭", "神座", "被看穿", "漫长等待"]
 # 戏剧/神性自指（§11 有节制）
 _GOD_REF = ["本神", "本小姐", "神明", "枫丹"]
+
+# B3：issue → retry 可理解的中文反馈（validator 要告诉 retry 哪里错了，不是 invalid=True 无信息）
+_ISSUE_FEEDBACK = {
+    "empty_when_should_speak": "不能为空，需要说点什么",
+    "too_long": "太长，压缩成一句",
+    "generic_assistant_voice": "去掉客服/万金油话术，像真人一样说话",
+    "generic_assistant_identity": "不要以 AI/助手/模型/程序自居，你就是芙宁娜本人",
+    "nonhuman_user_framing": "不要说'你们人类'——你和对方是同一个小世界里的两个人，不是观察者",
+    "repetitive_opening": "连续多轮以同一开场词开头（如'哎呀'），换一种自然开场",
+    "ungrounded_activity": "你说的活动与真实状态不符，先如实回答现在正在做什么",
+    "stage_direction": "不要写舞台动作描写（如*叹气*）",
+    "overuse_god_catchphrase": "'本神'连用过多，日常少用旧舞台自称",
+    "over_exclamation": "感叹号过多，语气自然一些",
+    "example_copy": "不要照抄语气范例的句子",
+    "activity_contradiction": "行为与活动不符",
+    "possible_lore_leak": "普通闲聊不要自动提五百年/水神往事",
+    "god_overuse": "'本神'用得太多，收着点",
+    "god_overuse_ordinary": "普通情境不要端'本神'架子",
+}
 
 
 @dataclass
@@ -50,6 +93,10 @@ class ValidationResult:
                 "god_reference_count": self.god_reference_count,
                 "god_overuse_ordinary": self.god_overuse_ordinary}
 
+    def describe(self) -> str:
+        """B3：可解释反馈（retry 生成器知道**哪里错了**，而非只有 invalid=True）。"""
+        return "；".join(_ISSUE_FEEDBACK.get(i, i) for i in self.issues[:3])
+
 
 class DialogueValidator:
     # 允许旧舞台腔的情境（§7）：performance/celebration/playful boasting/dramatic joke/high-pride
@@ -60,13 +107,22 @@ class DialogueValidator:
 
     def __init__(self) -> None:
         self._csn = [re.compile(p) for p in _CSONIC_PATTERNS]
+        self._generic_ai = [re.compile(p) for p in _GENERIC_AI_IDENTITY]
+        self._nonhuman = [re.compile(p) for p in _NONHUMAN_USER_FRAMING]
         self._stage = [re.compile(p) for p in _STAGE_DIRECTION]
         self._lore = [re.compile(p) for p in _LORE_LEAK]
         self._god = [re.compile(p) for p in _GOD_REF]
 
+    @staticmethod
+    def _opening_marker(s: str) -> str:
+        """表面语言开场标记：句子开头的第一个短词（≤5 字，截断标点）。"""
+        m = re.match(r"^[^\s，。！？,.!?～~、：:；;]{1,5}", (s or "").strip())
+        return m.group(0) if m else ""
+
     def validate(self, speech: str, *, should_speak: bool = True,
                  length_cap: int = 120, example_phrases: Optional[List[str]] = None,
-                 activity: str = "", context: str = "casual") -> ValidationResult:
+                 activity: str = "", context: str = "casual",
+                 recent_surface: Optional[List[str]] = None) -> ValidationResult:
         r = ValidationResult()
         s = (speech or "").strip()
         if should_speak and not s:
@@ -78,6 +134,23 @@ class DialogueValidator:
         for p in self._csn:
             if p.search(s):
                 r.valid = False; r.issues.append("generic_assistant_voice"); break
+        # B3：通用 AI / 数字助手身份泄漏（"作为AI""我的功能是"…）
+        for p in self._generic_ai:
+            if p.search(s):
+                r.valid = False; r.issues.append("generic_assistant_identity"); break
+        # B3：非人类观察者框架（"你们人类…"）
+        for p in self._nonhuman:
+            if p.search(s):
+                r.valid = False; r.issues.append("nonhuman_user_framing"); break
+        # B3：stationary 活动却声称在探索/走动（semantic grounding，非 exact substring）
+        if activity in _STATIONARY_ACTIVITIES and _EXPLORE_CLAIM.search(s):
+            r.valid = False; r.issues.append("ungrounded_activity")
+        # B3：同一显著开场词连续塌缩（"哎呀"×3）—— 允许一次，禁止模板化
+        if recent_surface:
+            cur = self._opening_marker(s)
+            prev = [self._opening_marker(x) for x in recent_surface[-3:]]
+            if len(cur) >= 2 and prev.count(cur) >= 2:
+                r.valid = False; r.issues.append("repetitive_opening")
         for p in self._stage:
             if p.search(s):
                 r.valid = False; r.issues.append("stage_direction"); break

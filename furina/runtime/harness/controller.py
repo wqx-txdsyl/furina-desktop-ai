@@ -53,6 +53,14 @@ class RuntimeHarness:
             self.proxy = proxy
             self.spatial.window = proxy
             self.spatial.adapter = self.spatial.adapter.__class__.from_window(proxy)
+            # B2（评审基线 0402e7f）：**注入的 proxy 也必须补齐生产 drag wiring** ——
+            # launch_harness 先创建 SpatialProxyWindow(world=...) 再注入本控制器，
+            # 若不在收到 proxy 时接线，鼠标事件会走到 None 回调，SpatialRuntime 永远
+            # 不进入 drag_active/DRAGGED，且 spatial tick 继续抢占坐标 → 无法拖动/snap-back。
+            # 与自建分支（下方 else）保持同一 drag semantic（生产 SpatialRuntime 链，非测试假实现）。
+            proxy.on_drag_start = lambda: self.spatial.on_drag_start(time.monotonic())
+            proxy.on_drag_move = lambda: self.spatial.on_drag_move(time.monotonic())
+            proxy.on_drag_release = lambda: self.spatial.on_drag_release(time.monotonic(), commit=True)
         else:
             self.proxy = SpatialProxyWindow(
                 world=app.world,
@@ -447,6 +455,18 @@ class RuntimeHarness:
                     d["spatial"] = {"path_style": p.path_style,
                                     "waypoints": len(getattr(p, "waypoints", []) or []),
                                     "max_heading_delta_deg": self._spatial_max_turn(p)}
+        except Exception:
+            pass
+        # B1（评审基线 0402e7f）：直接对话回合可观测终态 —— Manual 能区分
+        # 没生成 / 生成失败 / 人格校验失败 / 仍在等待（不得只看到"什么都没发生"）。
+        try:
+            dq = getattr(self.app, "_direct_dq", None)
+            if dq is not None:
+                d["dialogue_turns"] = {
+                    "pending": dq.pending(),
+                    "outcomes": dq.outcome_count(),
+                    "recent": dq.recent_outcomes(4),
+                }
         except Exception:
             pass
         return d

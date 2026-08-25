@@ -98,13 +98,25 @@ def test_observe_not_top_candidate_when_bored():
 
 
 def test_category_repetition_penalty():
-    """连续观察会触发类别惩罚（§4），使其它类别更容易胜出。"""
-    mot = BehaviorMotivation()
-    # 模拟连续 4 次观察
+    """B4（评审基线 0402e7f）：类别重复**不再触发惩罚** —— production anti-collapse = OFF。
+
+    旧契约（连续观察 → _category_penalty < 1.0 压制）已被 B4 明确移除：'刚做过所以必须换'
+    不是因果。重复观察不得改变候选分数（MOT-L2/L7 同一不变量）。
+    """
+    import furina.behavior.motivation as M
+    src = open(M.__file__, encoding="utf-8").read()
+    assert "def _category_penalty" not in src, "类别惩罚必须移除（B4）"
+    st = CharacterState(); st.needs.boredom = 90; st.needs.curiosity = 80
+    ee = EmotionEngine(st.emotion)
+    m1 = BehaviorMotivation()
+    m2 = BehaviorMotivation()
     for _ in range(4):
-        mot.mark_done("observe_user", 0)
-    # 观察类应被显著压制
-    assert mot._category_penalty("observe_user") < 1.0
+        m2.mark_done("observe_user", 0)     # 仅历史不同
+    a1 = m1.candidates(st, ee)
+    a2 = m2.candidates(st, ee)
+    s1 = {c.activity: c.score for c in a1}
+    s2 = {c.activity: c.score for c in a2}
+    assert s1 == s2, f"仅历史不同不得改变任何候选分数: {s1} vs {s2}"
 
 
 def test_rejection_reduces_social_approach():

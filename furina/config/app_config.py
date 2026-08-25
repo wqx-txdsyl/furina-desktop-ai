@@ -33,6 +33,7 @@ class LLMProfile:
     api_key: str = ""
     temperature: float = 0.7
     max_tokens: int = 1024          # glm-4v-flash 上限 1024；其它模型可调
+    timeout: float = 120.0          # B1：单次 LLM 调用的有界超时（connect/read/write；直接对话不得无限 WAIT）
     supports_vision: bool = True
     supports_dialogue: bool = True
 

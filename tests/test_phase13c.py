@@ -106,11 +106,22 @@ def test_comfort_context_not_comment():
 
 
 def test_same_act_does_not_permanently_silence_user_dialogue():
-    """§21：用户发起的对话不能因 act 重复而永久静音。"""
+    """§21：用户发起的对话不能因 act 重复而永久静音。
+
+    机械兼容（评审基线 0402e7f）：B3 新增 repetitive-opening guard —— 同一显著开场词
+    连续 3 个 direct replies 会触发 retry；本测试意图是 act 标签重复不得静音用户对话，
+    故 fake LLM 按轮给不同开场词的回复（act 仍全程 COMMENT，语义不受影响）。
+    """
     from furina.dialogue_brain import DialogueBrain
     class _LLM:
+        def __init__(self):
+            self._speeches = ["好的。", "好呀，我在。", "嗯，怎么了？", "你说得对。"]
+            self._i = 0
         def is_available(self): return True
-        def structured(self, msgs, schema=None, temperature=0.9): return {"speech": "好的"}
+        def structured(self, msgs, schema=None, temperature=0.9):
+            s = self._speeches[min(self._i, len(self._speeches) - 1)]
+            self._i += 1
+            return {"speech": s}
     db = DialogueBrain(_LLM(), "p")
     for _ in range(4):
         out = db.say(intent="talk", emotion="calm", user_text="你好呀", user_initiated=True)

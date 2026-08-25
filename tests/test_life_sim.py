@@ -78,13 +78,23 @@ def test_motivation_scores_differentiated():
 
 
 def test_motivation_recency_penalizes_repeat():
+    """B4（评审基线 0402e7f）：重复行为**不再被 recency 惩罚** —— 刚做完 ≠ 必须换。
+
+    旧契约（30/90s recency 乘子压制重复）已被 B4 移除：该乘子既非因果，又会混用假时钟/
+    真时钟导致环境相关行为（Windows 全新启动机上 repeated-read 被误压成 explore）。
+    同 state 下，仅'刚做过'不同不得改变候选分数（MOT-L2/L7）。
+    """
     st = CharacterState(); st.needs.boredom = 90; st.needs.playfulness = 90
     ee = EmotionEngine(st.emotion)
     m = BehaviorMotivation()
-    import time
-    t = time.time()
-    m.mark_done("play", t)   # 刚玩过
-    cands = m.candidates(st, ee, now=t + 1)   # 1s 后
+    cands = m.candidates(st, ee)
     play_score = next(c.score for c in cands if c.activity == "play")
-    # 刚做过的 play 会被 recency 压制（相比不做标记时）
-    assert play_score < 1.0
+    # 记录刚做过 play 后，分数必须与未记录时完全一致（无 recency 惩罚）
+    st2 = CharacterState(); st2.needs.boredom = 90; st2.needs.playfulness = 90
+    m2 = BehaviorMotivation()
+    import time
+    m2.mark_done("play", time.time())
+    cands2 = m2.candidates(st2, ee, now=time.time() + 1)
+    play_score2 = next(c.score for c in cands2 if c.activity == "play")
+    assert play_score2 == play_score, f"仅 recency 不同不得改分: {play_score2} vs {play_score}"
+    assert play_score2 > 0.0
