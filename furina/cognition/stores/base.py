@@ -161,6 +161,15 @@ def _json_safe_payload(payload: Dict[str, Any], max_len: int = 2000) -> str:
     return s if len(s) <= max_len else s[:max_len] + "...<truncated>"
 
 
+_COGNITION_MIGRATIONS = [
+    # Phase 15D：C4 temporal scope（forward migration，幂等：列已存在则跳过）
+    ("ALTER TABLE user_model_items ADD COLUMN temporal_uncertain INTEGER NOT NULL DEFAULT 0",
+     "temporal_uncertain"),
+    ("ALTER TABLE user_model_items ADD COLUMN declared_at REAL NOT NULL DEFAULT 0",
+     "declared_at"),
+]
+
+
 class CognitionDB:
     """共享 SQLite 连接（与 MemoryStore 同库不同连接；busy_timeout + RLock）。"""
 
@@ -173,6 +182,12 @@ class CognitionDB:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(_COGNITION_SCHEMA)
+            for sql, _col in _COGNITION_MIGRATIONS:
+                try:
+                    self._conn.execute(sql)
+                    self._conn.commit()
+                except sqlite3.OperationalError:
+                    pass          # 列已存在
             self._conn.commit()
         self._version = self._load_version()
 

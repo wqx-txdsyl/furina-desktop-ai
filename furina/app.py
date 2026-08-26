@@ -617,24 +617,12 @@ class Furina:
                 self.emotion.apply_event(EVENT_TALK, tired_hint=self._tired_hint())
             except Exception:
                 pass
-        # Phase 14.1 §8：UserModel evidence chain —— objective USER_* declaration event **先**落地，
-        # 拿到 event_id → UserModel upsert(source_event_id=event_id)（证据可追溯）。
+        # Phase 15D：用户直接消息 → C4 确定性演化（declaration → event → upsert(source_event_id)；
+        # explicit correction wins；PLAN_COMPLETED 关联 ACTIVE PLAN；'这首歌不错' 不形成 lifelong）。
         cog = getattr(self, "cognition", None)
         if cog is not None:
             try:
-                cand = cog.extract_user_model(text)
-                if cand:
-                    ev_type = ("USER_PLAN_DECLARED" if cand["category"] == "PLAN"
-                               else "USER_PREFERENCE_DECLARED")
-                    ev = cog.record_event(
-                        ev_type, source="dialogue", channel="DIRECT_USER_TURN",
-                        payload={"key": cand["key"], "value": cand["value"],
-                                 "excerpt": cand["excerpt"], "confidence": cand["confidence"]},
-                        importance=0.5, consolidate=False)
-                    cog.user_model.upsert_item(
-                        category=cand["category"], key=cand["key"], value=cand["value"],
-                        confidence=cand["confidence"], source_event_id=ev.event_id,
-                        source_text_excerpt=cand["excerpt"])
+                cog.apply_user_message(text, channel="DIRECT_USER_TURN")
             except Exception:
                 pass
         # 2. R1.2-2：**不再在入队前 reserve DialogueBrain seq** —— DirectDialogueQueue

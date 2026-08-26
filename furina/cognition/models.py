@@ -68,7 +68,8 @@ class UserModelItem:
     """C4 单条用户模型 item（evidence + confidence；supersede 不 overwrite）。"""
 
     item_id: str = ""
-    category: str = "FACT"              # FACT/PREFERENCE/DISLIKE/ROUTINE/PROJECT/GOAL/PLAN/COMMUNICATION_PREFERENCE/IMPORTANT_DATE
+    category: str = "FACT"              # FACT/PREFERENCE/DISLIKE/ROUTINE/PROJECT/GOAL/PLAN/
+                                        # COMMUNICATION_PREFERENCE/IMPORTANT_DATE/HABIT/INTEREST
     key: str = ""
     value_json: str = "{}"              # JSON-safe
     confidence: float = 0.5
@@ -78,7 +79,10 @@ class UserModelItem:
     updated_at: float = 0.0
     valid_from: float = 0.0
     valid_to: float = 0.0               # 0 = 永久有效
-    status: str = "active"              # active / superseded / expired / deleted
+    status: str = "active"              # active/superseded/expired/deleted/completed/cancelled
+    # Phase 15D：temporal scope（日期不确定时 temporal_uncertain=1，绝不编日期）
+    temporal_uncertain: int = 0
+    declared_at: float = 0.0
 
     @property
     def value(self) -> Any:
@@ -96,6 +100,10 @@ class UserModelItem:
             created_at=float(row["created_at"] or 0.0), updated_at=float(row["updated_at"] or 0.0),
             valid_from=float(row["valid_from"] or 0.0), valid_to=float(row["valid_to"] or 0.0),
             status=row["status"],
+            temporal_uncertain=int(row["temporal_uncertain"] or 0)
+            if "temporal_uncertain" in row.keys() else 0,
+            declared_at=float(row["declared_at"] or 0.0)
+            if "declared_at" in row.keys() else 0.0,
         )
 
 

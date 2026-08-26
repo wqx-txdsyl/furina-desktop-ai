@@ -28,7 +28,7 @@ from .stores.user_model import UserModelStore
 log = get_logger("cognition.hub")
 
 # Phase 14J：deterministic conservative user-model extraction（禁止模糊一句 → 永久人格标签）
-_PLAN_RE = re.compile(r"(今天|这周|等会|一会儿|待会|马上|打算|准备).{0,24}(完成|做|写|测|整理|学|练|去|弄|处理|搞定)")
+_PLAN_RE = re.compile(r"(今天|明天|后天|下周|这周|等会|一会儿|待会|马上|月底|打算|准备).{0,24}(完成|做|写|测|整理|学|练|去|弄|处理|搞定|交)")
 _PREF_RE = re.compile(r"(?:我(?:真的|特别|很|超)?喜欢|最爱|超爱)(.{2,40}?)(?:。|！|!|$)")
 _DISLIKE_RE = re.compile(r"(?:我?(?:不太|很不|讨厌|不喜欢|烦|嫌))(?:别人|你|人|一直|总|总是|老|老是)?(.{2,40}?)(?:。|！|!|$)")
 # 指令式沟通偏好：不要/不许/请别/别再/少（裸"别"排除"别人"里的"别"）
@@ -50,7 +50,7 @@ class UserModelExtractor:
         low_conf = 0.45 if any(m in t for m in _LOW_CONF_MARKERS) else None
 
         m = _PLAN_RE.search(t)
-        if m and ("准备" in t or "打算" in t):
+        if m and any(k in t for k in ("准备", "打算", "要", "今天", "明天", "后天", "下周", "月底")):
             return {"category": "PLAN", "key": "plan_today",
                     "value": t[:80], "confidence": low_conf or 0.85,
                     "excerpt": t[:120]}
@@ -95,6 +95,9 @@ class CognitionHub:
         self.agent_history = AgentTaskHistoryStore(self._db)
         self.consolidator = Consolidator()
         self.extractor = UserModelExtractor()
+        # Phase 15B：Interpretation Engine（deterministic-first；无 DB 写 API）
+        from .interpretation import InterpretationEngine
+        self.interpretation = InterpretationEngine()
         self.willingness = WorkWillingnessModel()     # model-only（Phase 14K 预留）
         self.assembler = CognitiveContextAssembler(
             canon_identity=self.canon_identity,
@@ -188,6 +191,59 @@ class CognitionHub:
     def extract_user_model(self, text: str) -> Optional[Dict[str, Any]]:
         """Phase 14J：deterministic conservative extraction（owner 决定是否 persist）。"""
         return self.extractor.extract(text)
+
+    # -------------------------------------------------- Phase 15D：用户一句话 → C4 确定性演化（owner）
+    def apply_user_message(self, text: str, *, channel: str = "DIRECT_USER_TURN",
+                           turn_id: Optional[int] = None) -> Dict[str, Any]:
+        """owner：用户直接消息 → C4 演化（evidence-first，current explicit turn wins）。
+
+        - declaration（我喜欢X/我今天准备做X/以后别总是X）→ declaration event 先落地 →
+          upsert(source_event_id)；explicit correction wins（supersede 旧 item）；
+        - PLAN_COMPLETED（做完了/终于完成）→ 关联 ACTIVE PLAN → COMPLETED（不新增互不关联 plan）；
+        - PREFERENCE_CHANGED（其实现在不怎么听X了）→ 旧 PREFERENCE SUPERSEDED（历史保留）。
+        - 不记录 USER_MESSAGE 事件（EventBridge 在 turn 入口负责，避免 duplicate）。
+        - '这首歌不错' → 无候选（transient，不形成 lifelong）。
+        """
+        applied: Dict[str, Any] = {"declarations": [], "superseded": [],
+                                   "plans_completed": [], "events": []}
+        try:
+            for cand in self.interpretation.interpret_text(text):
+                if cand.kind == "PLAN_COMPLETED":
+                    done = self._complete_plans()
+                    applied["plans_completed"].extend(done)
+                elif cand.kind == "PREFERENCE_CHANGED":
+                    for it in self.user_model.query_active(limit=100, category="PREFERENCE"):
+                        if cand.predicate in ("", "preference") or it.key == cand.predicate:
+                            self.user_model.supersede_item(it.item_id)
+                            applied["superseded"].append(it.item_id)
+                elif cand.kind in ("PLAN", "PREFERENCE", "DISLIKE", "COMMUNICATION_PREFERENCE",
+                                   "FACT", "HABIT", "INTEREST", "GOAL", "IMPORTANT_DATE"):
+                    ev_type = ("USER_PLAN_DECLARED" if cand.kind == "PLAN"
+                               else "USER_PREFERENCE_DECLARED")
+                    dev = self.record_event(ev_type, source="dialogue", channel=channel,
+                                            turn_id=turn_id,
+                                            payload={"key": cand.predicate, "value": cand.value,
+                                                     "excerpt": cand.reason,
+                                                     "confidence": cand.confidence},
+                                            importance=0.5, consolidate=False)
+                    it = self.user_model.upsert_item(
+                        category=cand.kind, key=cand.predicate or "fact",
+                        value=cand.value, confidence=cand.confidence,
+                        source_event_id=dev.event_id,
+                        source_text_excerpt=(cand.reason or "")[:500])
+                    applied["declarations"].append(it.item_id)
+                    applied["events"].append(dev.event_id)
+        except Exception as e:
+            log.warning("apply_user_message failed: %s", e)
+        return applied
+
+    def _complete_plans(self) -> List[str]:
+        """证据关联到既有 ACTIVE PLAN → COMPLETED（'终于做完了'）；无 plan → 不动。"""
+        done = []
+        for it in self.user_model.query_active(limit=50, category="PLAN"):
+            self.user_model.complete_plan(it.key)
+            done.append(it.item_id)
+        return done
 
     # -------------------------------------------------- agent result → C7（owner persist）
     def persist_agent_result(self, task_id: str, *, status: str, goal: str = "",
