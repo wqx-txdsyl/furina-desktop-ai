@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from furina.core import EventBus, EventType, get_logger
 from .permission import Permission, PermissionManager
@@ -114,12 +114,12 @@ class AgentRuntime:
                                   permission_summary="")
                 return {"status": "failed", "reason": str(e), "results": results,
                         "task_id": task_id, "task_record": self._last_task_record}
-            # 权限检查（Phase 14.1：最终 effective permission + Phase 14.1.1：task-scoped auth）
+            # 权限检查（Phase 14.1：最终 effective permission + Phase 14.1.1 FINAL：scope 先于 level）
             eff = self._perm_resolver.effective_permission(tool, step.args)
-            step_path = self._path_arg(step.args)
+            step_paths = self._step_paths(step.args)
             decision = self.permission.check(f"{tool.description}：{step.args}", eff,
                                              task_auth=task_auth, tool=step.tool,
-                                             path=step_path)
+                                             paths=step_paths)
             steps.append({"step_index": i, "tool": step.tool, "args": step.args,
                           "capability": "", "permission_level": eff.name,
                           "status": "RUNNING", "verified": False, "result": None, "error": ""})
@@ -231,13 +231,26 @@ class AgentRuntime:
                 log.warning("task history persist callback failed: %s", e)
 
     @staticmethod
-    def _path_arg(args: Dict[str, Any]) -> str:
-        """从 step args 提取路径（供 task-scoped allowed_path_root 检查）。"""
-        for k in ("path", "base", "source", "dest", "target", "file", "new_name"):
-            v = (args or {}).get(k)
+    def _step_paths(args: Dict[str, Any]) -> Tuple[str, ...]:
+        """步骤涉及的**所有** filesystem path（供 task-scoped allowed_path_root 全查）。
+
+        - path/base/source/dest/target/file 全部收集；
+        - rename 的 new_name 是 basename → 计算最终 destination（parent/new_name）单独加入，
+          **不**把 new_name 当 absolute path 单独检查。
+        """
+        import os as _os
+        paths: List[str] = []
+        args = args or {}
+        for k in ("path", "base", "source", "dest", "target", "file"):
+            v = args.get(k)
             if isinstance(v, str) and v.strip():
-                return v
-        return ""
+                paths.append(v)
+        p = args.get("path")
+        nn = args.get("new_name")
+        if isinstance(p, str) and p.strip() and isinstance(nn, str) and nn.strip():
+            parent = _os.path.dirname(_os.path.abspath(_os.path.expanduser(p)))
+            paths.append(_os.path.join(parent, nn))
+        return tuple(paths)
 
     @staticmethod
     def _plan_json(plan: AgentPlan) -> str:

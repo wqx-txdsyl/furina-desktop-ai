@@ -89,6 +89,10 @@ L3_SENSITIVE  敏感（必须确认）
 - 菜单任务"整理下载文件夹"的 bounded L2：allowed_tools 限定 organize 确定性序列、
   allowed_path_root 限定用户 Downloads；越界（fs.delete 任意路径 / doc.write outside root）→
   Runtime DENIED（task_scope_mismatch）。并发任务 context 互不泄漏；任务结束只销毁自身 context。
+- **SCOPE 先于 PERMISSION LEVEL**（Phase 14.1.1 FINAL）：显式 task auth 下先验证
+  tool ∈ allowed_tools（若非空）+ **所有** filesystem path（path/base/source/dest/target/file，
+  rename 检查最终 destination）∈ allowed_path_root（若非空）；scope mismatch → DENIED，
+  **无论该 step 是 L0/L1/L2/L3 都不得绕过**；scope 通过后才按 level（L0/L1 auto，L2/L3 max_permission）。
 - 动态权限：已有文件覆盖 / overwrite=True → 至少 L2；delete → L2+；send → L3
   （EffectivePermissionResolver，Planner validation 与 Runtime 一致）。
 - **Office *.create（docx/pptx/xlsx）永不覆盖已有文件**（工具层拒绝；未来用专门 edit capability）。

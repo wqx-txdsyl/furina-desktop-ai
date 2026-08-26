@@ -42,15 +42,23 @@ class AuthorizationContext:
     source: str = ""
     is_default: bool = False                # True = 未显式授权的默认任务（L0/L1 only + on_confirm 路径）
 
-    def allows(self, tool: str, path: str = "") -> bool:
-        """tool / path 是否在授权范围内（L2 权限不自动等于任意工具/任意路径）。"""
+    def allows(self, tool: str, paths: Tuple[str, ...] = ()) -> bool:
+        """tool / **所有** filesystem path 是否在授权范围内。
+
+        - allowed_tools 非空 → tool 必须在其中（否则 DENIED，无论 L0/L1/L2/L3）；
+        - allowed_path_root 非空 → **每个** path 都必须在 root 内（source/dest/path/base/
+          target/file 全查；rename 由调用方传最终 destination，不单独查 basename）。
+        """
         if self.allowed_tools and tool and tool not in self.allowed_tools:
             return False
-        if self.allowed_path_root and path:
-            p = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+        if self.allowed_path_root and paths:
             root = os.path.normpath(os.path.abspath(os.path.expanduser(self.allowed_path_root)))
-            if not (p == root or p.startswith(root + os.sep)):
-                return False
+            for p in paths:
+                if not isinstance(p, str) or not p.strip():
+                    continue
+                pp = os.path.normpath(os.path.abspath(os.path.expanduser(p)))
+                if not (pp == root or pp.startswith(root + os.sep)):
+                    return False
         return True
 
 
@@ -101,28 +109,30 @@ class PermissionManager:
     def check(self, description: str, level: Permission,
               *, effective_level: Optional[Permission] = None,
               task_auth: Optional[AuthorizationContext] = None,
-              tool: str = "", path: str = "") -> PermissionDecision:
+              tool: str = "", paths: Tuple[str, ...] = ()) -> PermissionDecision:
         """最终 effective permission 裁决。
 
-        - effective_level 未给 → 用 class static level。
-        - L0/L1 → auto allow。
-        - **显式任务授权**（task_auth.is_default=False）：L2/L3 仅当 max_permission >= eff
-          且 tool/path 在 scope 内；越界（权限不足 / 工具 / 路径）→ **硬拒**（不回落 on_confirm）。
-        - **默认任务**（无显式授权 / is_default=True）：L2/L3 仅 on_confirm 单独 explicit
-          confirmation（生产默认拒绝）；否则拒绝。
-        - **L3 不得被 L2 token 覆盖**（max_permission 不足 → auth 路径拒绝）。
+        **Scope 先于 Permission Level**（Phase 14.1.1 FINAL）：
+        对显式任务授权（task_auth.is_default=False）——
+          1. 先验证 scope：tool ∈ allowed_tools（若非空）+ **所有** path args 在
+             allowed_path_root 内（若非空）；scope mismatch → DENIED/task_scope_mismatch，
+             **无论该 step 是 L0/L1/L2/L3 都不得绕过 task scope**；
+          2. scope 通过后再按 permission level：L0/L1 → auto allow；L2/L3 → max_permission
+             （L3 不得被 L2 token 覆盖）。
+        默认任务（无显式授权 / is_default=True）——
+          L0/L1 → auto allow；L2/L3 仅 on_confirm 单独 explicit confirmation（生产默认拒绝）。
         """
         eff = effective_level or level
+        if task_auth is not None and not task_auth.is_default:
+            # 显式任务授权：SCOPE → PERMISSION LEVEL
+            if not task_auth.allows(tool, paths):
+                return PermissionDecision(False, "task_scope_mismatch", eff)
+            if eff.value <= task_auth.max_permission.value:
+                return PermissionDecision(True, f"task_authorization:{task_auth.source}", eff)
+            return PermissionDecision(False, "insufficient_authorization", eff)
+        # 默认任务（无显式授权）
         if eff.value <= self.auto_allow_above.value:
             return PermissionDecision(True, "auto", eff)
-        if task_auth is not None and not task_auth.is_default:
-            # 显式任务授权：scope 绑定（工具/路径越界 = 不授权，硬拒）
-            if eff.value <= task_auth.max_permission.value and task_auth.allows(tool, path):
-                return PermissionDecision(True, f"task_authorization:{task_auth.source}", eff)
-            if eff.value > task_auth.max_permission.value:
-                return PermissionDecision(False, "insufficient_authorization", eff)
-            return PermissionDecision(False, "task_scope_mismatch", eff)
-        # 默认任务（无显式授权）：L2/L3 仅单独 explicit confirmation（GUI 弹窗；生产默认拒绝）
         if self.on_confirm is not None:
             ok = self.on_confirm(description, eff)
             return PermissionDecision(ok, "user_confirm" if ok else "denied", eff)
