@@ -57,6 +57,8 @@
     {"evidence_id": "FUR-053", "source_type": "CHARACTER_STORY", "quest": null, "act": null, "scene": "角色故事5·卸任独居"},
     {"evidence_id": "FUR-054", "source_type": "CHARACTER_STORY", "quest": null, "act": null, "scene": "角色故事5·克洛琳德邀宴"},
     {"evidence_id": "FUR-055", "source_type": "STORY_QUEST", "quest": "传说任务·水的女儿", "act": null, "scene": "水的女儿结尾·神之眼降临"},
-    {"evidence_id": "FUR-056", "source_type": "PROFILE", "quest": null, "act": null, "scene": "角色页/孤心沙龙"}
+    {"evidence_id": "FUR-056", "source_type": "PROFILE", "quest": null, "act": null, "scene": "角色页/孤心沙龙"},
+    {"evidence_id": "FUR-057", "source_type": "MAIN_STORY", "quest": "Chapter IV", "act": "II", "scene": "第四章·第二幕「仿若无因飘落的轻雨」幕级条目（EN 官方标题 As Light Rain Falls Without Reason；官方 Version 4.0 Update Details 明文收录并于 4.0 永久开放，2023/08/16；主张范围=幕存在 + Chapter IV 归属 + 版本窗口，不含未核验场景细节）"},
+    {"evidence_id": "FUR-058", "source_type": "MAIN_STORY", "quest": "Chapter IV", "act": "III", "scene": "第四章·第三幕「向深水中的晨星」幕级条目（EN 官方标题 To the Stars Shining in the Depths；官方 Version 4.1 Update Details 明文收录并于 4.1 永久开放，2023/09/27；主张范围=幕存在 + Chapter IV 归属 + 版本窗口 + 官方链序 II→III→IV，不含未核验场景细节）"}
   ]
 }

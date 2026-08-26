@@ -163,16 +163,20 @@ def test_r7_fc_t3_exact_act_semantics_preserved(tmp_path):
 
 
 def test_r7_fc_t4_production_metrics_remain_truthful():
-    """R7-FC-T4：生产数据零缺失引用；PARTIAL 缺口必须照旧如实暴露（不许顺手洗绿）。"""
+    """R7-FC-T4：生产数据零缺失引用；语义缺口必须照旧如实暴露（不许顺手洗绿）。
+
+    Phase 15 D1 生产事实迁移（closeout 披露）：官方 Act II/III 幕级锚点补齐 →
+    幕级 coverage COMPLETE / missing=[]；INNER_WORLD_REVELATION 缺口保护不变。
+    """
     from furina.cognition.stores.canon_history import CanonHistoryStore
     m = CanonHistoryStore().metrics()   # 默认真源 data/canon/*（测试不改生产文件）
     assert m["unregistered_evidence_ids"] == []
     assert m["evidence_attribution_conflicts"] == []
     assert m["evidence_registry_duplicates"] == []
     assert m["canon_span_status"] == "MANDATORY_SPAN_SOURCE_COMPLETE"
-    assert m["main_story_act_coverage_status"] == "PARTIAL"
-    assert m["missing_main_story_acts"] == ["II", "III"]
-    assert m["main_story_act_coverage"] == {"I": True, "II": False, "III": False,
+    assert m["main_story_act_coverage_status"] == "COMPLETE"
+    assert m["missing_main_story_acts"] == []
+    assert m["main_story_act_coverage"] == {"I": True, "II": True, "III": True,
                                             "IV": True, "V": True}
     assert any(g["episode"] == "INNER_WORLD_REVELATION"
                for g in m["episodes_without_exact_act_main_story_evidence"])

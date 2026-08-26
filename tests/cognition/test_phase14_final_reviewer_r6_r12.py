@@ -257,31 +257,46 @@ def test_r7_t5_fur052_cannot_satisfy_exact_main_story_act():
 
 
 def test_r7_t6_production_metrics_truthful():
-    """R7-T6：production metrics 如实暴露（与文档一致，见 FURINA_CANON_LIFE_SOURCE_MAP.md）。"""
+    """R7-T6：production metrics 如实暴露（与文档一致，见 FURINA_CANON_LIFE_SOURCE_MAP.md）。
+
+    Phase 15 D1（生产事实迁移，closeout 披露）：官方 Act II/III 幕级锚点（SRC-011/012 →
+    FUR-057/058）补齐后，幕级 coverage 变为 COMPLETE；语义层 PARTIAL 的唯一缺口仍
+    锁定为 INNER_WORLD_REVELATION——该保护强度不变，仅更新已验证的生产期望值。
+    """
     hub = _hub(Path(tempfile.mkdtemp()))
     m = hub.canon_history.metrics()
     # 结构层（既有锁定契约保持）
     assert m["canon_span_status"] == "MANDATORY_SPAN_SOURCE_COMPLETE"
     # 语义层：两类完整性分离且如实
-    assert m["main_story_act_coverage_status"] == "PARTIAL"
-    assert m["missing_main_story_acts"] == ["II", "III"], m["missing_main_story_acts"]
-    assert m["main_story_act_coverage"] == {"I": True, "II": False, "III": False,
+    assert m["main_story_act_coverage_status"] == "COMPLETE"
+    assert m["missing_main_story_acts"] == [], m["missing_main_story_acts"]
+    assert m["main_story_act_coverage"] == {"I": True, "II": True, "III": True,
                                             "IV": True, "V": True}
     assert m["evidence_attribution_conflicts"] == []
     assert m["evidence_registry_duplicates"] == []
     assert m["unregistered_evidence_ids"] == []
-    # INNER_WORLD_REVELATION 的 act=V 主张缺乏同 act MAIN_STORY 证据 → 如实列出
-    assert any(g["episode"] == "INNER_WORLD_REVELATION"
-               for g in m["episodes_without_exact_act_main_story_evidence"])
+    # INNER_WORLD_REVELATION 的 act=V 主张缺乏同 act MAIN_STORY 证据 → 如实列出（唯一缺口）
+    gaps = [g["episode"] for g in m["episodes_without_exact_act_main_story_evidence"]]
+    assert gaps == ["INNER_WORLD_REVELATION"], gaps
     assert m["mandatory_life_stage_source_status"].startswith("PARTIAL")
     hub.close()
 
 
 def test_r7_t7_missing_acts_exposed():
-    """R7-T7：无 Act II/III MAIN_STORY 证据 → coverage 必须暴露缺失。"""
+    """R7-T7：coverage 暴露机制必须持续工作。
+
+    D1 后五幕齐备 → missing=[]；本用例改锁"暴露机制的诚实性"：
+    每个登记为 False 的幕必须出现在 missing 列表中（若出现 None 型缺口），
+    且当前全 True 时 missing 必须恰为空（不许隐瞒任何缺失）。
+    """
     hub = _hub(Path(tempfile.mkdtemp()))
     m = hub.canon_history.metrics()
-    assert "II" in m["missing_main_story_acts"] and "III" in m["missing_main_story_acts"]
+    cov = m["main_story_act_coverage"]
+    expected_missing = sorted(a for a, ok in cov.items() if not ok)
+    assert m["missing_main_story_acts"] == expected_missing
+    if all(cov.values()):
+        assert m["missing_main_story_acts"] == []
+        assert m["main_story_act_coverage_status"] == "COMPLETE"
     hub.close()
 
 

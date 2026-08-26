@@ -69,9 +69,15 @@
 >   （MAIN_STORY, quest=Chapter IV, act=同一 act）证据支撑）发现 1 处缺口：
 >   `INNER_WORLD_REVELATION`（act=V）引用 FUR-018（VOICE_LINE）与 FUR-037（MAIN_STORY，
 >   act 未定）—— 均非 Act V 精确主线单元，如实报告，不伪造支撑。
-> - `main_story_act_coverage_status`：**PARTIAL**，`missing_main_story_acts = ["II", "III"]`
->   —— curated evidence 集中**不存在** Act II/III 的主线（MAIN_STORY）场景单元；
->   不得用角色故事/语音/档案（如 FUR-052）冒充主线幕覆盖；如实标缺。
+> - `main_story_act_coverage_status`：**D1 后 = COMPLETE**（五幕全有官方锚点）。
+>   Act II/III 由 Phase 15 D1 经官方来源补齐：官方 Version 4.0 / 4.1 Update Details
+>   （原神官方 HoYoLAB 号 Genshin Impact Official，uid=1015537，cert_type=1）明文列出
+>   "Archon Quest Chapter IV: Act II \"As Light Rain Falls Without Reason\"" 与
+>   "Act III \"To the Stars Shining in the Depths\"" 并宣告永久开放（SRC-011/SRC-012，
+>   Tier 1 OFFICIAL_WEB，2026-08-27 全文抓取存档）。幕级条目主张范围**仅限**：
+>   幕存在 + Chapter IV 归属 + 版本窗口 + 官方链序（II→III→IV）；不含未核验的
+>   场景级细节。外部 repo（Furinelle timeline 等）仅作 locator，不入 Canon。
+>   `missing_main_story_acts = []`；不得用角色故事/语音/档案冒充主线幕覆盖的规则不变。
 >
 > 这不是说：
 > - repo 存有完整游戏原文（**禁止复制大段版权脚本**——模型 =
@@ -88,8 +94,8 @@
 > | 覆盖段 | 场景（evidence doc 标签） | 证据 IDs | 状态 |
 > |---|---|---|---|
 > | Chapter IV Act I | Lyney 庭审 / 意识到冤枉林尼（"太、太丢人了…"，4.0） | FUR-006 | COVERED |
-> | Chapter IV Act II | （curated evidence 无该幕主线场景单元；由 act=I-V 长时段 episodes 覆盖） | — | NO_CURATED_MAIN_STORY_UNIT |
-> | Chapter IV Act III | （curated evidence 无该幕主线场景单元；由 act=I-V 长时段 episodes 覆盖） | — | NO_CURATED_MAIN_STORY_UNIT |
+> | Chapter IV Act II | 幕级条目「仿若无因飘落的轻雨」（EN As Light Rain Falls Without Reason；官方 4.0 Update Details 收录，2023/08/16） | FUR-057 | COVERED（幕级锚点，SRC-011 Tier 1 官方公告页） |
+> | Chapter IV Act III | 幕级条目「向深水中的晨星」（EN To the Stars Shining in the Depths；官方 4.1 Update Details 收录，2023/09/27；链序 II→III→IV） | FUR-058 | COVERED（幕级锚点，SRC-012 Tier 1 官方公告页） |
 > | Chapter IV Act IV | 被袭击 / 生命威胁（"不要杀我，求求你！"，4.1） | FUR-039 | COVERED |
 > | Chapter IV Act V | 罪人舞步旋（审判开场"我魔神芙卡洛斯…"、被揭穿"我真的是神明…"、自辩、五百年真相、身份真相、结局） | FUR-008, FUR-041, FUR-042, FUR-043, FUR-048, FUR-049, FUR-050, FUR-051 | COVERED |
 >
@@ -101,23 +107,25 @@
 > 每条 mandatory CanonEpisode 都映射到上述覆盖段或长时段 span（source_ids/evidence_ids 可解析；
 > evidence act 冲突由 `metrics()["evidence_attribution_conflicts"]` 机器校验，当前为 0）。
 > **语义缺口如实暴露**（R7）：`metrics()["episodes_without_exact_act_main_story_evidence"]`
-> = [INNER_WORLD_REVELATION]；`metrics()["missing_main_story_acts"]` = ["II", "III"]。
+> = [INNER_WORLD_REVELATION]；D1 后 `metrics()["missing_main_story_acts"]` = []
+> （五幕幕级锚点齐备），故 life-stage 语义状态仍为 PARTIAL 且唯一缺口 =
+> INNER_WORLD_REVELATION 缺 Act V 精确支撑——如实保留，不伪造。
 > 未使用的 Tier 1/2 来源（SRC-007/008/009，cross-check 预留）**不**计入完整性。
 
-## 验收计数（C2 ACCEPTANCE）
+## 验收计数（C2 ACCEPTANCE，Phase 15 D1 后）
 
-- canon_source_map_entries: 10（SRC-001~010；SRC-001~006=USED，SRC-007~009=NOT_USED，SRC-010=FORBIDDEN）
+- canon_source_map_entries: 12（SRC-001~012；SRC-001~006=USED(Tier0)，SRC-007~009=NOT_USED，SRC-010=FORBIDDEN，SRC-011~012=USED(Tier1 官方公告页)）
 - canon_episode_count: 20（20/20 mandatory stages 全覆盖）
 - canon_span_status: MANDATORY_SPAN_SOURCE_COMPLETE（结构：无 dangling source_ids）
-- evidence_registry_entries: 56（FUR-001~056；`data/canon/furina_evidence_units.json` 唯一归因真源）
-- evidence_attribution_conflicts: 0（episode 单幕 act 与 evidence registry act 无矛盾；
-  FUR-006 → Act I，FUR-039 → Act IV，FUR-052 → CHARACTER_STORY（无 act））
+- evidence_registry_entries: 58（FUR-001~058；FUR-057/058 为 D1 新增幕级锚点，
+  归属 SRC-011/SRC-012；curated doc FURINA_CANON_EVIDENCE.md 仍只承载 FUR-001~056 游戏文本类单元）
+- evidence_attribution_conflicts: 0
 - **mandatory_life_stage_source_status: PARTIAL**（语义层；唯一缺口 =
   INNER_WORLD_REVELATION 缺同 act MAIN_STORY 证据，如实报告不伪造）
-- **main_story_act_coverage_status: PARTIAL**（missing_main_story_acts = ["II", "III"]；
-  curated evidence 无 Act II/III 主线场景单元，不得用非主线来源冒充）
+- **main_story_act_coverage_status: COMPLETE**（missing_main_story_acts = []；
+  I=FUR-006 / II=FUR-057 / III=FUR-058 / IV=FUR-039 / V=FUR-008,041,042,043,048,049,050,051）
 - tier0_sources: SRC-001~006（evidence doc + 官方游戏文本/角色资料，全部 USED）
-- tier1_sources: SRC-007, SRC-008（NOT_USED —— 不计入完整性）
+- tier1_sources: SRC-007, SRC-008（NOT_USED，cross-check 预留）；SRC-011, SRC-012（USED —— D1 官方版本公告页）
 - tier2_mirror_sources: SRC-009（NOT_USED —— 不计入完整性）
 - unsupported_sources_excluded: SRC-010（TIER 3 禁止）
 - runtime_canon_mutable = false

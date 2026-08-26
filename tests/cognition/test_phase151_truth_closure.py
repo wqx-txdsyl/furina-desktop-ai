@@ -238,8 +238,10 @@ def test_r11_mandatory_source_resolution():
 def test_r12_unused_sources_not_counted():
     hub = _hub(Path(__import__("tempfile").mkdtemp()) / "c.db")
     m = hub.canon_history.metrics()
-    # 实际使用的来源 = TIER 0（SRC-001..006）；未使用的 cross-check 来源不计
-    assert set(m["sources_used"]) == {"SRC-001", "SRC-002", "SRC-003", "SRC-004", "SRC-005", "SRC-006"}
+    # 实际使用的来源 = TIER 0（SRC-001..006）+ D1 官方公告页（SRC-011/012, Tier 1）；
+    # 未使用的 cross-check 来源不计（Phase 15 D1 生产事实迁移，closeout 披露）
+    assert set(m["sources_used"]) == {"SRC-001", "SRC-002", "SRC-003", "SRC-004",
+                                      "SRC-005", "SRC-006", "SRC-011", "SRC-012"}
     assert "SRC-007" not in m["sources_used"] and "SRC-008" not in m["sources_used"] and \
         "SRC-009" not in m["sources_used"], "未使用来源不得计入完整性（N9）"
     # 每个 episode 至少引用一个 USED 来源

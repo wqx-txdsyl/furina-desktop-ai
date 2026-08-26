@@ -346,6 +346,40 @@
       "notes": "TIER 3 禁止；绝不进入 CanonEpisode factual fields",
       "access_locator": "N/A —— TIER 3 禁止来源，无 locator",
       "status": "FORBIDDEN"
+    },
+    {
+      "source_id": "SRC-011",
+      "source_type": "OFFICIAL_WEB",
+      "access_source": "原神官方 HoYoLAB 号（Genshin Impact Official，uid=1015537，cert_type=1）公告『\"As Light Rain Falls Without Reason\" Version 4.0 Update Details』",
+      "original_material": "OFFICIAL_ANNOUNCEMENT_PAGE",
+      "canon_tier": 1,
+      "version": "Version 4.0（官方原文：update maintenance begins 2023/08/16 06:00 (UTC+8)）",
+      "quest": "Chapter IV",
+      "act": "II",
+      "scene": "New Archon Quest 条目：Archon Quest Chapter IV: Act II \"As Light Rain Falls Without Reason\"；原文 '…Act II \"As Light Rain Falls Without Reason\" will be permanently available'",
+      "furina_present": null,
+      "relevance": "D1 Act II 幕级锚点：官方明文确立幕存在 + Chapter IV 归属 + 版本窗口（act 编号出自公告原文，非由版本号推断）",
+      "evidence_ids": ["FUR-057"],
+      "notes": "2026-08-27 经官方 API bbs-api-os.hoyolab.com/community/post/wapi/getPostFull 抓取全文存档；JSON 内含完整正文。社区页/wiki 摘要仅作 locator，不入 Canon。",
+      "access_locator": "www.hoyolab.com/article/20899860（JS 页；正文存档经上列官方接口获取）；genshin.hoyoverse.com/en/news 下同名 Version 4.0 Update Details 镜像页存在（JS 渲染）",
+      "status": "USED"
+    },
+    {
+      "source_id": "SRC-012",
+      "source_type": "OFFICIAL_WEB",
+      "access_source": "原神官方 HoYoLAB 号（Genshin Impact Official，uid=1015537，cert_type=1）公告『\"To the Stars Shining in the Depths\" Version 4.1 Update Details』；镜像页 genshin.hoyoverse.com/en/news/detail/113142",
+      "original_material": "OFFICIAL_ANNOUNCEMENT_PAGE",
+      "canon_tier": 1,
+      "version": "Version 4.1（官方原文：update maintenance begins 2023/09/27 06:00 (UTC+8)）",
+      "quest": "Chapter IV",
+      "act": "III",
+      "scene": "New Archon Quests 条目：Archon Quest Chapter IV: Act III \"To the Stars Shining in the Depths\" 与 Act IV \"Cataclysm's Quickening\"；原文 '…Archon Quest Chapter IV: Act III … and Chapter IV: Act IV … will be permanently available'；解锁链序原文 Act II → Act III → Act IV",
+      "furina_present": null,
+      "relevance": "D1 Act III 幕级锚点：官方明文确立幕存在 + Chapter IV 归属 + 版本窗口 + 官方链序（与 SRC-011 相互印证）",
+      "evidence_ids": ["FUR-058"],
+      "notes": "2026-08-27 经官方 API bbs-api-os.hoyolab.com/community/post/wapi/getPostFull 抓取全文存档（retcode=0，author 认证信息在档）。CN 官网页 ys.mihoyo.com/main/news/detail/28551 为同版本 CN 说明（JS 壳，索引片段可见「白露与黑潮的序诗」→「仿若无因飘落的轻雨」链），作 locator 参考。",
+      "access_locator": "www.hoyolab.com/article/21888288（JS 页；正文存档经官方接口获取）；genshin.hoyoverse.com/en/news/detail/113142（镜像，JS 渲染）",
+      "status": "USED"
     }
   ]
 }
