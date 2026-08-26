@@ -13,10 +13,11 @@ log = get_logger("cognition.consolidator")
 
 # 仅事件（不进 memory）的类型
 _EVENT_ONLY = {"ACTIVITY_STARTED", "ACTIVITY_FINISHED", "FURINA_SPOKE", "DIRECT_TURN_STARTED",
-               "USER_CLICK", "USER_DRAG", "SYSTEM_EVENT", "APP_LAUNCHED", "BROWSER_OPENED"}
+               "USER_CLICK", "USER_DRAG", "SYSTEM_EVENT", "APP_LAUNCHED", "BROWSER_OPENED",
+               "USER_STATEMENT_OBSERVED"}
 
 # 可能形成 memory 的显著类型（仍需 importance 门槛）
-_SIGNIFICANT = {"USER_PET", "USER_POKE", "AGENT_COMPLETED", "AGENT_FAILED",
+_SIGNIFICANT = {"USER_PET", "USER_POKE", "USER_FEED", "AGENT_COMPLETED", "AGENT_FAILED",
                 "USER_PLAN_DECLARED", "USER_PREFERENCE_DECLARED", "FILE_CREATED",
                 "FILE_MOVED", "DOCUMENT_CREATED", "RELATIONSHIP_MILESTONE", "MEMORY_FORMED"}
 
@@ -49,6 +50,15 @@ class Consolidator:
                 plan["memory"] = {"content": "用户轻轻摸了摸我的头", "level": MemoryLevel.EPISODIC,
                                   "source": MemorySource.INTERACTION, "importance": 0.5,
                                   "event_type": "user_positive_touch",
+                                  "source_event_ids": src}
+        elif event_type == "USER_FEED":
+            # Phase 15.1：喂食 → C6 → consolidation → 可选 C3（单一形成权威，带 provenance）
+            if importance >= self._threshold:
+                plan["form_memory"] = True
+                plan["memory"] = {"content": f"用户喂了我{p.get('food', '')}",
+                                  "level": MemoryLevel.EPISODIC,
+                                  "source": MemorySource.INTERACTION, "importance": 0.5,
+                                  "event_type": "user_feed", "outcome": p.get("outcome", ""),
                                   "source_event_ids": src}
         elif event_type == "AGENT_COMPLETED":
             # Agent 成功完成重要任务 → Event + AgentTask(C7) + 可形成 episodic memory
@@ -83,7 +93,8 @@ class Consolidator:
                                   "confidence": p.get("confidence", 0.7),
                                   "excerpt": p.get("excerpt", "")}
         elif event_type == "RELATIONSHIP_MILESTONE":
-            plan["milestone"] = {"type": p.get("type", ""), "note": p.get("note", "")}
+            plan["milestone"] = {"type": p.get("type", ""), "note": p.get("note", ""),
+                                 "source_event_ids": src}
         elif event_type in ("FILE_CREATED", "FILE_MOVED", "DOCUMENT_CREATED"):
             if importance >= self._threshold:
                 plan["form_memory"] = True

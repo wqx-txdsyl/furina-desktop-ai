@@ -549,7 +549,10 @@ def test_harness_world_diagnostics_exposes_idle_unavailable():
     assert d.get("idle_available") is False, f"诊断必须暴露 idle 不可用: {d}"
 
 
-# ================================================================ §8 单一长期记忆 owner
+# ================================================================ §8 单一长期记忆 owner（Phase 15.1 更新）
+# 新契约（C3 单一形成权威）：App 互动处理**不再直接 memory.observe**；
+# 互动现实 → C6 USER_PET → cognition consolidation → C3（provenance + reinforce）。
+# App 直接 observe 计数必须为 0；C6 事件恰好一次。
 def _memory_counter_app():
     from furina.app import Furina
     from furina.interaction import InteractionEngine
@@ -564,6 +567,11 @@ def _memory_counter_app():
     app.memory = SimpleNamespace(
         observe=lambda *a, **k: mem.__setitem__("semantic", mem["semantic"] + 1),
         store=SimpleNamespace(save_relationship=lambda r: None))
+    # Phase 15.1：cognition 是唯一 C3 形成 owner（spy 记录 C6 事件）
+    cog_events = {}
+    app.cognition = SimpleNamespace(
+        record_event=lambda event_type, **k: cog_events.__setitem__(
+            event_type, cog_events.get(event_type, 0) + 1) or SimpleNamespace(event_id="evx"))
     # Scheduler 已**移除**互动 consolidation（H1-FINAL §8）—— 计数应为 0
     sched = Scheduler(bus, se, None, None, None, None, None)
     sched.emotion = app.emotion
@@ -579,33 +587,42 @@ def _memory_counter_app():
     ie.on_user_takeover = app._on_user_takeover_interaction
     ie.on_meaningful_interaction = app._on_meaningful_interaction
     app._mem = mem
+    app._cog_events = cog_events
     return app, ie, bus, se, sched
 
 
 def test_one_petting_creates_at_most_one_semantic_long_term_memory():
     app, ie, bus, se, sched = _memory_counter_app()
     ie.emit_event("petting", "head")
-    assert app._mem["semantic"] == 1, f"App 语义记忆应恰好 1 条: {app._mem}"
-    assert app._mem["consolidate"] == 0, f"Scheduler 不得再 consolidation（同一事件第二条记忆）: {app._mem}"
+    # Phase 15.1：App 不再直接形成 C3（0 次直接 observe）；C6 USER_PET 恰好一次（单一 owner）
+    assert app._mem["semantic"] == 0, f"App 不得直接 observe（C3 单一 owner = cognition）: {app._mem}"
+    assert app._cog_events.get("USER_PET") == 1, app._cog_events
+    assert app._mem["consolidate"] == 0, f"Scheduler 不得再 consolidation（双重 owner）: {app._mem}"
 
 
 def test_one_poke_creates_at_most_one_semantic_long_term_memory():
     app, ie, bus, se, sched = _memory_counter_app()
     ie.emit_event("poke", "whole")
-    assert app._mem["semantic"] == 1 and app._mem["consolidate"] == 0, app._mem
+    assert app._mem["semantic"] == 0 and app._cog_events.get("USER_PET") == 1, \
+        (app._mem, app._cog_events)
+    assert app._mem["consolidate"] == 0, app._mem
 
 
 def test_one_drag_creates_at_most_one_semantic_long_term_memory():
     app, ie, bus, se, sched = _memory_counter_app()
     ie.emit_event("drag", "whole")
-    assert app._mem["semantic"] == 1 and app._mem["consolidate"] == 0, app._mem
+    assert app._mem["semantic"] == 0 and app._cog_events.get("USER_PET") == 1, \
+        (app._mem, app._cog_events)
+    assert app._mem["consolidate"] == 0, app._mem
 
 
 def test_repeated_distinct_interactions_remain_distinct_events():
-    """三次**不同**语义事件（petting/poke/drag）→ 3 条独立语义记忆。"""
+    """三次**不同**语义事件（petting/poke/drag）→ 3 条独立 C6 事件；
+    C3 形成由 cognition 单一 owner（reinforce 合并），App 不直接 observe。"""
     app, ie, bus, se, sched = _memory_counter_app()
     ie.emit_event("petting", "head")
     ie.emit_event("poke", "whole")
     ie.emit_event("drag", "whole")
-    assert app._mem["semantic"] == 3, f"三次不同语义事件 → 3 条语义记忆: {app._mem}"
+    assert app._cog_events.get("USER_PET") == 3, f"3 次互动 → 3 条 C6 事件: {app._cog_events}"
+    assert app._mem["semantic"] == 0, f"App 不得直接形成 C3: {app._mem}"
     assert app._mem["consolidate"] == 0

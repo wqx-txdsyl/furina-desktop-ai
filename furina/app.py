@@ -407,12 +407,6 @@ class Furina:
     # -------------------------------------------------- 互动 → 记忆/关系（legacy-plan/4 §27）
     def _on_meaningful_interaction(self, ev) -> None:
         kind = ev.type.value
-        # Phase 14.1 §7：C6 MEANINGFUL_INTERACTION（objective event reference，owner）
-        bridge = getattr(self, "_event_bridge", None)
-        if bridge is not None and kind in ("petting", "poke", "drag"):
-            bridge.record("MEANINGFUL_INTERACTION", key=f"interact:{kind}:{ev.count or 0}:{id(ev)}",
-                          payload={"kind": kind, "count": int(getattr(ev, "count", 0) or 0)},
-                          source="interaction", importance=0.4)
         # 关系：唯一写入口 = RelationshipEngine.apply(event)（§12：Relationship → RelationshipEngine owns）。
         # 事件同一份，关系引擎与记忆各自消费，**不做 Memory → Relationship**。
         if kind in ("petting", "poke", "drag"):
@@ -429,12 +423,19 @@ class Furina:
                 self.memory.store.save_relationship(self.relationship.state)
             except Exception:
                 pass
-        # 形成生活记忆（重要互动才记，legacy-plan/6 §9）—— 记忆引擎只负责记忆，不写关系
-        if ev.count == 1 and kind in ("petting", "drag", "poke"):
-            self.memory.observe(
-                f"用户对我{({'petting':'摸头','drag':'拖拽','poke':'戳'}.get(kind,'互动'))}",
-                level=MemoryLevel.EPISODIC, source=MemorySource.INTERACTION,
-                importance=0.45, context=f"互动类型={kind}")
+        # Phase 15.1 §3：**C3 单一形成权威** —— 互动现实 → C6 USER_PET → cognition
+        # consolidation → C3（带 provenance；重复琐碎互动 reinforce/抑制）。
+        # 不再由 App 直接 memory.observe（避免 provenance-less + 双重 owner）。
+        if kind in ("petting", "poke", "drag"):
+            try:
+                cog = getattr(self, "cognition", None)
+                if cog is not None:
+                    cog.record_event(
+                        "USER_PET", source="interaction", importance=0.45,
+                        payload={"kind": kind, "count": int(getattr(ev, "count", 0) or 0)},
+                        consolidate=True)
+            except Exception:
+                pass
 
     # -------------------------------------------------- Agent → 角色身体同步（legacy-plan/5 §15）
     def _on_agent_body(self, phase: str) -> None:
@@ -489,10 +490,18 @@ class Furina:
             self.emotion.apply_event(EVENT_FEED, tired_hint=self._tired_hint())
         except Exception:
             pass
-        # 生活记忆（legacy-plan/6）
-        self.memory.observe(f"用户喂了我{food.name}", level=MemoryLevel.EPISODIC,
-                            source=MemorySource.INTERACTION, importance=0.4,
-                            outcome=f"饥饿={res['hunger']} 满足={res['satisfaction']}")
+        # Phase 15.1 §3：**C3 单一形成权威** —— 喂食现实 → C6 USER_FEED → cognition
+        # consolidation → 可选 C3（带 provenance）。不再 App 直接 memory.observe。
+        try:
+            cog = getattr(self, "cognition", None)
+            if cog is not None:
+                cog.record_event(
+                    "USER_FEED", source="interaction", importance=0.5,
+                    payload={"food": food.name,
+                             "outcome": f"饥饿={res['hunger']} 满足={res['satisfaction']}"},
+                    consolidate=True)
+        except Exception:
+            pass
         # 关键：喂食作为“重要事件”触发 LifeBrain 立即重决策，并短暂进入 eat 状态
         # （有 duration + next_think_in，吃完后 LifeBrain 会看到 hunger 已降，自然退出 eat）。
         self.state.state.intent.action = "eat"
@@ -852,13 +861,10 @@ class Furina:
                 res = self.agent.execute(req, dict(extra_context or {}), task_auth=task_auth)
             # §7：AgentRuntime.execute 已发出 AGENT_STARTED/COMPLETED/FAILED（唯一 owner）；
             # App 层**不重复 emit**，只做记忆整合。
-            # H1 §4.1：**记忆写入是域变更** → 经 dispatcher 回 owner 线程执行（worker 不直写 DB）。
-            if res.get("status") == "completed" and res.get("goal"):
-                goal = str(res.get("goal"))
-                self._rt_dispatcher().submit(
-                    lambda: self.memory.observe(f"我帮用户{text}", level=MemoryLevel.EPISODIC,
-                                                source=MemorySource.AGENT_TASK, importance=0.55,
-                                                outcome=goal))
+            # Phase 15.1 §3：**C3 单一形成权威** —— Agent 成功记忆由 C6 AGENT_COMPLETED →
+            # cognition consolidation 形成（persist_agent_task 已 record_event(AGENT_COMPLETED,
+            # consolidate=True) 带 provenance）；**删除** App worker 直接 memory.observe
+            # （避免 provenance-less + 双重 owner）。
         except Exception as e:
             log.warning("agent worker err: %s", e)
         # 任务结束：task_auth 是局部对象，随任务自然销毁 —— 不触碰其它并发 task 的 context。
@@ -1231,12 +1237,36 @@ class Furina:
             return "praise"
 
     # -------------------------------------------------- Phase 13C §28-31：对话→记忆（conservative）
+    def _observe_with_provenance(self, content, *, level, source, importance,
+                                 context="", outcome=""):
+        """对话语义观察记忆（Phase 15.1 G2）：先落 C6 USER_STATEMENT_OBSERVED（客观事件），
+        再带 source_event_ids 形成 C3 —— 单一形成 owner + 可追溯。
+
+        cognition 缺失（测试外壳/旧直调）→ 退化为直接 observe（非 production 现实路径，
+        文档说明：仅测试 helper 与无 cognition 的兼容外壳）。
+        """
+        cog = getattr(self, "cognition", None)
+        src_ids = []
+        if cog is not None:
+            try:
+                ev = cog.record_event("USER_STATEMENT_OBSERVED",
+                                      payload={"text": (content or "")[:200],
+                                               "context": (context or "")[:50]},
+                                      source="dialogue", importance=0.2, consolidate=False)
+                src_ids = [ev.event_id]
+            except Exception:
+                pass
+        return self.memory.observe(content, level=level, source=source,
+                                   importance=importance, context=context, outcome=outcome,
+                                   source_event_ids=src_ids)
+
     def _maybe_observe_conversation(self, text: str) -> None:
         """只对高置信"用户信息/计划/偏好/承诺"做记忆候选（不盲存所有闲聊；无新 LLM）。
 
         R2.1 P1-3：plan 确定性提取扩展（我今天准备/我今天打算/我明天准备/我今晚打算/
         我这周计划…）+ follow-up（做完以后…）挂到最近一条 user plan 记忆（context 联动），
         让"今天准备做什么？/做完以后会怎么样？"能被检索到事实。
+        Phase 15.1：全部观察记忆经 `_observe_with_provenance`（C6 + source_event_ids）。
         """
         import re
         t = (text or "").strip()
@@ -1247,14 +1277,14 @@ class Furina:
             plan_m = re.search(r"我(今天|明天|今晚|这周|这两天|这个月)?(准备|打算|计划)", t)
             if plan_m:
                 self._last_user_plan = t
-                self.memory.observe(t, level=MemoryLevel.EPISODIC,
-                                    source=MemorySource.CONVERSATION,
-                                    importance=0.5, context="user_plan")
+                self._observe_with_provenance(t, level=MemoryLevel.EPISODIC,
+                                              source=MemorySource.CONVERSATION,
+                                              importance=0.5, context="user_plan")
                 return
             # 2) 计划 follow-up（做完以后应该…）→ 联动最近一条 user plan
             follow_m = re.search(r"(做完|弄完|搞定|完成后|忙完)(以后|之后|了)?(应该|就会|可以|大概)?", t)
             if follow_m and getattr(self, "_last_user_plan", None):
-                self.memory.observe(
+                self._observe_with_provenance(
                     f"{t}（关于：{self._last_user_plan}）",
                     level=MemoryLevel.EPISODIC, source=MemorySource.CONVERSATION,
                     importance=0.45, context="user_plan_followup",
@@ -1262,9 +1292,9 @@ class Furina:
                 return
             # 3) 一般用户信息/偏好/承诺（保守，保持原语义）
             if re.search(r"我(今晚|明天|这周|准备|打算|计划|要|想|正在)|我(喜欢|不喜欢|最怕|讨厌|最爱|习惯)|我(最近|这两天|这几|从今天起)", t):
-                self.memory.observe(t, level=MemoryLevel.EPISODIC,
-                                    source=MemorySource.CONVERSATION,
-                                    importance=0.4, context="user_speech")
+                self._observe_with_provenance(t, level=MemoryLevel.EPISODIC,
+                                              source=MemorySource.CONVERSATION,
+                                              importance=0.4, context="user_speech")
         except Exception:
             pass
 

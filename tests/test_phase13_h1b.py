@@ -46,32 +46,45 @@ def _sched_stub():
     return sched, bus, se
 
 
-# ================================================================ §4.1 Agent 记忆回 owner
+# ================================================================ §4.1 Agent 记忆回 owner（Phase 15.1：C3 单一 owner = cognition）
 class _FakeAgentDone:
     status = "COMPLETED_VERIFIED"
+    def __init__(self):
+        self.on_task_finished = None
     def execute(self, req, ctx=None, task_auth=None):
+        if self.on_task_finished is not None:
+            self.on_task_finished({
+                "task_id": "t1", "status": "COMPLETED_VERIFIED", "goal": "打开记事本",
+                "original_request": "打开记事本", "verified": True,
+                "result_summary": "完成", "error": "",
+                "steps": [], "artifacts": [], "plan_json": "{}", "permission_summary": ""})
         return {"status": "completed", "goal": "打开记事本"}
 
 
 def test_agent_success_memory_observe_runs_on_owner_thread():
+    """Agent 成功后的认知写（C7 persist + C6/C3 形成）必须在 owner 线程（worker 不直写）。"""
     app = _app_stub()
     d = app._rt_dispatcher()
     d.bind_owner()
     app.agent = _FakeAgentDone()
-    seen = {}
-    orig = app.memory.observe
-    def _tracked(*a, **k):
-        if "帮用户" in str(a[0]):
-            seen["thread"] = threading.get_ident()
-        return orig(*a, **k)
-    app.memory.observe = _tracked
+    cog_writes = {}
+    class _CogSpy:
+        def persist_agent_result(self, *a, **k):
+            cog_writes["thread"] = threading.get_ident()
+        def record_event(self, *a, **k):
+            cog_writes["event"] = "recorded"
+            return SimpleNamespace(event_id="ev_x")
+    app.cognition = _CogSpy()
+    # 生产接线（与 Furina.__init__ 一致）：worker 产出 record → dispatcher 回 owner persist
+    app.agent.on_task_finished = lambda rec: d.submit(lambda: app._persist_agent_task(rec))
     t = threading.Thread(target=app._agent_worker, args=("打开记事本", {}))
     t.start(); t.join()
-    # worker 提交后、drain 前：memory.observe 尚未执行
-    assert seen == {}, "worker 不得直接写记忆（域变更）"
+    # worker 提交后、drain 前：认知写尚未执行（worker 不直写 authoritative DB）
+    assert cog_writes == {}, "worker 不得直接写认知权威（C7/C3）"
     d.drain()
-    assert seen.get("thread") == d.owner_thread_id, \
-        f"Agent 成功后的记忆写入必须在 owner 线程: {seen.get('thread')} != {d.owner_thread_id}"
+    assert cog_writes.get("thread") == d.owner_thread_id, \
+        f"Agent 成功后的认知写必须在 owner 线程: {cog_writes.get('thread')} != {d.owner_thread_id}"
+    assert cog_writes.get("event") == "recorded"
 
 
 # ================================================================ §4.2 自主 Dialogue LLM 移出 owner
@@ -250,6 +263,9 @@ def test_feed_all_domain_effects_precede_dialogue_worker():
     app.bus = SimpleNamespace(emit=lambda *a, **k: None)
     app._sched = SimpleNamespace(interrupt_life=lambda r: order.append("interrupt"),
                                  on_user_response=lambda: order.append("cancel_bid"))
+    # Phase 15.1：喂食 → C6 USER_FEED → cognition（C3 单一 owner）；App 不再直接 memory.observe
+    app.cognition = SimpleNamespace(
+        record_event=lambda *a, **k: order.append("memory") or SimpleNamespace(event_id="ev_f"))
     started = threading.Event()
     class _DB:
         def say(self, **kw):
