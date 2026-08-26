@@ -114,9 +114,10 @@ class AgentRuntime:
                                   permission_summary="")
                 return {"status": "failed", "reason": str(e), "results": results,
                         "task_id": task_id, "task_record": self._last_task_record}
-            # 权限检查（Phase 14.1：最终 effective permission + Phase 14.1.1 FINAL：scope 先于 level）
+            # 权限检查（Phase 14.1：最终 effective permission + Phase 14.1.1 FINAL：scope 先于 level
+            # + Phase 14 FINAL：tool-aware derived path scope）
             eff = self._perm_resolver.effective_permission(tool, step.args)
-            step_paths = self._step_paths(step.args)
+            step_paths = self._step_paths(step.tool, step.args)
             decision = self.permission.check(f"{tool.description}：{step.args}", eff,
                                              task_auth=task_auth, tool=step.tool,
                                              paths=step_paths)
@@ -231,12 +232,16 @@ class AgentRuntime:
                 log.warning("task history persist callback failed: %s", e)
 
     @staticmethod
-    def _step_paths(args: Dict[str, Any]) -> Tuple[str, ...]:
-        """步骤涉及的**所有** filesystem path（供 task-scoped allowed_path_root 全查）。
+    def _step_paths(tool_name: str, args: Dict[str, Any]) -> Tuple[str, ...]:
+        """步骤涉及的**所有**最终 filesystem path（tool-aware；供 task-scoped root 全查）。
 
         - path/base/source/dest/target/file 全部收集；
         - rename 的 new_name 是 basename → 计算最终 destination（parent/new_name）单独加入，
-          **不**把 new_name 当 absolute path 单独检查。
+          **不**把 new_name 当 absolute path 单独检查；
+        - **fs.make_dirs（Phase 14 FINAL derived path scope）**：names[] 中**每一个**名称的
+          **最终目标** resolve(base/name) 都必须送入 scope validation —— 工具真正写入的是
+          base/name，不是 args 里叫 base 的字段。absolute name 直接按自身；相对 name 拼 base
+          后归一化（"../../outside" 归一化后越出 root → DENY；"C:/outside" absolute → DENY）。
         """
         import os as _os
         paths: List[str] = []
@@ -250,6 +255,19 @@ class AgentRuntime:
         if isinstance(p, str) and p.strip() and isinstance(nn, str) and nn.strip():
             parent = _os.path.dirname(_os.path.abspath(_os.path.expanduser(p)))
             paths.append(_os.path.join(parent, nn))
+        if tool_name == "fs.make_dirs":
+            base = args.get("base")
+            names = args.get("names")
+            if isinstance(base, str) and base.strip() and isinstance(names, list):
+                base_abs = _os.path.abspath(_os.path.expanduser(base))
+                for n in names:
+                    if not isinstance(n, str) or not n.strip():
+                        continue
+                    if _os.path.isabs(n):
+                        dest = n                      # absolute name → 自身（pathlib 行为）
+                    else:
+                        dest = _os.path.join(base_abs, n)
+                    paths.append(dest)
         return tuple(paths)
 
     @staticmethod

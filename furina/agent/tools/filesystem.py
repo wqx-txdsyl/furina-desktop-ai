@@ -50,14 +50,34 @@ class MakeDirsTool(BaseTool):
     name = "fs.make_dirs"
     description = "在给定目录下创建多个文件夹"
     permission = Permission.L1_LOW_WRITE
+    schema = {"type": "object", "properties": {"base": {"type": "string"},
+                                               "names": {"type": "array"}},
+              "required": ["base", "names"]}
 
     def run(self, base: str = "~", names: List[str] = None) -> ToolResult:
         names = names or []
         base_path = _resolve(base)
+        base_resolved = base_path.resolve()
+        safe_names = []
         for n in names:
+            # Phase 14 FINAL defense-in-depth：语义是"在 base 下创建子目录"
+            if not isinstance(n, str) or not n.strip():
+                return ToolResult(False, error="空目录名禁止", verified=False)
+            if os.path.isabs(n):
+                return ToolResult(False, error=f"absolute path 目录名禁止: {n}", verified=False)
+            try:
+                dest = (base_path / n).resolve()
+            except Exception as e:
+                return ToolResult(False, error=str(e), verified=False)
+            if not (dest == base_resolved or base_resolved in dest.parents):
+                return ToolResult(False,
+                                  error=f"目录名越出 base（.. 穿越/越界）禁止: {n}",
+                                  verified=False)
+            safe_names.append(n)
+        for n in safe_names:
             (base_path / n).mkdir(exist_ok=True)
-        return ToolResult(True, data={"created": names},
-                          verified=True, note=f"在 {base_path} 创建 {len(names)} 个目录")
+        return ToolResult(True, data={"created": safe_names},
+                          verified=True, note=f"在 {base_path} 创建 {len(safe_names)} 个目录")
 
 
 class ReadFileTool(BaseTool):
