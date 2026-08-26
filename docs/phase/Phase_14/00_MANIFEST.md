@@ -11,6 +11,7 @@
 - `Phase_14_Final_Closure_Patch_Task_Brief.md`
 - `Phase_14_Reviewer_Residual_Closure_Task_Brief.md`
 - `03_Phase_14_Final_Reviewer_Residual_R6_R12_Task_Brief_EXACT.md`
+- `05_Phase_14_Final_Reviewer_Residual_R7_R10_FailClosed_Task_Brief_EXACT.md`
 - `Phase 15.1 blind reviewer findings`
 
 ## Files
@@ -22,3 +23,5 @@
 | `02_Phase_14_Reviewer_Residual_Closure_Task_Brief_EXACT.md` | EXACT_RECOVERED |
 | `03_Phase_14_Final_Reviewer_Residual_R6_R12_Task_Brief_EXACT.md` | EXACT_RECOVERED |
 | `04_Phase_14_Final_Reviewer_Residual_R6_R12_Closeout_Report_EXACT.md` | EXACT_RECOVERED |
+| `05_Phase_14_Final_Reviewer_Residual_R7_R10_FailClosed_Task_Brief_EXACT.md` | EXACT_RECOVERED |
+| `06_Phase_14_Final_Reviewer_Residual_R7_R10_FailClosed_Closeout_Report_EXACT.md` | EXACT_RECOVERED |

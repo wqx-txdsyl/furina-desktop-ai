@@ -60,3 +60,5 @@
 | 14 | `02_Phase_14_Reviewer_Residual_Closure_Task_Brief_EXACT.md` | `EXACT_RECOVERED` |
 | 14 | `03_Phase_14_Final_Reviewer_Residual_R6_R12_Task_Brief_EXACT.md` | `EXACT_RECOVERED` |
 | 14 | `04_Phase_14_Final_Reviewer_Residual_R6_R12_Closeout_Report_EXACT.md` | `EXACT_RECOVERED` |
+| 14 | `05_Phase_14_Final_Reviewer_Residual_R7_R10_FailClosed_Task_Brief_EXACT.md` | `EXACT_RECOVERED` |
+| 14 | `06_Phase_14_Final_Reviewer_Residual_R7_R10_FailClosed_Closeout_Report_EXACT.md` | `EXACT_RECOVERED` |
