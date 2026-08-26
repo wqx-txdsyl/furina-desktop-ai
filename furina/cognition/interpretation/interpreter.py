@@ -56,10 +56,53 @@ _DONE_MARKERS = ("做完了", "完成了", "搞定", "弄好了", "终于做完"
                  "做完测试", "测试完了", "任务完成", "报告完成", "交完", "写完了", "测完了")
 
 # 明确改变声明（supersede 触发）："现在不/不再/已经不太/最近不/不怎么"
-_CHANGE_RE = re.compile(r"(?:现在|最近|如今|已经|其实)?(?:不|不再|不太|不怎么|没|少)(?:听|喝|吃|玩|看|喜欢|爱|用|去|买)?(.{2,40}?)(?:了)?(?:。|！|!|$)")
+_CHANGE_RE = re.compile(r"(?:现在|最近|如今|已经|其实)?(?:不怎么|不再|不太|不|没|少)(?:听|喝|吃|玩|看|喜欢|爱|用|去|买|怎么)?(.{2,40}?)(?:了)?(?:。|！|!|$)")
 
 # transient（禁 lifelong）："不错/好听/还行/可以" 无主语归属时
 _TRANSIENT_HINTS = ("这首歌", "这个", "这歌", "那首", "不错", "好听", "还行")
+
+# Phase 15.1：计划完成目标提取（"桌宠测试做完了" → 桌宠测试；"我终于做完了" → 无 → ambiguous）
+# 注意顺序：长动词在前（做完了 > 完了），空名词的匹配继续尝试更短动词（"测试完了"→测试+完了）。
+_COMPLETION_VERBS = ("做完了", "测试完了", "测完了", "写完了", "交完了", "弄好了",
+                     "搞定了", "完成了", "完了", "做完", "完成", "搞定", "弄好", "写完", "测完")
+_PLAN_PREFIX_STRIP = ("我", "终于", "已经", "总算", "也", "还", "就", "把", "刚", "现在", "这周", "今天")
+
+
+def _completion_target(text: str):
+    """从完成声明提取稳定实体（唯一关联）；无法唯一识别 → None（ambiguous，禁止全完成）。"""
+    t = (text or "").strip()
+    changed = True
+    while changed and t:
+        changed = False
+        for p in _PLAN_PREFIX_STRIP:
+            if t.startswith(p):
+                t = t[len(p):]
+                changed = True
+                break
+    for verb in _COMPLETION_VERBS:
+        if t.endswith(verb):
+            noun = t[: -len(verb)].rstrip("了。！! ").strip()
+            if noun and len(noun) >= 2 and noun not in _PLAN_PREFIX_STRIP:
+                return noun[:30]
+            continue                    # 空名词 → 尝试更短动词（如 测试+完了）
+    for verb in ("做完", "完成", "搞定", "弄好", "写完", "测完"):
+        if t.startswith(verb):
+            noun = t[len(verb):].rstrip("了。！! ").strip()
+            return noun[:30] if noun and len(noun) >= 2 else None
+    return None
+
+
+def _change_target(text: str):
+    """'其实最近不怎么听陈奕迅了' → 陈奕迅（preference 实体）；无 → None。"""
+    m = _CHANGE_RE.search(text or "")
+    if not m:
+        return None
+    cand = m.group(1).strip().rstrip("了。！! ")
+    # 去掉残留动词（"听陈奕迅" 里的 听 可能被可选组漏掉）
+    for v in ("听", "喝", "吃", "玩", "看", "喜欢", "爱", "用", "去", "买"):
+        if cand.startswith(v) and len(cand) > len(v) + 1:
+            cand = cand[len(v):]
+    return cand[:30] if cand else None
 
 
 class InterpretationEngine:
@@ -78,18 +121,23 @@ class InterpretationEngine:
         ev_ids = list(source_event_ids or [])
         out: List[InterpretationCandidate] = []
 
-        # 1) 完成声明 → PLAN_COMPLETED（证据可靠时，目标 C4 计划生命周期）
+        # 1) 完成声明 → PLAN_COMPLETED（证据可靠时；目标唯一才关联，否则 ambiguous）
         if any(m in t for m in _DONE_MARKERS):
-            out.append(self._mk(ev_ids, "PLAN_COMPLETED", "user", "plan_completed", t[:80],
+            target = _completion_target(t)
+            pred = f"plan:{target}" if target else "plan:__ambiguous__"
+            out.append(self._mk(ev_ids, "PLAN_COMPLETED", "user", pred, t[:80],
                                 0.8, "COMPLETION", "DATED", "C4",
-                                "完成声明（做完了/完成了）→ 关联 ACTIVE PLAN 转 COMPLETED"))
+                                "完成声明（做完了/完成了）→ 关联唯一 ACTIVE PLAN 转 COMPLETED；"
+                                "无法唯一识别 → 不自动完成"))
 
-        # 2) 明确改变声明 → 当前偏好变化（supersede 旧 item 的依据；不覆盖，走 lifecycle）
+        # 2) 明确改变声明 → 当前偏好变化（实体级 supersede 依据）
         m = _CHANGE_RE.search(t)
         if m and any(k in t for k in ("不", "不再", "不太", "不怎么", "没")):
-            out.append(self._mk(ev_ids, "PREFERENCE_CHANGED", "user", "preference",
+            target = _change_target(t)
+            pred = f"preference:{target}" if target else "preference:__unknown__"
+            out.append(self._mk(ev_ids, "PREFERENCE_CHANGED", "user", pred,
                                 m.group(0)[:60], 0.75, "DIRECT_STATEMENT", "PERSISTENT",
-                                "C4", "明确偏好改变 → 旧 item SUPERSEDED，新事实 ACTIVE"))
+                                "C4", "明确偏好改变（实体级）→ 仅该实体旧 item SUPERSEDED"))
 
         # 3) 明确高置信声明（复用 UserModelExtractor：PLAN/PREFERENCE/DISLIKE/CPREF/FACT）
         cand = self._extractor.extract(t)

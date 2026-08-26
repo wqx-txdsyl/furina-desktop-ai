@@ -38,15 +38,18 @@ class RelationshipStore:
         return self._engine.apply(event, strength=strength, reason=reason)
 
     # -------------------------------------------------- milestones（历史 note，非 current truth）
-    def record_milestone(self, milestone_type: str, note: str = "") -> None:
+    def record_milestone(self, milestone_type: str, note: str = "",
+                         source_event_id: str = "") -> None:
+        """Phase 15.1：milestone 必须可追溯 —— source_event_id → 精确 C6 event（G4）。"""
         self._db.execute(
-            "INSERT INTO relationship_milestones(milestone_type,note,timestamp) VALUES(?,?,?)",
-            (milestone_type, (note or "")[:500], time.time()))
+            "INSERT INTO relationship_milestones(milestone_type,note,timestamp,source_event_id) "
+            "VALUES(?,?,?,?)",
+            (milestone_type, (note or "")[:500], time.time(), str(source_event_id or "")))
 
     def milestones(self, limit: int = 20) -> List[Dict[str, Any]]:
         rows = self._db.query_all(
-            "SELECT milestone_id,milestone_type,note,timestamp FROM relationship_milestones "
-            "ORDER BY timestamp DESC LIMIT ?", (limit,))
+            "SELECT milestone_id,milestone_type,note,timestamp,source_event_id "
+            "FROM relationship_milestones ORDER BY timestamp DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 
     # -------------------------------------------------- 不变式证明

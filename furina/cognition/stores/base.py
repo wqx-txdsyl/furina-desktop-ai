@@ -172,6 +172,9 @@ _COGNITION_MIGRATIONS = [
      "temporal_uncertain"),
     ("ALTER TABLE user_model_items ADD COLUMN declared_at REAL NOT NULL DEFAULT 0",
      "declared_at"),
+    # Phase 15.1：C5 milestone → C6 evidence provenance（forward，幂等，非破坏）
+    ("ALTER TABLE relationship_milestones ADD COLUMN source_event_id TEXT NOT NULL DEFAULT ''",
+     "source_event_id"),
 ]
 
 

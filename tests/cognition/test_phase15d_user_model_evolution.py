@@ -73,7 +73,7 @@ def test_plan_lifecycle_active_then_completed(tmp_path):
     plans_after = _active(hub, "PLAN")
     assert plans_after == [], "COMPLETED plan 不得继续 active"
     rows = hub._db._conn.execute(
-        "SELECT status FROM user_model_items WHERE category='PLAN' AND key='plan_today'").fetchall()
+        "SELECT status FROM user_model_items WHERE category='PLAN' AND key LIKE 'plan:%'").fetchall()
     assert any(r0[0] == "completed" for r0 in rows), "plan 必须 COMPLETED"
     hub.close()
 

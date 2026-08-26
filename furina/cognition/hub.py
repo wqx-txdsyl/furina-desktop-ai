@@ -28,13 +28,33 @@ from .stores.user_model import UserModelStore
 log = get_logger("cognition.hub")
 
 # Phase 14J：deterministic conservative user-model extraction（禁止模糊一句 → 永久人格标签）
-_PLAN_RE = re.compile(r"(今天|明天|后天|下周|这周|等会|一会儿|待会|马上|月底|打算|准备).{0,24}(完成|做|写|测|整理|学|练|去|弄|处理|搞定|交)")
+# Phase 15.1：**entity-specific identity** —— 不同偏好主体/计划各自独立 ACTIVE（不同 key），
+# 同主体修正才 supersede（不再用全局 'preference' / 'plan_today' 唯一身份）。
+_PLAN_RE = re.compile(r"(今天|明天|后天|下周|这周|等会|一会儿|待会|马上|月底|打算|准备|计划|要).{0,24}(完成|做|写|测|整理|学|练|去|弄|处理|搞定|交)")
 _PREF_RE = re.compile(r"(?:我(?:真的|特别|很|超)?喜欢|最爱|超爱)(.{2,40}?)(?:。|！|!|$)")
 _DISLIKE_RE = re.compile(r"(?:我?(?:不太|很不|讨厌|不喜欢|烦|嫌))(?:别人|你|人|一直|总|总是|老|老是)?(.{2,40}?)(?:。|！|!|$)")
 # 指令式沟通偏好：不要/不许/请别/别再/少（裸"别"排除"别人"里的"别"）
 _CPREF_RE = re.compile(r"(?:不要|不许|请别|别再|少|(?<!人)别)(?:一直|总是|老是|动不动|天天|再)?(?:跟我|给我|对我|跟|给)?(.{2,40}?)(?:。|！|!|$)")
 _FACT_RE = re.compile(r"(?:我是|我是个|我是位|我叫)(.{1,30}?)(?:。|！|!|$)")
 _LOW_CONF_MARKERS = ("也许", "可能", "大概", "或许", "有时候", "偶尔", "感觉")
+# 计划目标提取："我今天准备完成桌宠测试" → "桌宠测试"；"今天要测试" → "测试"
+# 连续标记（今天+准备+要…）全部消费后再取目标名词
+_PLAN_TARGET_RE = re.compile(
+    r"(?:我)?(?:(?:今天|明天|后天|下周|这周|等会|一会儿|待会|马上|月底|打算|准备|计划|要)\s*){1,3}"
+    r"(?:要|还|再)?\s*(?:完成|做|写|测|整理|学|练|去|弄|处理|搞定|交)?\s*(.{2,40}?)(?:。|！|!|$)")
+
+
+def _plan_target(text: str) -> str:
+    """从计划声明提取稳定实体（目标名词）；无 → 空（保守，不硬造）。"""
+    m = _PLAN_TARGET_RE.search(text or "")
+    if not m:
+        return ""
+    target = m.group(1).strip()
+    # 去掉残留动作词/时间词（"我今天准备完成桌宠测试" 的 完成 已被可选组吃掉；防御）
+    for w in ("完成", "做完", "写好", "测完", "整理好"):
+        if target.startswith(w) and len(target) > len(w) + 1:
+            target = target[len(w):]
+    return target[:30]
 
 
 class UserModelExtractor:
@@ -51,13 +71,14 @@ class UserModelExtractor:
 
         m = _PLAN_RE.search(t)
         if m and any(k in t for k in ("准备", "打算", "要", "今天", "明天", "后天", "下周", "月底")):
-            return {"category": "PLAN", "key": "plan_today",
+            target = _plan_target(t) or "待定"
+            return {"category": "PLAN", "key": f"plan:{target}",
                     "value": t[:80], "confidence": low_conf or 0.85,
                     "excerpt": t[:120]}
         # DISLIKE 先于 CPREF（"我不喜欢…" 是 dislike 陈述）
         m = _DISLIKE_RE.search(t)
         if m:
-            return {"category": "DISLIKE", "key": "dislike",
+            return {"category": "DISLIKE", "key": f"dislike:{m.group(1).strip()[:30]}",
                     "value": m.group(1)[:60], "confidence": low_conf or 0.7,
                     "excerpt": t[:120]}
         m = _CPREF_RE.search(t)
@@ -67,12 +88,18 @@ class UserModelExtractor:
                     "excerpt": t[:120]}
         m = _PREF_RE.search(t)
         if m:
-            return {"category": "PREFERENCE", "key": "preference",
-                    "value": m.group(1)[:60], "confidence": low_conf or 0.8,
+            entity = m.group(1).strip()
+            for v in ("喝", "吃", "玩", "看", "听", "爱", "用", "去", "买"):
+                if entity.startswith(v) and len(entity) > len(v) + 1:
+                    entity = entity[len(v):]
+                    break
+            entity = entity.rstrip("了。！! ")[:30]
+            return {"category": "PREFERENCE", "key": f"preference:{entity}",
+                    "value": entity, "confidence": low_conf or 0.8,
                     "excerpt": t[:120]}
         m = _FACT_RE.search(t)
         if m:
-            return {"category": "FACT", "key": "self_desc",
+            return {"category": "FACT", "key": f"fact:{m.group(1).strip()[:20]}",
                     "value": m.group(1)[:60], "confidence": low_conf or 0.6,
                     "excerpt": t[:120]}
         return None
@@ -212,17 +239,23 @@ class CognitionHub:
                 "idempotent": True}
 
     def _apply_c4_candidate(self, cand) -> Dict[str, Any]:
-        """C4 候选 → owner 落地（supersede 不 overwrite；计划生命周期）。"""
+        """C4 候选 → owner 落地（entity-specific；supersede 不 overwrite；计划生命周期）。"""
         out: Dict[str, Any] = {"items": [], "plans_completed": [], "superseded": []}
         src = (cand.source_event_ids or [""])[0]
         try:
             if cand.kind == "PLAN_COMPLETED":
-                out["plans_completed"] = self._complete_plans()
+                # Phase 15.1：targeted completion —— 唯一目标才完成；ambiguous 不自动完成
+                if cand.predicate and cand.predicate != "plan:__ambiguous__":
+                    done = self._complete_plan_key(cand.predicate)
+                    if done:
+                        out["plans_completed"].append(done.item_id)
             elif cand.kind == "PREFERENCE_CHANGED":
-                for it in self.user_model.query_active(limit=100, category="PREFERENCE"):
-                    if not cand.predicate or it.key == cand.predicate or it.key == "preference":
-                        self.user_model.supersede_item(it.item_id)
-                        out["superseded"].append(it.item_id)
+                # Phase 15.1：entity-specific supersede —— 只 supersede 该实体旧 item
+                if cand.predicate and cand.predicate != "preference:__unknown__":
+                    for it in self.user_model.query_active(limit=100, category="PREFERENCE"):
+                        if it.key == cand.predicate:
+                            self.user_model.supersede_item(it.item_id)
+                            out["superseded"].append(it.item_id)
             elif cand.kind in ("PLAN", "PREFERENCE", "DISLIKE", "COMMUNICATION_PREFERENCE",
                                "FACT", "HABIT", "INTEREST", "GOAL", "IMPORTANT_DATE"):
                 # deterministic dedupe：同 category+key 且值相同的 ACTIVE item 已存在
@@ -272,8 +305,10 @@ class CognitionHub:
                                             source_event_id=ev.event_id,
                                             source_text_excerpt=u.get("excerpt", ""))
             if plan.get("milestone") and self.relationship is not None:
+                msrc = (plan["milestone"].get("source_event_ids") or [""])[0]
                 self.relationship.record_milestone(plan["milestone"]["type"],
-                                                   plan["milestone"].get("note", ""))
+                                                   plan["milestone"].get("note", ""),
+                                                   source_event_id=msrc)
         except Exception as e:
             log.warning("consolidation failed: %s", e)
 
@@ -362,13 +397,13 @@ class CognitionHub:
             log.warning("apply_user_message failed: %s", e)
         return applied
 
+    def _complete_plan_key(self, key: str):
+        """Phase 15.1：targeted plan completion —— 只完成该实体 key 的 ACTIVE PLAN。"""
+        return self.user_model.complete_plan(key)
+
     def _complete_plans(self) -> List[str]:
-        """证据关联到既有 ACTIVE PLAN → COMPLETED（'终于做完了'）；无 plan → 不动。"""
-        done = []
-        for it in self.user_model.query_active(limit=50, category="PLAN"):
-            self.user_model.complete_plan(it.key)
-            done.append(it.item_id)
-        return done
+        """（legacy 兼容）证据可唯一识别时才完成；否则不动（不批量完成）。"""
+        return []
 
     # -------------------------------------------------- agent result → C7（owner persist）
     def persist_agent_result(self, task_id: str, *, status: str, goal: str = "",
