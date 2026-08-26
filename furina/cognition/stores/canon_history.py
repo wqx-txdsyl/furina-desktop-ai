@@ -95,24 +95,42 @@ class CanonHistoryStore:
                 return dict(u)
         return None
 
+    def _unregistered_evidence_refs(self) -> List[Dict]:
+        """R7-FC：全局 evidence **引用完整性**层 —— 覆盖 EVERY CanonEpisode。
+
+        每个 ``evidence_ids`` 引用都必须解析到唯一注册单元。该层是全局不变量，
+        不依赖 quest / act（精确单幕 / 跨度 / null）/ source_type / 是否主线 /
+        来源是否 USED。有效的 source_id **不能**挽救缺失的 evidence_id。
+        """
+        reg = {u.get("evidence_id"): u for u in self._evidence_units}
+        out: List[Dict] = []
+        for e in self._episodes:
+            for eid in (e.evidence_ids or []):
+                if reg.get(eid) is None:
+                    out.append({"episode": e.episode_id, "evidence": eid,
+                                "reason": "unregistered"})
+        return out
+
     def _evidence_attribution_conflicts(self) -> List[Dict]:
         """episode（确定单幕）与其引用的 evidence registry act 归属矛盾清单。
 
-        规则：episode 声明 quest=Chapter IV + act 为单幕（I..V）时，其引用的 evidence
-        若 registry 也登记了确定 act 且两者不一致 → 冲突（如 act=V 的 episode 引用
-        Act I 庭审场景）。act 为跨度（I-V）或无 act 的 evidence → 不判定冲突。
+        分层校验（R7-FC）：
+        - A 引用完整性（``_unregistered_evidence_refs``）—— 所有 episode 全局生效，
+          未注册 evidence 一律报告（不受精确单幕 gate 限制）；
+        - B 归因兼容性 —— episode 声明 quest=Chapter IV + act 为单幕（I..V）时，
+          其引用的 evidence 若 registry 也登记了确定 act 且两者不一致 → 冲突
+          （如 act=V 的 episode 引用 Act I 庭审场景）。act 为跨度（I-V）/ null 的
+          episode 或 evidence → 不做 B 层判定。
         """
         reg = {u.get("evidence_id"): u for u in self._evidence_units}
-        conflicts: List[Dict] = []
+        conflicts: List[Dict] = list(self._unregistered_evidence_refs())
         for e in self._episodes:
             if (e.act or "") not in ("I", "II", "III", "IV", "V"):
                 continue
             for eid in (e.evidence_ids or []):
                 u = reg.get(eid)
                 if u is None:
-                    conflicts.append({"episode": e.episode_id, "evidence": eid,
-                                      "reason": "unregistered"})
-                    continue
+                    continue      # 缺失引用已在全局完整性层报告（不重复计数）
                 ua = (u.get("act") or "")
                 if ua and ua != e.act:
                     conflicts.append({"episode": e.episode_id, "evidence": eid,
@@ -219,13 +237,20 @@ class CanonHistoryStore:
         }
 
     def _life_stage_source_status(self) -> str:
-        conflicts = self._evidence_attribution_conflicts()
+        # R7-FC：全局 evidence 引用完整性（所有 episode，act 无关）→ 任一缺失引用
+        # 即 fail（任何真实存在的"有效 source + 缺失 evidence"伪装都被拒绝）。
+        missing = self._unregistered_evidence_refs()
+        conflicts = [c for c in self._evidence_attribution_conflicts()
+                     if c.get("reason") != "unregistered"]
         gaps = self._act_support_gaps()
         dups = self._registry_duplicates()
         used = [s for s in self._sources if s.get("status") == "USED"]
         dangling = [e.episode_id for e in self._episodes
                     if not [s for s in (e.source_ids or [])
                             if s in {u["source_id"] for u in used}]]
+        if missing:
+            return ("GAPS:unregistered_evidence="
+                    f"{sorted({m['evidence'] for m in missing})}")
         if dangling:
             return f"GAPS:dangling_sources={dangling}"
         if conflicts:
