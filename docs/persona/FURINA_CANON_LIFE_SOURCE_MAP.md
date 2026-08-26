@@ -42,21 +42,40 @@
 
 ## C2 数据文件
 
-- `data/canon/furina_life_history.json` —— 20+ 条 CanonEpisode（version-controlled、只读）。
-- `data/canon/furina_life_sources.json` —— 上述 SOURCE_ID 机器可读登记。
+- `data/canon/furina_life_history.json` —— 20 条 CanonEpisode（version-controlled、只读）。
+- `data/canon/furina_life_sources.json` —— 上述 SOURCE_ID 机器可读登记（status: USED / NOT_USED / FORBIDDEN）。
 
-> **C2 状态（Phase 15A 更新）**：`STRUCTURE IMPLEMENTED` + `CANON CORPUS = SEED / PARTIAL`（20 条
-> seed episodes 覆盖全部 20 个 mandatory life stages；Act I–IV 具体场景证据不足处标 PARTIAL，不猜）。
-> SRC-004/005/006 提供**可复现 access_locator**（游戏内任务日志/角色档案 + repo 内证据摘要章节），
-> 但 repo 不保存大段原文，仍不声称"全文 transcript 级 source-complete"；完整官方全文扩展留后续
-> Phase（不在 Phase 15 复制盗版全文）。禁止写 FULL CANON LIFE COMPLETE。
+> **C2 状态（Phase 15.1 更新）**：
+> **MANDATORY CANON LIFE SPAN = SOURCE-COMPLETE** —— 20/20 mandatory life stages 全部有
+> **官方来源 provenance**（每条 CanonEpisode 的 source_ids/evidence_ids 解析到**实际使用**的
+> TIER 0 来源；无 dangling；未使用来源不计入完整性 N9）。
+>
+> 这不是说：
+> - repo 存有完整游戏原文（**禁止复制大段版权脚本**——模型 =
+>   官方来源 → 可复现 locator → 有界证据记录/场景引用 → CanonEpisode source_ids/evidence_ids）；
+> - 未来官方新剧情不会再加入。
+>
+> **Act I–V 覆盖**（curated evidence 实际映射；来源 = FURINA_CANON_EVIDENCE.md 的 scene
+> 标签 + 游戏内任务日志定位）：
+>
+> | 覆盖段 | 场景（evidence doc 标签） | 证据 IDs | 状态 |
+> |---|---|---|---|
+> | Chapter IV Act I | 初见旅行者（歌剧院/枫丹初遇）、打招呼 | FUR-005, FUR-033 | COVERED |
+> | Chapter IV Act II | 主线庭审 / 林尼事件调查（"太、太丢人了…"） | FUR-006 | COVERED |
+> | Chapter IV Act III | 被关注（"哎呀哎呀"圆场）、歌剧院被揭穿（"我真的是神明…"） | FUR-007, FUR-008 | COVERED |
+> | Chapter IV Act IV | 被怀疑（"你不会真以为…"）、4.2 开场自辩（"我的力量都转化成了律偿混能"） | FUR-010, FUR-050, FUR-052 | COVERED |
+> | Chapter IV Act V | 歌剧院审判开场（"我魔神芙卡洛斯…"）、审判压力、真相揭示 | FUR-051, FUR-006, FUR-008, FUR-039, FUR-041, FUR-042, FUR-043, FUR-048, FUR-049 | COVERED |
+>
+> 每条 mandatory CanonEpisode 都映射到上述覆盖段（source_ids/evidence_ids 可解析）。
+> 未使用的 Tier 1/2 来源（SRC-007/008/009，cross-check 预留）**不**计入完整性。
 
 ## 验收计数（C2 ACCEPTANCE）
 
-- canon_source_map_entries: 10（SRC-001~010）
-- canon_episode_count: 20
-- tier0_sources: SRC-001~006（evidence doc + 官方游戏文本/角色资料，经 curated seed）
-- tier1_sources: SRC-007, SRC-008（cross-check 预留，本 Phase 未联网取用）
-- tier2_mirror_sources: SRC-009（未取用）
+- canon_source_map_entries: 10（SRC-001~010；SRC-001~006=USED，SRC-007~009=NOT_USED，SRC-010=FORBIDDEN）
+- canon_episode_count: 20（20/20 mandatory stages 全覆盖）
+- canon_span_status: MANDATORY_SPAN_SOURCE_COMPLETE（metrics 计算：无 dangling source_ids）
+- tier0_sources: SRC-001~006（evidence doc + 官方游戏文本/角色资料，全部 USED）
+- tier1_sources: SRC-007, SRC-008（NOT_USED —— 不计入完整性）
+- tier2_mirror_sources: SRC-009（NOT_USED —— 不计入完整性）
 - unsupported_sources_excluded: SRC-010（TIER 3 禁止）
 - runtime_canon_mutable = false

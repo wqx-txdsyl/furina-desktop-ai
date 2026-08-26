@@ -82,6 +82,11 @@ class CanonHistoryStore:
 
     def metrics(self) -> Dict[str, object]:
         eps = self._episodes
+        used = [s for s in self._sources if s.get("status") == "USED"]
+        unused = [s for s in self._sources if s.get("status") == "NOT_USED"]
+        # Phase 15.1：mandatory 20 stages 每个都必须引用 ≥1 个 USED 来源（无 dangling）
+        dangling = [e.episode_id for e in eps
+                    if not [s for s in (e.source_ids or []) if s in {u["source_id"] for u in used}]]
         return {
             "canon_source_map_entries": len(self._sources),
             "canon_episode_count": len(eps),
@@ -90,6 +95,14 @@ class CanonHistoryStore:
             "tier2_mirror_sources": self.tier_counts()["tier2"],
             "unsupported_sources_excluded": self.tier_counts()["tier3"],
             "life_periods_covered": self.periods_covered(),
+            # Phase 15.1：强制人生跨度来源完整性（20/20 阶段有官方来源 provenance）
+            "canon_span_status": ("MANDATORY_SPAN_SOURCE_COMPLETE"
+                                  if not dangling else f"GAPS:{dangling}"),
+            "mandatory_stage_count": len(eps),
+            "mandatory_stages_with_used_source": len(eps) - len(dangling),
+            "sources_used": [u["source_id"] for u in used],
+            "sources_unused_not_counted": [u["source_id"] for u in unused],
+            "dangling_source_ids": dangling,
             "partial_periods": [e.episode_id for e in eps if e.canon_status == "partial"],
             "episodes_with_knowledge_boundary": sum(
                 1 for e in eps if e.furina_knew or e.furina_did_not_know),

@@ -74,7 +74,8 @@
         "FUR-056"
       ],
       "notes": "已人工筛过的 canon provenance seed；本 Phase 唯一 factual 来源",
-      "access_locator": "repo: docs/persona/FURINA_CANON_EVIDENCE.md (FUR-001..056, 已人工筛过 provenance seed)"
+      "access_locator": "repo: docs/persona/FURINA_CANON_EVIDENCE.md (FUR-001..056, 已人工筛过 provenance seed)",
+      "status": "USED"
     },
     {
       "source_id": "SRC-002",
@@ -132,7 +133,8 @@
         "FUR-056"
       ],
       "notes": "从 Evidence 派生的统一人格模型；traceability 表见其 §9",
-      "access_locator": "repo: docs/persona/FURINA_PERSONA_MODEL.md"
+      "access_locator": "repo: docs/persona/FURINA_PERSONA_MODEL.md",
+      "status": "USED"
     },
     {
       "source_id": "SRC-003",
@@ -166,7 +168,8 @@
         "FUR-050"
       ],
       "notes": "IDENTITY_FACTS / PERSONALITY_AXES / CORE_CONTRADICTIONS / SYSTEM_PERSONA",
-      "access_locator": "repo: furina/persona/furina_canon.py"
+      "access_locator": "repo: furina/persona/furina_canon.py",
+      "status": "USED"
     },
     {
       "source_id": "SRC-004",
@@ -194,7 +197,8 @@
         "FUR-051"
       ],
       "notes": "官方游戏内简体中文正式文本；evidence doc 保留 ≤15 字 snippet",
-      "access_locator": "官方游戏内文本 Chapter IV Acts I-V（游戏内任务日志/官方 Story Archive）；repo 内可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.11 + §2.2/2.8/2.9"
+      "access_locator": "官方游戏内文本 Chapter IV Acts I-V（游戏内任务日志/官方 Story Archive）；repo 内可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.11 + §2.2/2.8/2.9",
+      "status": "USED"
     },
     {
       "source_id": "SRC-005",
@@ -213,7 +217,8 @@
         "FUR-055"
       ],
       "notes": "传说任务第一幕中文原文",
-      "access_locator": "官方游戏内文本 传说任务《水的女儿》（游戏内任务日志）；repo 可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.4/2.5 (FUR-019/FUR-055)"
+      "access_locator": "官方游戏内文本 传说任务《水的女儿》（游戏内任务日志）；repo 可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.4/2.5 (FUR-019/FUR-055)",
+      "status": "USED"
     },
     {
       "source_id": "SRC-006",
@@ -271,7 +276,8 @@
         "FUR-056"
       ],
       "notes": "Character Stories 1-5 / Vision / Character Details / Voice-Over 中文原文",
-      "access_locator": "官方游戏内文本 Character Stories 1-5 / Character Details / Vision / Voice-Overs（游戏内角色档案）；repo 可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.1-2.10"
+      "access_locator": "官方游戏内文本 Character Stories 1-5 / Character Details / Vision / Voice-Overs（游戏内角色档案）；repo 可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.1-2.10",
+      "status": "USED"
     },
     {
       "source_id": "SRC-007",
@@ -287,7 +293,8 @@
       "relevance": "身份/时间顺序交叉核验",
       "evidence_ids": [],
       "notes": "本 Phase 未联网取用；标记为交叉核验入口",
-      "access_locator": "HoYoWiki（https://wiki.hoyolab.com，官方检索 '芙宁娜' 角色页）；本 Phase 未联网取用（cross-check 预留）"
+      "access_locator": "HoYoWiki（https://wiki.hoyolab.com，官方检索 '芙宁娜' 角色页）；本 Phase 未联网取用（cross-check 预留）",
+      "status": "NOT_USED"
     },
     {
       "source_id": "SRC-008",
@@ -303,7 +310,8 @@
       "relevance": "场景语境补全",
       "evidence_ids": [],
       "notes": "本 Phase 未联网取用",
-      "access_locator": "HoYoverse/Genshin 官方频道（YouTube/Bilibili 官方账号，检索 'Furina' / 'Masquerade of the Guilty'）；本 Phase 未联网取用（cross-check 预留）"
+      "access_locator": "HoYoverse/Genshin 官方频道（YouTube/Bilibili 官方账号，检索 'Furina' / 'Masquerade of the Guilty'）；本 Phase 未联网取用（cross-check 预留）",
+      "status": "NOT_USED"
     },
     {
       "source_id": "SRC-009",
@@ -319,7 +327,8 @@
       "relevance": "定位文本/补完整上下文（不升级为 TIER 0）",
       "evidence_ids": [],
       "notes": "本 Phase 未取用；如未来使用必须标 access_source=COMMUNITY_MIRROR, original_material=OFFICIAL_GAME_TEXT",
-      "access_locator": "biligame 等社区 Wiki（检索定位官方文本；仅 cross-check）；本 Phase 未取用"
+      "access_locator": "biligame 等社区 Wiki（检索定位官方文本；仅 cross-check）；本 Phase 未取用",
+      "status": "NOT_USED"
     },
     {
       "source_id": "SRC-010",
@@ -335,7 +344,8 @@
       "relevance": "禁止作为 Canon factual 来源",
       "evidence_ids": [],
       "notes": "TIER 3 禁止；绝不进入 CanonEpisode factual fields",
-      "access_locator": "N/A —— TIER 3 禁止来源，无 locator"
+      "access_locator": "N/A —— TIER 3 禁止来源，无 locator",
+      "status": "FORBIDDEN"
     }
   ]
 }
