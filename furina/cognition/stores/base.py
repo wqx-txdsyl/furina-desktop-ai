@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS relationship_milestones(
     note TEXT NOT NULL DEFAULT '',
     timestamp REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS event_processing(
+    event_id TEXT PRIMARY KEY,
+    process_version TEXT NOT NULL,
+    processed_at REAL NOT NULL DEFAULT 0
+);
 """
 
 _SCHEMA_VERSION = "1"

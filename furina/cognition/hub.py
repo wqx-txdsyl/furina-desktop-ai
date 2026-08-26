@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from furina.core import get_logger
 from .consolidation.consolidator import Consolidator
 from .context import CognitiveContextAssembler
-from .models import CognitiveContext, WorkWillingnessInput, WorkWillingnessModel
+from .models import CognitiveContext, LifeEvent, WorkWillingnessInput, WorkWillingnessModel
 from .stores.agent_history import AgentTaskHistoryStore
 from .stores.autobiography import AutobiographicalMemoryStore
 from .stores.base import CognitionDB
@@ -123,13 +123,139 @@ class CognitionHub:
 
         Phase 14.1 §8：返回 LifeEvent（含 event_id），供 UserModel upsert 的 source_event_id
         evidence chain 使用（objective event 先落地 → 拿到 event_id → item 引用它）。
+        Phase 15F：无论 consolidate 与否，事件都标记 processed（inline 路径已处理/由调用方
+        负责）—— 避免 process_pending 重复消费。
         """
         ev = self.events.append(event_type=event_type, payload=payload, source=source,
                                 actor=actor, channel=channel, turn_id=turn_id,
                                 task_id=task_id, importance=importance)
         if consolidate:
             self._apply_consolidation(ev)
+        self._mark_processed(ev.event_id)
         return ev
+
+    # -------------------------------------------------- Phase 15F：Persistent Cognitive Loop
+    def _mark_processed(self, event_id: str, version: str = "15F.1") -> None:
+        try:
+            self._db.execute(
+                "INSERT OR REPLACE INTO event_processing(event_id,process_version,processed_at) "
+                "VALUES(?,?,?)", (event_id, version, time.time()))
+        except Exception:
+            pass
+
+    def _is_processed(self, event_id: str) -> bool:
+        try:
+            return self._db.query_one(
+                "SELECT 1 FROM event_processing WHERE event_id=?", (event_id,)) is not None
+        except Exception:
+            return False
+
+    def process_pending(self, batch: int = 10) -> Dict[str, Any]:
+        """owner：处理未 consolidation 的 C6 事件（cursor+log 幂等；bounded batch）。
+
+        C6 append → pending → 本方法（InterpretationEngine → candidates → owner apply
+        → C3/C4/C5）。同一 event_id + process_version 重复处理 → duplicate=0；
+        重启后不会重复 consolidation，也不会丢未处理事件。
+        """
+        stats: Dict[str, Any] = {"processed": 0, "already_processed": 0,
+                                 "candidates": 0, "memories": 0,
+                                 "user_items": 0, "plans_completed": [],
+                                 "superseded": []}
+        try:
+            rows = self._db.query_all(
+                "SELECT le.* FROM life_events le LEFT JOIN event_processing ep "
+                "ON le.event_id=ep.event_id WHERE ep.event_id IS NULL "
+                "ORDER BY le.created_at ASC LIMIT ?", (batch,))
+        except Exception as e:
+            log.warning("process_pending query failed: %s", e)
+            return stats
+        for row in rows:
+            ev = LifeEvent.from_row(row)
+            if self._is_processed(ev.event_id):
+                stats["already_processed"] += 1
+                continue
+            try:
+                for cand in self.interpretation.interpret_event(ev):
+                    stats["candidates"] += 1
+                    if cand.candidate_target == "C4":
+                        r = self._apply_c4_candidate(cand)
+                        stats["user_items"] += len(r.get("items", []))
+                        stats["plans_completed"].extend(r.get("plans_completed", []))
+                        stats["superseded"].extend(r.get("superseded", []))
+                    elif cand.candidate_target == "C3":
+                        self._apply_c3_candidate(cand, ev)
+                        stats["memories"] += 1
+                self._mark_processed(ev.event_id)
+                stats["processed"] += 1
+            except Exception as e:
+                log.warning("process_pending event %s failed: %s", ev.event_id, e)
+        # cursor 推进（处理进度持久化：重启不重复、不丢失）
+        try:
+            self._db.execute(
+                "INSERT OR REPLACE INTO cognition_meta(key,value) VALUES('last_processed_event_id',?)",
+                (self._db.query_one(
+                    "SELECT COALESCE(MAX(processed_at),0) AS t FROM event_processing")["t"] and
+                 str(self.events.count()) or "0",))
+        except Exception:
+            pass
+        return stats
+
+    def processing_status(self) -> Dict[str, Any]:
+        try:
+            pending = self._db.query_one(
+                "SELECT COUNT(*) AS c FROM life_events le LEFT JOIN event_processing ep "
+                "ON le.event_id=ep.event_id WHERE ep.event_id IS NULL")["c"]
+            processed = self._db.count("event_processing")
+        except Exception:
+            pending, processed = -1, -1
+        return {"pending": int(pending or 0), "processed": int(processed or 0),
+                "idempotent": True}
+
+    def _apply_c4_candidate(self, cand) -> Dict[str, Any]:
+        """C4 候选 → owner 落地（supersede 不 overwrite；计划生命周期）。"""
+        out: Dict[str, Any] = {"items": [], "plans_completed": [], "superseded": []}
+        src = (cand.source_event_ids or [""])[0]
+        try:
+            if cand.kind == "PLAN_COMPLETED":
+                out["plans_completed"] = self._complete_plans()
+            elif cand.kind == "PREFERENCE_CHANGED":
+                for it in self.user_model.query_active(limit=100, category="PREFERENCE"):
+                    if not cand.predicate or it.key == cand.predicate or it.key == "preference":
+                        self.user_model.supersede_item(it.item_id)
+                        out["superseded"].append(it.item_id)
+            elif cand.kind in ("PLAN", "PREFERENCE", "DISLIKE", "COMMUNICATION_PREFERENCE",
+                               "FACT", "HABIT", "INTEREST", "GOAL", "IMPORTANT_DATE"):
+                # deterministic dedupe：同 category+key 且值相同的 ACTIVE item 已存在
+                # （例如 direct-path 已处理）→ 保留原 provenance，不重复 upsert/supersede。
+                key = cand.predicate or "fact"
+                existing = self.user_model.query_active(limit=100, category=cand.kind)
+                same = next((i for i in existing
+                             if i.key == key and str(i.value) == str(cand.value)), None)
+                if same is not None:
+                    out["items"].append(same.item_id)
+                    return out
+                it = self.user_model.upsert_item(
+                    category=cand.kind, key=key, value=cand.value,
+                    confidence=cand.confidence, source_event_id=src,
+                    source_text_excerpt=(cand.reason or "")[:500])
+                out["items"].append(it.item_id)
+        except Exception as e:
+            log.warning("apply c4 candidate failed: %s", e)
+        return out
+
+    def _apply_c3_candidate(self, cand, ev) -> None:
+        """C3 候选 → owner 落地（dedupe+provenance；Failed Agent 不形成成功记忆）。"""
+        from furina.memory import MemoryLevel, MemorySource
+        mem: Dict[str, Any] = {"content": cand.value, "level": MemoryLevel.EPISODIC,
+                               "source_event_ids": [ev.event_id],
+                               "event_type": ev.event_type}
+        if cand.kind == "C3_EPISODIC" or cand.predicate == "agent_task":
+            mem["source"] = MemorySource.AGENT_TASK
+            mem["importance"] = cand.confidence
+        else:
+            mem["source"] = MemorySource.INTERACTION
+            mem["importance"] = max(0.4, cand.confidence)
+        self._form_memory(ev, mem)
 
     def _apply_consolidation(self, ev) -> None:
         try:
@@ -211,14 +337,10 @@ class CognitionHub:
                                    "plans_completed": [], "events": []}
         try:
             for cand in self.interpretation.interpret_text(text):
-                if cand.kind == "PLAN_COMPLETED":
-                    done = self._complete_plans()
-                    applied["plans_completed"].extend(done)
-                elif cand.kind == "PREFERENCE_CHANGED":
-                    for it in self.user_model.query_active(limit=100, category="PREFERENCE"):
-                        if cand.predicate in ("", "preference") or it.key == cand.predicate:
-                            self.user_model.supersede_item(it.item_id)
-                            applied["superseded"].append(it.item_id)
+                if cand.kind in ("PLAN_COMPLETED", "PREFERENCE_CHANGED"):
+                    r = self._apply_c4_candidate(cand)
+                    applied["plans_completed"].extend(r["plans_completed"])
+                    applied["superseded"].extend(r["superseded"])
                 elif cand.kind in ("PLAN", "PREFERENCE", "DISLIKE", "COMMUNICATION_PREFERENCE",
                                    "FACT", "HABIT", "INTEREST", "GOAL", "IMPORTANT_DATE"):
                     ev_type = ("USER_PLAN_DECLARED" if cand.kind == "PLAN"

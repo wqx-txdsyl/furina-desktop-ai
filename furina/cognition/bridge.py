@@ -51,6 +51,12 @@ class EventBridge:
         self._hub.events.append(
             event_type=event_type, payload=payload or {}, source=source,
             channel=channel, turn_id=turn_id, task_id=task_id, importance=importance)
+        # Phase 15F：event terminal trigger —— 追加后由 owner 立即做 bounded 批处理
+        # （idempotent：event_processing log 保证 restart/重复调用不重复 consolidation）。
+        try:
+            self._hub.process_pending(batch=5)
+        except Exception:
+            pass
         return True
 
     def _trim(self) -> None:
