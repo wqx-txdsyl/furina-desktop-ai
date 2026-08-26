@@ -184,6 +184,9 @@ class MemoryEngine:
             event_type=exp.event_type, world_context=exp.world_context,
             recurrence_count=1,
             summary=exp.summary,
+            # Phase 14 Final Closure（INV-C3-2）：新记忆必须保留 Experience 的
+            # C6 事件溯源，禁止静默丢弃 provenance。
+            source_event_ids=list(exp.source_event_ids or []),
         )
         # tag（供检索）
         m.tags = [exp.event_type]

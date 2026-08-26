@@ -175,6 +175,12 @@ _COGNITION_MIGRATIONS = [
     # Phase 15.1：C5 milestone → C6 evidence provenance（forward，幂等，非破坏）
     ("ALTER TABLE relationship_milestones ADD COLUMN source_event_id TEXT NOT NULL DEFAULT ''",
      "source_event_id"),
+    # Phase 14 Final Closure（INV-C4-1/2）：C4 lifecycle transition provenance ——
+    # supersede/complete 必须记录触发它的 canonical C6 event id + 原因（utterance）。
+    ("ALTER TABLE user_model_items ADD COLUMN transition_event_id TEXT NOT NULL DEFAULT ''",
+     "transition_event_id"),
+    ("ALTER TABLE user_model_items ADD COLUMN transition_reason TEXT NOT NULL DEFAULT ''",
+     "transition_reason"),
 ]
 
 

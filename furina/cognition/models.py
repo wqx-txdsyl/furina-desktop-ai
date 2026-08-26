@@ -83,6 +83,10 @@ class UserModelItem:
     # Phase 15D：temporal scope（日期不确定时 temporal_uncertain=1，绝不编日期）
     temporal_uncertain: int = 0
     declared_at: float = 0.0
+    # Phase 14 Final Closure：lifecycle transition provenance ——
+    # supersede/complete 的 canonical C6 trigger event id + 原因（触发 utterance 摘录）
+    transition_event_id: str = ""
+    transition_reason: str = ""
 
     @property
     def value(self) -> Any:
@@ -93,6 +97,7 @@ class UserModelItem:
 
     @classmethod
     def from_row(cls, row) -> "UserModelItem":
+        keys = row.keys()
         return cls(
             item_id=row["item_id"], category=row["category"], key=row["key"],
             value_json=row["value_json"], confidence=float(row["confidence"] or 0.0),
@@ -101,9 +106,13 @@ class UserModelItem:
             valid_from=float(row["valid_from"] or 0.0), valid_to=float(row["valid_to"] or 0.0),
             status=row["status"],
             temporal_uncertain=int(row["temporal_uncertain"] or 0)
-            if "temporal_uncertain" in row.keys() else 0,
+            if "temporal_uncertain" in keys else 0,
             declared_at=float(row["declared_at"] or 0.0)
-            if "declared_at" in row.keys() else 0.0,
+            if "declared_at" in keys else 0.0,
+            transition_event_id=row["transition_event_id"] or ""
+            if "transition_event_id" in keys else "",
+            transition_reason=row["transition_reason"] or ""
+            if "transition_reason" in keys else "",
         )
 
 

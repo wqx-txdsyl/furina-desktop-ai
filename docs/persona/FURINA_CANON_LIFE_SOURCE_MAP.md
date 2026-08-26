@@ -7,6 +7,15 @@
 
 ## 阶段覆盖（15 段）
 
+> ⚠️ **HISTORICAL / DEPRECATED（Phase 14 Final Closure 标记）**
+>
+> 下表是 Phase 15A 之前的旧 15 段登记，其 PARTIAL/COMPLETE 标记与 act 归属已**不再作为
+> canonical mapping**：与下方"Act I–V 覆盖"表以及机器真源
+> `data/canon/furina_evidence_units.json` 存在矛盾（如 FUR-006 被同时列在 Act I / Act II / Act V）。
+> canonical 的唯一权威映射 = `data/canon/furina_evidence_units.json`（evidence → source_type/act）
+> + `data/canon/furina_life_history.json`（episode → evidence_ids）。下表仅保留作历史记录，
+> **禁止再被当作归因依据引用**。
+
 | # | 阶段 | quest/act | 状态 | 主要 Evidence IDs |
 |---|---|---|---|---|
 | 01 | ORIGIN / FOCALORS SEPARATION | 主线 Chapter IV（4.2 揭示） | COMPLETE（seed） | FUR-048, FUR-041, FUR-042 |
@@ -44,6 +53,8 @@
 
 - `data/canon/furina_life_history.json` —— 20 条 CanonEpisode（version-controlled、只读）。
 - `data/canon/furina_life_sources.json` —— 上述 SOURCE_ID 机器可读登记（status: USED / NOT_USED / FORBIDDEN）。
+- `data/canon/furina_evidence_units.json` —— FUR-001~056 的**唯一归因真源**（source_type / act / scene；
+  由 `CanonHistoryStore` 只读加载，`metrics()["evidence_attribution_conflicts"]` 机器校验）。
 
 > **C2 状态（Phase 15.1 更新）**：
 > **MANDATORY CANON LIFE SPAN = SOURCE-COMPLETE** —— 20/20 mandatory life stages 全部有
@@ -55,18 +66,28 @@
 >   官方来源 → 可复现 locator → 有界证据记录/场景引用 → CanonEpisode source_ids/evidence_ids）；
 > - 未来官方新剧情不会再加入。
 >
-> **Act I–V 覆盖**（curated evidence 实际映射；来源 = FURINA_CANON_EVIDENCE.md 的 scene
-> 标签 + 游戏内任务日志定位）：
+> **Act I–V 主线场景覆盖**（canonical；机器真源 = `data/canon/furina_evidence_units.json`，
+> 其 act 字段与下表一致；来源 = FURINA_CANON_EVIDENCE.md 的 SOURCE/SCENE 标签 +
+> 游戏内任务日志定位）。
+>
+> 下表**只列主线（MAIN_STORY）场景证据**。角色故事/角色语音/档案/统计类 evidence
+> （如 FUR-052 = 角色故事4）**无 act 归属**，绝不进入 act 映射行。
 >
 > | 覆盖段 | 场景（evidence doc 标签） | 证据 IDs | 状态 |
 > |---|---|---|---|
-> | Chapter IV Act I | 初见旅行者（歌剧院/枫丹初遇）、打招呼 | FUR-005, FUR-033 | COVERED |
-> | Chapter IV Act II | 主线庭审 / 林尼事件调查（"太、太丢人了…"） | FUR-006 | COVERED |
-> | Chapter IV Act III | 被关注（"哎呀哎呀"圆场）、歌剧院被揭穿（"我真的是神明…"） | FUR-007, FUR-008 | COVERED |
-> | Chapter IV Act IV | 被怀疑（"你不会真以为…"）、4.2 开场自辩（"我的力量都转化成了律偿混能"） | FUR-010, FUR-050, FUR-052 | COVERED |
-> | Chapter IV Act V | 歌剧院审判开场（"我魔神芙卡洛斯…"）、审判压力、真相揭示 | FUR-051, FUR-006, FUR-008, FUR-039, FUR-041, FUR-042, FUR-043, FUR-048, FUR-049 | COVERED |
+> | Chapter IV Act I | Lyney 庭审 / 意识到冤枉林尼（"太、太丢人了…"，4.0） | FUR-006 | COVERED |
+> | Chapter IV Act II | （curated evidence 无该幕主线场景单元；由 act=I-V 长时段 episodes 覆盖） | — | NO_CURATED_MAIN_STORY_UNIT |
+> | Chapter IV Act III | （curated evidence 无该幕主线场景单元；由 act=I-V 长时段 episodes 覆盖） | — | NO_CURATED_MAIN_STORY_UNIT |
+> | Chapter IV Act IV | 被袭击 / 生命威胁（"不要杀我，求求你！"，4.1） | FUR-039 | COVERED |
+> | Chapter IV Act V | 罪人舞步旋（审判开场"我魔神芙卡洛斯…"、被揭穿"我真的是神明…"、自辩、五百年真相、身份真相、结局） | FUR-008, FUR-041, FUR-042, FUR-043, FUR-048, FUR-049, FUR-050, FUR-051 | COVERED |
 >
-> 每条 mandatory CanonEpisode 都映射到上述覆盖段（source_ids/evidence_ids 可解析）。
+> **非主线场景来源（不进入 act 映射）**：角色故事（FUR-001/009/017/028/052/053/054）、
+> 角色语音/战斗语音/洞天台词/全量语音统计（FUR-002~005/010~016/018/020~027/029~036/038/040/045~047）、
+> 档案（FUR-044/056）、传说任务"水的女儿"（FUR-019/055）。其中
+> **FUR-052 = CHARACTER_STORY（角色故事4），不是 Chapter IV Act IV 主线证据**。
+>
+> 每条 mandatory CanonEpisode 都映射到上述覆盖段或长时段 span（source_ids/evidence_ids 可解析；
+> evidence act 冲突由 `metrics()["evidence_attribution_conflicts"]` 机器校验，当前为 0）。
 > 未使用的 Tier 1/2 来源（SRC-007/008/009，cross-check 预留）**不**计入完整性。
 
 ## 验收计数（C2 ACCEPTANCE）
@@ -74,6 +95,9 @@
 - canon_source_map_entries: 10（SRC-001~010；SRC-001~006=USED，SRC-007~009=NOT_USED，SRC-010=FORBIDDEN）
 - canon_episode_count: 20（20/20 mandatory stages 全覆盖）
 - canon_span_status: MANDATORY_SPAN_SOURCE_COMPLETE（metrics 计算：无 dangling source_ids）
+- evidence_registry_entries: 56（FUR-001~056；`data/canon/furina_evidence_units.json` 唯一归因真源）
+- evidence_attribution_conflicts: 0（episode 单幕 act 与 evidence registry act 无矛盾；
+  FUR-006 → Act I，FUR-039 → Act IV，FUR-052 → CHARACTER_STORY（无 act））
 - tier0_sources: SRC-001~006（evidence doc + 官方游戏文本/角色资料，全部 USED）
 - tier1_sources: SRC-007, SRC-008（NOT_USED —— 不计入完整性）
 - tier2_mirror_sources: SRC-009（NOT_USED —— 不计入完整性）

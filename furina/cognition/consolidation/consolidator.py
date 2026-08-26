@@ -14,12 +14,16 @@ log = get_logger("cognition.consolidator")
 # 仅事件（不进 memory）的类型
 _EVENT_ONLY = {"ACTIVITY_STARTED", "ACTIVITY_FINISHED", "FURINA_SPOKE", "DIRECT_TURN_STARTED",
                "USER_CLICK", "USER_DRAG", "SYSTEM_EVENT", "APP_LAUNCHED", "BROWSER_OPENED",
-               "USER_STATEMENT_OBSERVED"}
+               "USER_STATEMENT_OBSERVED",
+               # Phase 14 Final Closure：C4 lifecycle transition 是 evidence 事件（供
+               # user_model_items.transition_event_id 引用），本身不形成 C3。
+               "USER_PREFERENCE_CHANGED", "USER_PLAN_COMPLETED"}
 
 # 可能形成 memory 的显著类型（仍需 importance 门槛）
 _SIGNIFICANT = {"USER_PET", "USER_POKE", "USER_FEED", "AGENT_COMPLETED", "AGENT_FAILED",
                 "USER_PLAN_DECLARED", "USER_PREFERENCE_DECLARED", "FILE_CREATED",
-                "FILE_MOVED", "DOCUMENT_CREATED", "RELATIONSHIP_MILESTONE", "MEMORY_FORMED"}
+                "FILE_MOVED", "DOCUMENT_CREATED", "RELATIONSHIP_MILESTONE", "MEMORY_FORMED",
+                "USER_IGNORED"}
 
 
 class Consolidator:
@@ -45,12 +49,43 @@ class Consolidator:
             return plan
         # 显著事件：按类型给确定性处理
         if event_type == "USER_PET":
+            # Phase 14 Final Closure：记忆内容必须来自可观察 payload（kind/count），
+            # 不得把 poke/drag 硬编码成"摸头"（objective interaction semantics）。
             if importance >= self._threshold or p.get("strong", False):
+                kind = p.get("kind", "petting")
+                count = int(p.get("count", 0) or 0)
+                if kind == "poke" and count > 5:
+                    content, mem_type = f"用户反复戳了我{count}下", "user_annoying_poke"
+                elif kind == "poke":
+                    content, mem_type = "用户戳了我一下", "user_poke"
+                elif kind == "drag":
+                    content, mem_type = "用户把我拎起来移动", "user_drag"
+                else:
+                    content, mem_type = "用户轻轻摸了摸我的头", "user_positive_touch"
                 plan["form_memory"] = True
-                plan["memory"] = {"content": "用户轻轻摸了摸我的头", "level": MemoryLevel.EPISODIC,
+                plan["memory"] = {"content": content, "level": MemoryLevel.EPISODIC,
                                   "source": MemorySource.INTERACTION, "importance": 0.5,
-                                  "event_type": "user_positive_touch",
+                                  "event_type": mem_type,
                                   "source_event_ids": src}
+        elif event_type == "USER_IGNORED":
+            # 语义忽略（真实 observed social bid 到期无回应）→ C3。内容来自事件 payload
+            # （bid_reason 是观察事实），不凭空写"用户离开"之类的推断。
+            # Phase 14 Residual（R3）canonical rule：memory provenance = 完整因果链
+            #   [USER_IGNORED.event_id, SOCIAL_BID_STARTED.event_id]
+            # （最近因果在前；bid 事件缺失（如 harness 合成语义忽略入口）时退化为 [USER_IGNORED]）。
+            if importance >= self._threshold:
+                reason = str(p.get("bid_reason", "") or "").strip()
+                src_ids = list(src or [])
+                bid_src = str(p.get("bid_source_event_id", "") or "")
+                if bid_src and bid_src not in src_ids:
+                    src_ids.append(bid_src)
+                plan["form_memory"] = True
+                plan["memory"] = {"content": f"用户没有回应我的主动互动（{reason}）" if reason
+                                  else "用户忽略了我",
+                                  "level": MemoryLevel.EPISODIC,
+                                  "source": MemorySource.INTERACTION, "importance": 0.5,
+                                  "event_type": "user_ignore",
+                                  "source_event_ids": src_ids}
         elif event_type == "USER_FEED":
             # Phase 15.1：喂食 → C6 → consolidation → 可选 C3（单一形成权威，带 provenance）
             if importance >= self._threshold:

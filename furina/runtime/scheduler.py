@@ -106,12 +106,16 @@ class Scheduler:
                  memory_engine: mem.MemoryEngine, world: DesktopWorld,
                  window_awareness: wa.WindowAwareness,
                  life_brain=None, dialogue_brain=None, emotion_engine=None, motivation=None,
-                 relationship_engine=None, embodiment=None) -> None:
+                 relationship_engine=None, embodiment=None, cognition=None) -> None:
         self.bus = bus
         self.se = state_engine
         self.be = behavior_engine
         self.director = director
         self.me = memory_engine
+        # Phase 14 Final Closure（INV-C3-4）：C6 事件记录 / C3 形成的 canonical owner。
+        # Scheduler 需要形成"经历记忆"时必须经 CognitionHub.record_event（C6 → consolidation），
+        # **不得**直接调用 MemoryEngine.consolidate（bypass）。
+        self.cognition = cognition
         self.world = world
         self.wa = window_awareness
         self.life_brain = life_brain          # 三脑：生命决策
@@ -518,30 +522,28 @@ class Scheduler:
             self.se.state.life.macro = st.MacroState.ENGAGED
 
     # -------------------------------------------------- 经历→记忆（Phase 07 §4）
-    def _consolidate_episode(self, event_type: str, activity: str = "", outcome: str = "") -> None:
-        """把一次值得记的经历写入长期记忆（经 Importance 过滤，低重要不落库）。"""
-        if self.me is None or not hasattr(self.me, "consolidate"):
+    # Phase 14 Final Closure（INV-C3-4）：Scheduler 不再拥有 memory consolidation authority。
+    # 需要形成"经历记忆"时，只把真实 observed 事实记录为 canonical C6 事件，
+    # 由 CognitionHub（唯一形成权威）consolidation 决定是否形成 C3（带 exact provenance）。
+    _C6_EPISODE_ROUTES = {"user_ignore": "USER_IGNORED"}
+
+    def _consolidate_episode(self, event_type: str, activity: str = "", outcome: str = "",
+                             payload: Optional[dict] = None) -> None:
+        """经历 → C6 canonical event → CognitionHub consolidation（单一形成权威）。
+
+        无 canonical owner（未装配 cognition 的测试外壳/兼容环境）→ 不形成记忆，
+        **绝不**回退到直接写 MemoryEngine。
+        """
+        c6_type = self._C6_EPISODE_ROUTES.get(event_type or "")
+        cog = getattr(self, "cognition", None)
+        if c6_type is None or cog is None:
             return
         try:
-            from furina.memory.experience import Experience, template_summary
-            wctx = ""
-            wp = getattr(self, "world_perc", None)
-            if wp is not None:
-                ua = getattr(wp.state, "user_activity", None)
-                wctx = ua.value if hasattr(ua, "value") else (ua or "")
-            # 情绪强度（emotional_intensity）近似来自情绪 arousal
-            emo = self.se.state.emotion
-            e = Experience(
-                token=f"{event_type}|{wctx}|{activity}", event_type=event_type,
-                summary=template_summary(event_type, wctx, activity, outcome),
-                world_context=wctx, activity=activity, outcome=outcome,
-                emotional_intensity=getattr(emo, "arousal", 0.4) or 0.4,
-                relationship_relevance=0.7 if event_type.startswith("user") else 0.3,
-                user_relevance=0.7 if event_type.startswith("user") else 0.3,
-            )
-            self.me.consolidate(e)
+            cog.record_event(c6_type, source="scheduler", importance=0.5,
+                             payload=dict(payload or {}), consolidate=True)
         except Exception:
-            pass
+            log.warning("consolidate episode via cognition failed: %s", event_type,
+                        exc_info=True)
 
     # -------------------------------------------------- medium tick
     def _tick_medium(self, dt: float) -> None:
@@ -1199,10 +1201,14 @@ class Scheduler:
                 pass
         self._interrupt_life("user_rejected")
 
-    def on_user_ignore(self) -> None:
+    def on_user_ignore(self, bid_reason: str = "", bid_source_event_id: str = "") -> None:
         """语义忽略（Phase 13 终审 §7）：**不是指针离开**。
         对应"芙宁娜主动发起了互动/存在，用户在一段响应窗口内没有回应"。
         恰好一次路由到：Emotion EVENT_IGNORE + Relationship EV_IGNORE + Life 容忍度 + 记忆。
+        Phase 14 Final Closure：记忆经 canonical C6 USER_IGNORED（携带可观察 bid_reason）
+        → CognitionHub consolidation 形成（带 provenance）；不再直写 MemoryEngine。
+        Phase 14 Residual（R3）：``bid_source_event_id`` 指向触发本次判定的真实
+        SOCIAL_BID_STARTED canonical 事件（因果溯源，非描述文字）。
         """
         # 关系（EV_IGNORE 经 RelationshipEngine 唯一写入口）
         if self.relationship is not None:
@@ -1226,9 +1232,13 @@ class Scheduler:
                 self.life_brain.adapt_tolerance(user_responded=False, was_interactive=False)
             except Exception:
                 pass
-        # 记忆（有意义才记）
+        # 记忆（客观事实：bid canonical 事件 + 响应窗口时长 → C6 → canonical owner 形成）
         try:
-            self._consolidate_episode(event_type="user_ignore", activity="")
+            payload = {"bid_reason": (bid_reason or "")[:80],
+                       "window_s": float(getattr(self, "_social_bid_window", 0.0) or 0.0)}
+            if bid_source_event_id:
+                payload["bid_source_event_id"] = bid_source_event_id
+            self._consolidate_episode(event_type="user_ignore", activity="", payload=payload)
         except Exception:
             pass
         self._interrupt_life("user_ignored")
@@ -1244,6 +1254,9 @@ class Scheduler:
         **用户在场未知或缺席**（Pre-Manual §7：无有效 OS 空闲样本时绝不开启 —— 否则 60s 后
         会制造假的 USER_IGNORE）、Agent/系统状态台词。
         显式用户事件触发的社交反应不走此路径（事件本身证明在场）。
+        Phase 14 Residual（R3）：真实合格可见的 bid 开启时记录 canonical C6
+        ``SOCIAL_BID_STARTED``（exactly-once per bid），pending bid 保存其 event_id ——
+        之后 USER_IGNORED 的因果溯源指向该事件，而不是只靠 payload 描述文字。
         """
         if getattr(self, "_pending_social_bid", None) is not None:
             return   # 已有 pending，不重复
@@ -1251,10 +1264,25 @@ class Scheduler:
         pf = presence_facts(getattr(self, "world_perc", None))
         if not (pf["known"] and pf["present"]):
             return   # 在场未知/缺席：不开响应窗口（unknown ≠ 可用；不制造假 ignore）
+        cog = getattr(self, "cognition", None)
+        bid_event_id = ""
+        if cog is not None:
+            try:
+                ev = cog.record_event(
+                    "SOCIAL_BID_STARTED", source="scheduler", importance=0.1,
+                    payload={"reason": str(reason or "")[:80],
+                             "window_s": float(getattr(self, "_social_bid_window", 0.0) or 0.0),
+                             "presence_known": bool(pf["known"]),
+                             "user_present": bool(pf["present"])},
+                    consolidate=False)
+                bid_event_id = ev.event_id
+            except Exception:
+                log.warning("record SOCIAL_BID_STARTED failed", exc_info=True)
         self._pending_social_bid = {
             "token": f"bid-{time.time_ns() % 10 ** 8}",
             "deadline": time.time() + self._social_bid_window,
             "reason": reason,
+            "source_event_id": bid_event_id,
         }
 
     def on_user_response(self) -> None:
@@ -1267,8 +1295,10 @@ class Scheduler:
         if bid is None:
             return
         if (now if now is not None else time.time()) >= bid["deadline"]:
+            reason = str(bid.get("reason", "") or "")
+            src_ev = str(bid.get("source_event_id", "") or "")
             self._pending_social_bid = None
-            self.on_user_ignore()
+            self.on_user_ignore(bid_reason=reason, bid_source_event_id=src_ev)
 
     # -------------------------------------------------- M4：走向活动窗口（陪伴）—— DEPRECATED
     def _maybe_walk_to_window(self) -> None:

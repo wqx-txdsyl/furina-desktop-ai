@@ -238,23 +238,63 @@ class CognitionHub:
         return {"pending": int(pending or 0), "processed": int(processed or 0),
                 "idempotent": True}
 
-    def _apply_c4_candidate(self, cand) -> Dict[str, Any]:
-        """C4 候选 → owner 落地（entity-specific；supersede 不 overwrite；计划生命周期）。"""
-        out: Dict[str, Any] = {"items": [], "plans_completed": [], "superseded": []}
+    def _ensure_transition_event(self, event_type: str, cand, utterance: str = ""):
+        """C4 lifecycle transition 的 canonical C6 trigger（Phase 14 Final Closure）。
+
+        - bridge/process_pending 路径：candidate 已带 source_event_ids（USER_MESSAGE 等
+          真实事件）→ 验证存在后直接复用，不多造事件；
+        - direct apply_user_message 路径：candidate 无事件溯源 → 先记录专用 transition
+          事件（USER_PLAN_COMPLETED / USER_PREFERENCE_CHANGED），payload.statement 携带
+          **verbatim 原始 utterance**（Phase 14 Residual R5：derived event 必须能回溯到
+          原始用户话语，禁止循环 provenance）。
+        """
         src = (cand.source_event_ids or [""])[0]
+        if src:
+            try:
+                if self._db.query_one(
+                        "SELECT 1 FROM life_events WHERE event_id=?", (src,)) is not None:
+                    from types import SimpleNamespace
+                    return SimpleNamespace(event_id=src)
+            except Exception:
+                pass
+        stmt = (utterance or cand.value or cand.reason or "")[:200]
+        return self.record_event(
+            event_type, source="dialogue", importance=0.0, consolidate=False,
+            payload={"key": cand.predicate or "", "statement": stmt})
+
+    def _apply_c4_candidate(self, cand, utterance: str = "") -> Dict[str, Any]:
+        """C4 候选 → owner 落地（entity-specific；supersede 不 overwrite；计划生命周期）。
+
+        ``utterance``：direct 路径的原始用户话语（verbatim），作为 transition 事件的
+        raw utterance evidence（R5）；bridge 路径不传（candidate 已带事件溯源）。
+        """
+        out: Dict[str, Any] = {"items": [], "plans_completed": [], "superseded": []}
+        # transition reason = 触发该 lifecycle 变化的真实 utterance（优先 verbatim 输入，
+        # 其次 candidate 携带的语句片段；cand.reason 只是固定说明模板，不作证据）。
+        stmt = (utterance or cand.value or cand.reason or "")[:200]
         try:
             if cand.kind == "PLAN_COMPLETED":
                 # Phase 15.1：targeted completion —— 唯一目标才完成；ambiguous 不自动完成
                 if cand.predicate and cand.predicate != "plan:__ambiguous__":
-                    done = self._complete_plan_key(cand.predicate)
+                    trig = self._ensure_transition_event("USER_PLAN_COMPLETED", cand,
+                                                         utterance=utterance)
+                    done = self._complete_plan_key(
+                        cand.predicate,
+                        transition_event_id=getattr(trig, "event_id", ""),
+                        transition_reason=stmt)
                     if done:
                         out["plans_completed"].append(done.item_id)
             elif cand.kind == "PREFERENCE_CHANGED":
                 # Phase 15.1：entity-specific supersede —— 只 supersede 该实体旧 item
                 if cand.predicate and cand.predicate != "preference:__unknown__":
+                    trig = self._ensure_transition_event("USER_PREFERENCE_CHANGED", cand,
+                                                         utterance=utterance)
                     for it in self.user_model.query_active(limit=100, category="PREFERENCE"):
                         if it.key == cand.predicate:
-                            self.user_model.supersede_item(it.item_id)
+                            self.user_model.supersede_item(
+                                it.item_id,
+                                transition_event_id=getattr(trig, "event_id", ""),
+                                transition_reason=stmt)
                             out["superseded"].append(it.item_id)
             elif cand.kind in ("PLAN", "PREFERENCE", "DISLIKE", "COMMUNICATION_PREFERENCE",
                                "FACT", "HABIT", "INTEREST", "GOAL", "IMPORTANT_DATE"):
@@ -269,7 +309,8 @@ class CognitionHub:
                     return out
                 it = self.user_model.upsert_item(
                     category=cand.kind, key=key, value=cand.value,
-                    confidence=cand.confidence, source_event_id=src,
+                    confidence=cand.confidence,
+                    source_event_id=(cand.source_event_ids or [""])[0],
                     source_text_excerpt=(cand.reason or "")[:500])
                 out["items"].append(it.item_id)
         except Exception as e:
@@ -373,7 +414,7 @@ class CognitionHub:
         try:
             for cand in self.interpretation.interpret_text(text):
                 if cand.kind in ("PLAN_COMPLETED", "PREFERENCE_CHANGED"):
-                    r = self._apply_c4_candidate(cand)
+                    r = self._apply_c4_candidate(cand, utterance=text)
                     applied["plans_completed"].extend(r["plans_completed"])
                     applied["superseded"].extend(r["superseded"])
                 elif cand.kind in ("PLAN", "PREFERENCE", "DISLIKE", "COMMUNICATION_PREFERENCE",
@@ -397,9 +438,15 @@ class CognitionHub:
             log.warning("apply_user_message failed: %s", e)
         return applied
 
-    def _complete_plan_key(self, key: str):
-        """Phase 15.1：targeted plan completion —— 只完成该实体 key 的 ACTIVE PLAN。"""
-        return self.user_model.complete_plan(key)
+    def _complete_plan_key(self, key: str, *, transition_event_id: str = "",
+                           transition_reason: str = ""):
+        """Phase 15.1：targeted plan completion —— 只完成该实体 key 的 ACTIVE PLAN。
+
+        Phase 14 Final Closure：transition 证据（trigger event id + reason）随
+        lifecycle conversion 持久化（INV-C4-2）。
+        """
+        return self.user_model.complete_plan(key, transition_event_id=transition_event_id,
+                                             transition_reason=transition_reason)
 
     def _complete_plans(self) -> List[str]:
         """（legacy 兼容）证据可唯一识别时才完成；否则不动（不批量完成）。"""

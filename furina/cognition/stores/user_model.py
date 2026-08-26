@@ -43,12 +43,15 @@ class UserModelStore:
         cat = category if category in CATEGORIES else "FACT"
         value_json = self._to_json(value)
         now = time.time()
-        # 旧 active 同 key item → supersede（validity close）
+        # 旧 active 同 key item → supersede（validity close），并记录 transition evidence：
+        # 本次 declaration 事件（source_event_id）就是触发 supersede 的 canonical trigger
+        # （Phase 14 Final Closure INV-C4-1：不能只靠 status/timestamp 反推来源）。
         for old in self._active_by_key(cat, key):
             self._db.execute(
-                "UPDATE user_model_items SET status='superseded', valid_to=?, updated_at=? "
-                "WHERE item_id=?",
-                (now, now, old.item_id))
+                "UPDATE user_model_items SET status='superseded', valid_to=?, updated_at=?, "
+                "transition_event_id=?, transition_reason=? WHERE item_id=?",
+                (now, now, source_event_id or "", (source_text_excerpt or "")[:200],
+                 old.item_id))
         item_id = f"umi_{int(now*1000)}_{uuid.uuid4().hex[:6]}"
         row = (item_id, cat, key, value_json, float(confidence), source_event_id,
                (source_text_excerpt or "")[:500], now, now, now, float(valid_to), "active",
@@ -66,10 +69,14 @@ class UserModelStore:
             status="active", temporal_uncertain=int(temporal_uncertain or 0), declared_at=now)
 
     # -------------------------------------------------- Phase 15D：PLAN 生命周期
-    def set_plan_status(self, key: str, status: str, *, category: str = "PLAN") -> Optional[UserModelItem]:
+    def set_plan_status(self, key: str, status: str, *, category: str = "PLAN",
+                        transition_event_id: str = "",
+                        transition_reason: str = "") -> Optional[UserModelItem]:
         """把 ACTIVE PLAN 转移到 COMPLETED/CANCELLED/EXPIRED（不新增互不关联的 plan）。
 
         '我终于做完了' 的 evidence 关联到既有 plan（按 key），否则不猜。
+        Phase 14 Final Closure（INV-C4-2）：lifecycle transition 必须记录触发它的
+        canonical C6 event id + 原因（真实 utterance），不得只有 status/timestamp。
         """
         st = status if status in PLAN_STATUSES else "ACTIVE"
         rows = self._db.query_all(
@@ -78,15 +85,22 @@ class UserModelStore:
         if not rows:
             return None
         it = UserModelItem.from_row(rows[0])
+        now = time.time()
         self._db.execute(
-            "UPDATE user_model_items SET status=?, updated_at=?, valid_to=? WHERE item_id=?",
-            (st.lower(), time.time(), time.time(), it.item_id))
+            "UPDATE user_model_items SET status=?, updated_at=?, valid_to=?, "
+            "transition_event_id=?, transition_reason=? WHERE item_id=?",
+            (st.lower(), now, now, transition_event_id or "",
+             (transition_reason or "")[:200], it.item_id))
         it.status = st.lower()
-        it.valid_to = time.time()
+        it.valid_to = now
+        it.transition_event_id = transition_event_id or ""
+        it.transition_reason = (transition_reason or "")[:200]
         return it
 
-    def complete_plan(self, key: str) -> Optional[UserModelItem]:
-        return self.set_plan_status(key, "COMPLETED")
+    def complete_plan(self, key: str, *, transition_event_id: str = "",
+                      transition_reason: str = "") -> Optional[UserModelItem]:
+        return self.set_plan_status(key, "COMPLETED", transition_event_id=transition_event_id,
+                                    transition_reason=transition_reason)
 
     def cancel_plan(self, key: str) -> Optional[UserModelItem]:
         return self.set_plan_status(key, "CANCELLED")
@@ -98,13 +112,18 @@ class UserModelStore:
             "UPDATE user_model_items SET status='expired', valid_to=?, updated_at=? WHERE item_id=?",
             (now, now, item_id))
 
-    def supersede_item(self, item_id: str) -> None:
-        """Phase 15D：被当前事实取代 → SUPERSEDED（历史保留，不再 active 检索）。"""
+    def supersede_item(self, item_id: str, *, transition_event_id: str = "",
+                       transition_reason: str = "") -> None:
+        """Phase 15D：被当前事实取代 → SUPERSEDED（历史保留，不再 active 检索）。
+
+        Phase 14 Final Closure（INV-C4-1）：必须记录触发 supersede 的 canonical C6
+        event id + 原因（真实 utterance），不得只有 status/timestamp。
+        """
         now = time.time()
         self._db.execute(
-            "UPDATE user_model_items SET status='superseded', valid_to=?, updated_at=? "
-            "WHERE item_id=?",
-            (now, now, item_id))
+            "UPDATE user_model_items SET status='superseded', valid_to=?, updated_at=?, "
+            "transition_event_id=?, transition_reason=? WHERE item_id=?",
+            (now, now, transition_event_id or "", (transition_reason or "")[:200], item_id))
 
     def delete_item(self, item_id: str) -> None:
         """deletion API：删除单条 user model item。"""

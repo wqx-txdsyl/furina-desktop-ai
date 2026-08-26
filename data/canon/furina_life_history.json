@@ -737,8 +737,7 @@
       ],
       "explicit_recall_policy": "activation 2（被逼问过去时）",
       "evidence_ids": [
-        "FUR-051",
-        "FUR-006"
+        "FUR-051"
       ],
       "source_ids": [
         "SRC-001",
@@ -757,7 +756,7 @@
       "quest": "Chapter IV",
       "act": "V",
       "scene": "审判压力顶峰",
-      "objective_summary": "审判压力下芙宁娜防线濒临崩溃：被戳穿时恳求'我真的是神明…'，生命受威胁时'不要杀我，求求你！'——极限时刻不逞强。",
+      "objective_summary": "审判压力下芙宁娜防线濒临崩溃：被戳穿时恳求'我真的是神明…'——极限时刻不逞强。",
       "furina_role_at_time": "濒临崩溃的被告",
       "furina_knew": [
         "自己确实不是神（深层）",
@@ -779,8 +778,7 @@
         "证明神格"
       ],
       "actions_taken": [
-        "崩溃恳求",
-        "求生"
+        "崩溃恳求"
       ],
       "choices": [
         "极限时刻放弃伪装"
@@ -814,7 +812,6 @@
       "explicit_recall_policy": "activation 2-3（深度信任/深谈时）",
       "evidence_ids": [
         "FUR-008",
-        "FUR-039",
         "FUR-050"
       ],
       "source_ids": [

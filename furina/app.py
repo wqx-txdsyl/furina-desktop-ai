@@ -1428,7 +1428,8 @@ def launch(cfg: AppConfig | None = None) -> Furina:
                       furina.memory, furina.world, furina.wa,
                       life_brain=furina.life_brain, dialogue_brain=furina.dialogue_brain,
                       emotion_engine=furina.emotion, motivation=furina.motivation,
-                      relationship_engine=furina.relationship, embodiment=furina.embodiment)
+                      relationship_engine=furina.relationship, embodiment=furina.embodiment,
+                      cognition=furina.cognition)
     sched.start(win)
     # H1 §12：启动时在 Qt/runtime 线程**显式绑定 owner**（先于任何 worker 请求守卫变更）
     sched.dispatcher.bind_owner()
@@ -1506,7 +1507,8 @@ def launch_harness(cfg: AppConfig | None = None) -> Furina:
                       furina.memory, furina.world, furina.wa,
                       life_brain=furina.life_brain, dialogue_brain=furina.dialogue_brain,
                       emotion_engine=furina.emotion, motivation=furina.motivation,
-                      relationship_engine=furina.relationship, embodiment=furina.embodiment)
+                      relationship_engine=furina.relationship, embodiment=furina.embodiment,
+                      cognition=furina.cognition)
     furina._sched = sched
 
     # consumer（Frame→mapped），空间由 harness 驱动 proxy
