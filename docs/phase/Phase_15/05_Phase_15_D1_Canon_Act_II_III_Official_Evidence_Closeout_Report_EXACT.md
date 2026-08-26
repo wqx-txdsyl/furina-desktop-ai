@@ -33,7 +33,7 @@ official source:  SRC-011 —— 原神官方 HoYoLAB 号公告『"As Light Rain
                   Version 4.0 Update Details』（Genshin Impact Official，uid=1015537，
                   cert_type=1；post www.hoyolab.com/article/20899860；
                   官方 API bbs-api-os.hoyolab.com/community/post/wapi/getPostFull 于
-                  2026-08-27 全文抓取存档，retcode=0）。
+                  公告全文于 2026-08-27 recon 时经该公开官方接口独立核验（retcode=0）；registry 仅保留 locator 与有界主张摘录）。
                   关键官方原句：「V. New Main Story 1. New Archon Quest … Archon Quest
                   Chapter IV: Act II "As Light Rain Falls Without Reason"」；
                   「…and Archon Quest Chapter IV: Act II "As Light Rain Falls Without
@@ -52,7 +52,7 @@ episode IDs:      未挂接（无既有 exact-act=II episode；按 brief §5 仅
 VERIFIED
 official source:  SRC-012 —— 同官方号『"To the Stars Shining in the Depths"
                   Version 4.1 Update Details』（post www.hoyolab.com/article/21888288；
-                  镜像页 genshin.hoyoverse.com/en/news/detail/113142；同法全文存档）。
+                  镜像页 genshin.hoyoverse.com/en/news/detail/113142；同法独立核验全文，未落整页文本）。
                   关键官方原句：「Archon Quest Chapter IV: Act III "To the Stars Shining
                   in the Depths" ◆ Quest Unlock Criteria: … Complete Archon Quest
                   Chapter IV: Act II "As Light Rain Falls Without Reason"」；
@@ -72,7 +72,7 @@ episode IDs:      未挂接（理由同上）
 仍只承载 FUR-001~056 的游戏文本类单元）。
 
 CN 名称（「仿若无因飘落的轻雨」「白露与黑潮的序诗」等）以 ys.mihoyo.com CN 官方页
-（detail/28551）索引片段作 locator 参考；主锚 = 已全文核验的 EN 官方公告。
+（detail/28551）索引片段作 locator 参考；主锚 = recon 时已独立核验全文的 EN 官方公告。
 
 ## 4. Modified Files
 
@@ -126,7 +126,7 @@ evidence_registry_entries           = 58
 external locator → official source 的链条：
   Furinelle timeline 仅提供「可能幕名」提示 → 全部弃用其文本，仅以
   官方 Genshin Impact 认证号（uid=1015537, cert_type=1）版本说明为权威工件，
-  全文经官方公开接口抓取并存放 locator 进 registry。
+  官方页面/接口全文于 recon 时独立核验；registry 只保留 locator 与有界摘录（不复制整页版权文本）。
 证明 community/locator 未成为权威：
   - D1-T6：扫描全部 USED 来源 access_source/access_locator，禁止 fandom/gamersky/
     bilibili 视频/9game/reddit/AI-summary 等 marker 出现；断言 FUR-057/058 仅被
@@ -178,6 +178,52 @@ C2 剩余真实缺口（如实保留，未被 D1 掩盖）：
 后续阶段提示（非本任务范围）：Scene-level Act II/III 细节（具体审判庭场景/米凯刑场段等）
   若未来需要进 C2，须另行取证并在 episode 层做语义兼容挂接。
 ```
+
+## 10b. External Reviewer Residual Closure（NEEDS_NARROW_PATCH → 已闭合）
+
+reviewer verdict：`PHASE15_D1_REVIEW = NEEDS_NARROW_PATCH`（针对 391bed8）。
+
+**Blocker**：`_main_story_act_coverage()` / `_act_support_gaps()` 只校验 evidence 元数据
+（MAIN_STORY / Chapter IV / 同 act），未证明该 evidence_id 由合格权威 USED 来源持有
+—— 孤立单元可产生覆盖，违背 D1 权威链与 D1-T6 精神。
+
+**Patch**（`furina/cognition/stores/canon_history.py`，唯一生产文件改动）：
+- 新增中央判定 `_evidence_source_backed(evidence_id)`：扫描 source registry 中登记了该
+  evidence_id 的来源，要求 `status == USED` 且 `canon_tier ∈ (0,1)`（当前冻结层级下的
+  合格权威层；Tier 2 镜像 / Tier 3 / NOT_USED / FORBIDDEN / locator / 无主全部不合格）；
+- `_main_story_act_coverage()`：act 覆盖需同时满足元数据精确 **且** 持有链合格；
+- `_act_support_gaps()`：精确幕支撑判定同样加持有链门；episode 的其它有效 source_ids
+  不能为不相关 evidence 作保。
+- 未硬编码任意 source_type 字符串；未 weaken R7/R7-FC；SRC-011/012 数据主张未被改动。
+
+**Counterexamples（新增 6 个 reviewer-locked 测试，同文件）**：
+
+| ID | 场景 | 结果 |
+|---|---|---|
+| R1 (d1_r1) | 精确 II 单元无任何持有者 | coverage[II]=False；missing 含 II |
+| R2 (d1_r2) | 持有者 status=NOT_USED | 不覆盖 |
+| R3 (d1_r3) | Tier3/FORBIDDEN 持有 与 Tier2-USED 镜像持有 两变体 | 均不覆盖 |
+| R4 (d1_r4) | episode 引无主 II 单元但自带有效 SRC-001 类来源 | episode 仍在 gaps；life-stage=PARTIAL≠COMPLETE；coverage[II]=False |
+| R5 (d1_r5) | 生产链 SRC-011→FUR-057 / SRC-012→FUR-058 | II/III=True、missing=[]、COMPLETE |
+| R6 (d1_r6) | INNER_WORLD_REVELATION 仍为唯一生产缺口 + 把 FUR-057 持有者降级 NOT_USED → Act II 即刻失绿 | 方向性 fail-closed 验证通过 |
+
+R7/R8 以 Gate B/C 整套执行（D1 T1-T10 全部保持绿；Phase14 R7/R7-FC 全绿）。
+
+**Gates**：
+```text
+Gate A  tests/cognition/test_phase15_d1_canon_evidence.py   16 passed（T10+R6）
+Gate B/C Phase14 reviewer 四件套                              78 passed
+Gate D  canon/persona/manifest 定向                          198 passed
+Gate E  FULL SUITE ×2                                       1248 passed / 0 failed（88s, 93s）
+```
+（1242 = D1 前值 + 本补丁新增 6 个测试。）
+
+**Doc precision cleanup（按 reviewer 指令同步落地）**："抓取全文存档"类措辞已在
+closeout §3、source map、SRC-011/012 notes 三处改为 —— 官方页面/API 全文于 recon 时
+独立核验；registry 仅保留 locator 与有界主张摘录（无版本化整页存档，不提交版权全文）。
+
+**Git**：同一任务分支 feature/phase15-d1-canon-act2-act3-evidence 追加本 residual commit，
+push 后 local SHA == remote SHA。
 
 ## 11. Final Line
 

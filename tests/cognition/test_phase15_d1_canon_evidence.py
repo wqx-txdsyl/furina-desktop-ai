@@ -205,3 +205,117 @@ def test_d1_t10_furina_focalors_boundary_unchanged():
             or "人格侧" in blob), blob[:200]
     snap = store.snapshot()
     assert "identity_facts" in snap and snap["identity_facts"]
+
+
+# ================================================================
+# External Reviewer Residual（NEEDS_NARROW_PATCH）：evidence→source 持有链 fail-closed
+# ================================================================
+_ORPHAN_ID = "FUR-T901"
+
+
+def _unit(eid, act="II"):
+    return {"evidence_id": eid, "source_type": "MAIN_STORY",
+            "quest": "Chapter IV", "act": act, "scene": f"幕级条目 {eid}"}
+
+
+def _src(sid, *, tier=0, status="USED", owned=(), stype="CURATED_EVIDENCE"):
+    return {"source_id": sid, "source_type": stype,
+            "access_source": f"fixture {sid}", "original_material": "TEST",
+            "canon_tier": tier, "version": None, "quest": None, "act": None,
+            "scene": None, "furina_present": None, "relevance": "test",
+            "evidence_ids": list(owned), "notes": "", "access_locator": "",
+            "status": status}
+
+
+def _rs_store(units, sources=None, episodes=None):
+    """三件套全自定义的隔离 store（用于持有链反例；sources 缺省=无任何来源）。"""
+    from furina.cognition.stores.canon_history import CanonHistoryStore
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "h.json").write_text(json.dumps({"episodes": episodes or []},
+                                           ensure_ascii=False), encoding="utf-8")
+    (tmp / "s.json").write_text(json.dumps({"sources": sources},
+                                           ensure_ascii=False), encoding="utf-8")
+    (tmp / "u.json").write_text(json.dumps({"evidence_units": units},
+                                           ensure_ascii=False), encoding="utf-8")
+    return CanonHistoryStore(history_path=tmp / "h.json",
+                             sources_path=tmp / "s.json",
+                             evidence_path=tmp / "u.json")
+
+
+def test_d1_r1_orphan_evidence_cannot_cover_act():
+    """R1：MAIN_STORY/Chapter IV/II 元数据精确但无任何 source 持有 → 不产生覆盖。"""
+    m = _rs_store([_unit(_ORPHAN_ID)]).metrics()
+    assert m["main_story_act_coverage"]["II"] is False
+    assert "II" in m["missing_main_story_acts"]
+
+
+def test_d1_r2_not_used_source_cannot_cover_act():
+    """R2：持有者存在但 status=NOT_USED → 覆盖仍为 False。"""
+    m = _rs_store([_unit(_ORPHAN_ID)],
+                  [_src("S-NOTU", tier=1, status="NOT_USED",
+                        owned=[_ORPHAN_ID], stype="OFFICIAL_WEB")]).metrics()
+    assert m["main_story_act_coverage"]["II"] is False
+    assert "II" in m["missing_main_story_acts"]
+
+
+def test_d1_r3_forbidden_and_nonauthoritative_tiers_cannot_cover_act():
+    """R3：Tier3/FORBIDDEN 持有 或 Tier2 USED 镜像类持有 → 都不产生覆盖。"""
+    forbidden = _rs_store(
+        [_unit(_ORPHAN_ID)],
+        [_src("S-FORB", tier=3, status="FORBIDDEN", owned=[_ORPHAN_ID],
+              stype="FORBIDDEN")]).metrics()
+    assert forbidden["main_story_act_coverage"]["II"] is False
+
+    mirror_t2 = _rs_store(
+        [_unit(_ORPHAN_ID)],
+        [_src("S-MIRR", tier=2, status="USED", owned=[_ORPHAN_ID],
+              stype="OFFICIAL_MIRROR")]).metrics()
+    assert mirror_t2["main_story_act_coverage"]["II"] is False
+
+
+def test_d1_r4_unrelated_valid_source_cannot_rescue_exact_episode():
+    """R4：episode 有其它有效 USED source_id，但被引 evidence 本身无合格持有链 →
+    精确支撑不成立（不得张冠李戴）；覆盖也不因 source_ids 翻绿。"""
+    m = _rs_store(
+        [_unit(_ORPHAN_ID), {"evidence_id": "FUR-OK", "source_type": "PROFILE",
+                             "quest": None, "act": None, "scene": "无关档案"}],
+        [_src("S-OK", tier=0, status="USED", owned=["FUR-OK"])],
+        episodes=[{"episode_id": "FIX_EP_II", "quest": "Chapter IV",
+                   "act": "II", "evidence_ids": [_ORPHAN_ID],
+                   "source_ids": ["S-OK"], "timeline_order": 1}]).metrics()
+    gaps = [g["episode"] for g in m["episodes_without_exact_act_main_story_evidence"]]
+    assert "FIX_EP_II" in gaps, gaps
+    st = m["mandatory_life_stage_source_status"]
+    assert st != "SOURCE_COMPLETE" and st.startswith("PARTIAL"), st
+    assert m["main_story_act_coverage"]["II"] is False
+
+
+def test_d1_r5_production_official_chain_happy_path():
+    """R5：生产 SRC-011→FUR-057 / SRC-012→FUR-058 持有链合法 → 幕覆盖成立。"""
+    m = _store().metrics()
+    assert m["main_story_act_coverage"]["II"] is True
+    assert m["main_story_act_coverage"]["III"] is True
+    assert m["missing_main_story_acts"] == []
+    assert m["main_story_act_coverage_status"] == "COMPLETE"
+
+
+def test_d1_r6_inner_world_revelation_still_only_gap_and_demote_fails_closed():
+    """R6+方向性验证：INNER_WORLD_REVELATION 是生产唯一精确幕缺口；且将
+    FUR-057 的持有者降级 NOT_USED 后 Act II 必须立刻失绿（fail-closed 方向）。"""
+    m = _store().metrics()
+    gaps = [g["episode"] for g in m["episodes_without_exact_act_main_story_evidence"]]
+    assert gaps == ["INNER_WORLD_REVELATION"], gaps
+
+    raw_s = json.loads(_SOURCES.read_text(encoding="utf-8"))["sources"]
+    demoted = []
+    for s in raw_s:
+        s = dict(s)
+        if "FUR-057" in (s.get("evidence_ids") or []):
+            s["status"] = "NOT_USED"
+        demoted.append(s)
+    md = _rs_store([u for u in json.loads(_REGISTRY.read_text(encoding="utf-8"))
+                    ["evidence_units"]], demoted).metrics()
+    assert md["main_story_act_coverage"]["II"] is False, "持有者降级必须失绿"
+    assert "II" in md["missing_main_story_acts"]
+
+

@@ -360,7 +360,7 @@
       "furina_present": null,
       "relevance": "D1 Act II 幕级锚点：官方明文确立幕存在 + Chapter IV 归属 + 版本窗口（act 编号出自公告原文，非由版本号推断）",
       "evidence_ids": ["FUR-057"],
-      "notes": "2026-08-27 经官方 API bbs-api-os.hoyolab.com/community/post/wapi/getPostFull 抓取全文存档；JSON 内含完整正文。社区页/wiki 摘要仅作 locator，不入 Canon。",
+      "notes": "2026-08-27 于 recon 时经官方 API bbs-api-os.hoyolab.com/community/post/wapi/getPostFull 独立核验公告全文（retcode=0）；registry 仅保留 locator 与有界主张摘录，不落整页版权文本。社区页/wiki 摘要仅作 locator，不入 Canon。",
       "access_locator": "www.hoyolab.com/article/20899860（JS 页；正文存档经上列官方接口获取）；genshin.hoyoverse.com/en/news 下同名 Version 4.0 Update Details 镜像页存在（JS 渲染）",
       "status": "USED"
     },
@@ -377,7 +377,7 @@
       "furina_present": null,
       "relevance": "D1 Act III 幕级锚点：官方明文确立幕存在 + Chapter IV 归属 + 版本窗口 + 官方链序（与 SRC-011 相互印证）",
       "evidence_ids": ["FUR-058"],
-      "notes": "2026-08-27 经官方 API bbs-api-os.hoyolab.com/community/post/wapi/getPostFull 抓取全文存档（retcode=0，author 认证信息在档）。CN 官网页 ys.mihoyo.com/main/news/detail/28551 为同版本 CN 说明（JS 壳，索引片段可见「白露与黑潮的序诗」→「仿若无因飘落的轻雨」链），作 locator 参考。",
+      "notes": "2026-08-27 于 recon 时经官方 API 同接口独立核验公告全文（retcode=0，author 认证信息在档）；registry 仅保留 locator 与有界主张摘录，不落整页版权文本。CN 官网页 ys.mihoyo.com/main/news/detail/28551 为同版本 CN 说明（JS 壳，索引片段可见「白露与黑潮的序诗」→「仿若无因飘落的轻雨」链），作 locator 参考。",
       "access_locator": "www.hoyolab.com/article/21888288（JS 页；正文存档经官方接口获取）；genshin.hoyoverse.com/en/news/detail/113142（镜像，JS 渲染）",
       "status": "USED"
     }

@@ -74,7 +74,7 @@
 >   （原神官方 HoYoLAB 号 Genshin Impact Official，uid=1015537，cert_type=1）明文列出
 >   "Archon Quest Chapter IV: Act II \"As Light Rain Falls Without Reason\"" 与
 >   "Act III \"To the Stars Shining in the Depths\"" 并宣告永久开放（SRC-011/SRC-012，
->   Tier 1 OFFICIAL_WEB，2026-08-27 全文抓取存档）。幕级条目主张范围**仅限**：
+>   Tier 1 OFFICIAL_WEB；公告全文于 2026-08-27 recon 时独立核验，registry 保留 locator 与有界摘录）。幕级条目主张范围**仅限**：
 >   幕存在 + Chapter IV 归属 + 版本窗口 + 官方链序（II→III→IV）；不含未核验的
 >   场景级细节。外部 repo（Furinelle timeline 等）仅作 locator，不入 Canon。
 >   `missing_main_story_acts = []`；不得用角色故事/语音/档案冒充主线幕覆盖的规则不变。

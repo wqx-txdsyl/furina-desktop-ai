@@ -145,6 +145,35 @@ class CanonHistoryStore:
     #   （MAIN_STORY, quest=Chapter IV, act=同一 act）的 evidence 支持；
     #   CHARACTER_STORY / VOICE_LINE / PROFILE 且 act=null 的 evidence 无论多官方，
     #   都不得满足精确主线 act 要求（不许 false-green）。
+    #
+    # D1 reviewer residual：精确幕支撑/覆盖还必须验证 evidence→source **持有链** ——
+    # evidence_id 必须被一个合格权威且 USED 的 Canon source 登记，否则视为孤立证据，
+    # 不产生覆盖、不构成精确支撑（fail-closed）。
+
+    #: 当前冻结层级下可承载 Canon truth 的权威层（Tier 0 游戏文本/doc 种子、
+    #: Tier 1 官方页面）。Tier 2 镜像/Tier 3 禁止源一律不合格。
+    _ELIGIBLE_TRUTH_TIERS = (0, 1)
+
+    def _evidence_source_backed(self, evidence_id: str) -> bool:
+        """evidence_id 是否具有合格权威 USED 来源持有链（唯一判定入口）。
+
+        合格 = source registry 中存在登记了该 evidence_id 的来源，且其
+        status=USED 且 canon_tier ∈ (0,1)。NOT_USED / FORBIDDEN / Tier2+ /
+        community locator / 无主单元全部不合格。
+        """
+        if not evidence_id:
+            return False
+        for s in self._sources:
+            ev_ids = s.get("evidence_ids") or []
+            if evidence_id not in ev_ids:
+                continue
+            try:
+                tier = int(s.get("canon_tier", -1))
+            except (TypeError, ValueError):
+                continue
+            if tier in self._ELIGIBLE_TRUTH_TIERS and s.get("status") == "USED":
+                return True
+        return False
 
     def _registry_duplicates(self) -> List[str]:
         seen: Dict[str, int] = {}
@@ -154,29 +183,43 @@ class CanonHistoryStore:
         return [eid for eid, n in seen.items() if n > 1]
 
     def _act_support_gaps(self) -> List[Dict]:
-        """Chapter IV 精确 act episode 缺少同 act MAIN_STORY evidence 的缺口（语义不支撑）。"""
+        """Chapter IV 精确 act episode 缺少同 act MAIN_STORY evidence 的缺口（语义不支撑）。
+
+        D1 residual：支撑还需该 evidence 具有合格权威 USED 来源持有链
+        （_evidence_source_backed）；episode 的 source_ids 里的其它有效来源
+        不能为不相关的 evidence 单元作保。
+        """
         reg = {u.get("evidence_id"): u for u in self._evidence_units}
         gaps: List[Dict] = []
         for e in self._episodes:
             if (e.quest or "") != "Chapter IV" or (e.act or "") not in ("I", "II", "III", "IV", "V"):
                 continue
-            supported = any(
-                (reg.get(eid) or {}).get("source_type") == "MAIN_STORY"
-                and (reg.get(eid) or {}).get("quest") == "Chapter IV"
-                and (reg.get(eid) or {}).get("act") == e.act
-                for eid in (e.evidence_ids or []))
+            supported = False
+            for eid in (e.evidence_ids or []):
+                u = reg.get(eid)
+                if u is None:
+                    continue
+                if (u.get("source_type") == "MAIN_STORY"
+                        and u.get("quest") == "Chapter IV"
+                        and u.get("act") == e.act
+                        and self._evidence_source_backed(eid)):
+                    supported = True
+                    break
             if not supported:
                 gaps.append({"episode": e.episode_id, "act": e.act,
                              "evidence": list(e.evidence_ids or [])})
         return gaps
 
     def _main_story_act_coverage(self) -> Dict[str, bool]:
-        """Chapter IV Act I–V 各自是否有 registry 登记的 MAIN_STORY 同 act 证据单元。"""
+        """Chapter IV Act I–V 各自是否有 registry 登记且**来源持有链合格**的
+        MAIN_STORY 同 act 证据单元（D1 residual：孤立/未使用/禁用源登记的单元
+        不产生覆盖）。"""
         acts = {"I": False, "II": False, "III": False, "IV": False, "V": False}
         for u in self._evidence_units:
             if (u.get("source_type") == "MAIN_STORY"
                     and (u.get("quest") or "") == "Chapter IV"
-                    and (u.get("act") or "") in acts):
+                    and (u.get("act") or "") in acts
+                    and self._evidence_source_backed(u.get("evidence_id", ""))):
                 acts[u["act"]] = True
         return acts
 
