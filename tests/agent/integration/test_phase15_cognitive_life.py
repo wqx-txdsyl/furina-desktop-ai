@@ -121,7 +121,7 @@ def test_15_scenario_a_preference_evolution_across_restart(fapp, tmp_path):
                     llm=LLMProfile(api_key=""), data_dir=tmp_path)
     f2 = Furina(cfg)
     f2._rt_dispatcher().bind_owner()
-    _say(f2, "其实最近不怎么听了")
+    _say(f2, "其实最近不怎么听陈奕迅了")
     active = f2.cognition.user_model.query_active(limit=20, category="PREFERENCE")
     assert not any("陈奕迅" in str(i.value) for i in active), \
         "跨 restart 后旧偏好不得仍 ACTIVE（historically liked + current changed）"
