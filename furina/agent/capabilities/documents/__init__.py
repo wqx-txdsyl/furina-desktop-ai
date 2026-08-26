@@ -165,6 +165,10 @@ class DocxCreateTool(BaseTool):
         p = _resolve(path)
         if not p.suffix.lower() == ".docx":
             return ToolResult(False, error="docx.create 需要 .docx 路径", verified=False)
+        if p.exists():
+            # Phase 14.1.1 §2：Office create **永不覆盖已有文件**（未来用专门 edit capability）
+            return ToolResult(False, error=f"目标已存在，docx.create 不覆盖已有文件: {p}",
+                              verified=False)
         try:
             doc = Document()
             if title:
@@ -205,6 +209,10 @@ class PptxCreateTool(BaseTool):
         p = _resolve(path)
         if not p.suffix.lower() == ".pptx":
             return ToolResult(False, error="pptx.create 需要 .pptx 路径", verified=False)
+        if p.exists():
+            # Phase 14.1.1 §2：Office create 永不覆盖已有文件
+            return ToolResult(False, error=f"目标已存在，pptx.create 不覆盖已有文件: {p}",
+                              verified=False)
         slides = slides or [{"title": "标题", "bullets": []}]
         try:
             prs = Presentation()
@@ -251,6 +259,10 @@ class XlsxCreateTool(BaseTool):
         p = _resolve(path)
         if not p.suffix.lower() in (".xlsx", ".xlsm"):
             return ToolResult(False, error="xlsx.create 需要 .xlsx 路径", verified=False)
+        if p.exists():
+            # Phase 14.1.1 §2：Office create 永不覆盖已有文件
+            return ToolResult(False, error=f"目标已存在，xlsx.create 不覆盖已有文件: {p}",
+                              verified=False)
         rows = rows or []
         try:
             wb = Workbook()

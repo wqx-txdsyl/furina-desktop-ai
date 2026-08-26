@@ -136,6 +136,11 @@ session_id / source / actor / channel / turn_id / task_id / payload_json / impor
 API：`append / query_recent / query_by_type / query_by_turn / query_by_task / query_time_range`。
 禁止持久化：raw screenshots、API keys、完整 LLM system prompts、secret env values。
 
+**Phase 14.1.1（activity instance truth）**：`ACTIVITY_STARTED` 每次真正 START 生成唯一
+`activity_instance_id`（显式 sequence，不用时间戳字符串去重）；`ACTIVITY_FINISHED` 引用同一
+instance；同 instance 重复 emit → exactly once。read→play→read→play 各自新 instance
+（ACTIVITY_STARTED read=2、play=2，4 个不同 instance id）。
+
 ### C7 — Agent Task History（"我替用户做过什么"）
 
 | 项 | 值 |

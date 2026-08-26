@@ -49,7 +49,7 @@ def _sched_stub():
 # ================================================================ §4.1 Agent 记忆回 owner
 class _FakeAgentDone:
     status = "COMPLETED_VERIFIED"
-    def execute(self, req, ctx=None):
+    def execute(self, req, ctx=None, task_auth=None):
         return {"status": "completed", "goal": "打开记事本"}
 
 

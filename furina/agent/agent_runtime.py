@@ -54,14 +54,19 @@ class AgentRuntime:
         self._last_task_record: Dict[str, Any] = {}   # Phase 14I：最近一次任务的结构化记录（实例级）
 
     # -------------------------------------------------- 主循环
-    def execute(self, user_request: str, extra_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def execute(self, user_request: str, extra_context: Optional[Dict[str, Any]] = None,
+                task_auth=None) -> Dict[str, Any]:
+        # Phase 14.1.1 §1：**本次 task 独立 AuthorizationContext**（immutable/task-local）。
+        # 未显式给（普通自然语言任务）→ 默认 L0/L1 only；L2/L3 deny unless 本 task 有匹配授权。
+        if task_auth is None:
+            task_auth = self.permission.default_task_context()
         # Phase 14I：stable task_id（C7 精确追踪的事实标识）
         task_id = f"task_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}"
         self.current_task_id = task_id
         self.status = "RUNNING"   # FINAL-R1 §8.1：真实生命周期状态（每个转移都更新）
         self.bus.emit(EventType.AGENT_STARTED,
                       payload={"request": user_request, "task_id": task_id}, source="agent")
-        log.info("agent: %s (task=%s)", user_request, task_id)
+        log.info("agent: %s (task=%s auth=%s)", user_request, task_id, task_auth.source)
         # Phase 13 终审 §10.2：**任务局部上下文** —— 每次 execute 用全新 AgentContext，
         # 绝不把任务 A 的 path/vars 泄漏进任务 B（持久 context 只允许显式安全全局设置）。
         task_ctx = AgentContext()
@@ -109,14 +114,17 @@ class AgentRuntime:
                                   permission_summary="")
                 return {"status": "failed", "reason": str(e), "results": results,
                         "task_id": task_id, "task_record": self._last_task_record}
-            # 权限检查（Phase 14.1：最终 effective permission —— 动态升级覆盖/删除/发送）
+            # 权限检查（Phase 14.1：最终 effective permission + Phase 14.1.1：task-scoped auth）
             eff = self._perm_resolver.effective_permission(tool, step.args)
-            decision = self.permission.check(f"{tool.description}：{step.args}", eff)
+            step_path = self._path_arg(step.args)
+            decision = self.permission.check(f"{tool.description}：{step.args}", eff,
+                                             task_auth=task_auth, tool=step.tool,
+                                             path=step_path)
             steps.append({"step_index": i, "tool": step.tool, "args": step.args,
                           "capability": "", "permission_level": eff.name,
                           "status": "RUNNING", "verified": False, "result": None, "error": ""})
             if not decision.granted:
-                # Phase 14.1 §2：reason 保持旧契约 "permission_denied"（level 放 permission_summary）
+                # Phase 14.1 §2：reason 保持旧契约 "permission_denied"（level/source 放 permission_summary）
                 self.bus.emit(EventType.AGENT_FAILED,
                               payload={"step": i, "reason": "permission_denied",
                                        "task_id": task_id},
@@ -128,7 +136,7 @@ class AgentRuntime:
                 self._report_task(task_id, "FAILED", goal=plan.goal, original_request=user_request,
                                   verified=False, result_summary="", error="permission_denied",
                                   steps=steps, artifacts=artifacts, plan_json=self._plan_json(plan),
-                                  permission_summary=f"denied:{eff.name}")
+                                  permission_summary=f"denied:{eff.name}:{decision.reason}")
                 return {"status": "failed", "reason": "permission_denied", "results": results,
                         "task_id": task_id, "task_record": self._last_task_record}
             # 执行
@@ -221,6 +229,15 @@ class AgentRuntime:
                 self.on_task_finished(record)
             except Exception as e:   # pragma: no cover —— owner persist 失败不影响 Agent 结果
                 log.warning("task history persist callback failed: %s", e)
+
+    @staticmethod
+    def _path_arg(args: Dict[str, Any]) -> str:
+        """从 step args 提取路径（供 task-scoped allowed_path_root 检查）。"""
+        for k in ("path", "base", "source", "dest", "target", "file", "new_name"):
+            v = (args or {}).get(k)
+            if isinstance(v, str) and v.strip():
+                return v
+        return ""
 
     @staticmethod
     def _plan_json(plan: AgentPlan) -> str:

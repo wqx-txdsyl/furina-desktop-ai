@@ -331,24 +331,36 @@ class Furina:
         # Phase 13 Final Residual 0.1（clock domain）：recent freshness 统一使用 **monotonic** 时钟
         # （与 `_grounded_fact_recovery` 的 `now = time.monotonic()` 同一 clock domain）。
         # 绝不拿 epoch wall time 与 monotonic 做差；如需持久化 wall-clock，另行存 `_recent_activity_finished_wall`。
+        # Phase 14.1.1 §3：C6 activity **instance truth** —— 每次真正 START 生成唯一
+        # activity_instance_id（显式 sequence，不用时间戳字符串去重）；FINISH 引用同一 instance；
+        # 同 instance 重复 emit → exactly once（bridge key 去重）。read→play→read→play 各自新 instance。
         try:
             prev = getattr(self, "_current_activity_truth", "") or ""
+            inst_map = getattr(self, "_activity_instances", {})
+            bridge = getattr(self, "_event_bridge", None)
             if prev and prev != req.action:
                 self._recent_activity = prev
                 self._recent_activity_finished_at = time.monotonic()
                 self._recent_activity_finished_wall = time.time()
-                # Phase 14.1 §7：C6 ACTIVITY_FINISHED（活动切换时记录上一活动，owner）
-                bridge = getattr(self, "_event_bridge", None)
-                if bridge is not None:
-                    bridge.record("ACTIVITY_FINISHED", key=f"actfin:{prev}:{req.action}",
-                                  payload={"activity": prev, "next": req.action},
+                old_inst = inst_map.pop(prev, "")
+                if bridge is not None and old_inst:
+                    bridge.record("ACTIVITY_FINISHED", key=f"activity-finish:{old_inst}",
+                                  payload={"activity": prev, "activity_instance_id": old_inst,
+                                           "next": req.action, "reason": "activity_switch"},
                                   source="director", importance=0.1)
             self._current_activity_truth = req.action
-            # Phase 14.1 §7：C6 ACTIVITY_STARTED（活动启动，owner；同活动不重复）
-            bridge = getattr(self, "_event_bridge", None)
-            if bridge is not None and req.action != "idle":
-                bridge.record("ACTIVITY_STARTED", key=f"actstart:{req.action}",
-                              payload={"activity": req.action}, source="director", importance=0.1)
+            if req.action and req.action != "idle":
+                # 每个真正 START 生成唯一 instance id（显式 sequence）
+                seq = getattr(self, "_activity_seq", 0) + 1
+                self._activity_seq = seq
+                inst_id = f"act_{seq:06d}"
+                inst_map[req.action] = inst_id
+                self._activity_instances = inst_map
+                if bridge is not None:
+                    bridge.record("ACTIVITY_STARTED", key=f"activity-start:{inst_id}",
+                                  payload={"activity": req.action, "activity_instance_id": inst_id,
+                                           "previous": prev or ""},
+                                  source="director", importance=0.1)
         except Exception:
             pass
         # Phase 13 终审 §4.5：**EmotionEngine 是情绪真相的唯一所有者**。
@@ -814,12 +826,11 @@ class Furina:
         通过 App._agent_worker → AgentRuntime.execute；AgentRuntime 是 AGENT_COMPLETED/FAILED
         的**唯一** production owner（App 不再重复 emit）。
 
-        Phase 14.1 §2：只有**精选安全菜单任务**（AGENT_TASKS，用户显式点击、固定 bounded 工具序列）
-        授予本次任务 L2 高风险授权；任意文本请求（含 LLM plan）不授予 → L2/L3 默认拒绝。
+        Phase 14.1.1 §1：菜单任务的 bounded L2 授权在 `_agent_worker` 里以**本次 task 独立
+        AuthorizationContext** 构造（allowed_tools + allowed_path_root 限定），
+        不写入任何跨任务共享状态；并发 task 互不泄漏。
         """
         import threading
-        if user_request in self.AGENT_TASKS:
-            self.permission.authorize(Permission.L2_HIGH_RISK, scope=f"menu:{user_request}")
         threading.Thread(target=self._agent_worker, args=(user_request, extra_context), daemon=True).start()
 
     def _set_agent_planning(self) -> None:
@@ -832,15 +843,25 @@ class Furina:
         # 是域变更，经 dispatcher 由 owner 线程落地。
         self._rt_dispatcher().submit(self._set_agent_planning)
         log.info("avatar command -> agent: %s", text)
+        # Phase 14.1.1 §1：精选安全菜单任务 → **本次 task 独立 bounded AuthorizationContext**
+        # （allowed_tools 限定确定性序列 + allowed_path_root 限定用户 Downloads）。
+        # 任意自然语言请求不授予 → 默认 L0/L1 only（L2/L3 deny）。
+        task_auth = None
+        if text == "整理下载文件夹":
+            task_auth = self.permission.new_task_context(
+                max_permission=Permission.L2_HIGH_RISK,
+                allowed_tools=("fs.list_dir", "fs.make_dirs", "fs.organize"),
+                allowed_path_root=str(Path.home() / "Downloads"),
+                source="menu:整理下载文件夹")
         try:
             req = self.AGENT_TASKS.get(text, text)   # 未登记任务也可作为直接请求（Harness 安全目录）
             if text == "整理下载文件夹":
                 d = Path.home() / "Downloads"
-                res = self.agent.execute(req, {"path": str(d)})
+                res = self.agent.execute(req, {"path": str(d)}, task_auth=task_auth)
             elif extra_context and "path" in extra_context:
-                res = self.agent.execute(req, {"path": str(extra_context["path"])})
+                res = self.agent.execute(req, {"path": str(extra_context["path"])}, task_auth=task_auth)
             else:
-                res = self.agent.execute(req, dict(extra_context or {}))
+                res = self.agent.execute(req, dict(extra_context or {}), task_auth=task_auth)
             # §7：AgentRuntime.execute 已发出 AGENT_STARTED/COMPLETED/FAILED（唯一 owner）；
             # App 层**不重复 emit**，只做记忆整合。
             # H1 §4.1：**记忆写入是域变更** → 经 dispatcher 回 owner 线程执行（worker 不直写 DB）。
@@ -852,12 +873,7 @@ class Furina:
                                                 outcome=goal))
         except Exception as e:
             log.warning("agent worker err: %s", e)
-        finally:
-            # Phase 14.1 §2：授权上下文是**本次任务**一次性 —— 任务结束回 owner 清空（不跨任务延续）
-            try:
-                self._rt_dispatcher().submit(self.permission.revoke_all)
-            except Exception:
-                pass
+        # 任务结束：task_auth 是局部对象，随任务自然销毁 —— 不触碰其它并发 task 的 context。
 
     def _persist_agent_task(self, record: dict) -> None:
         """owner 线程（Phase 14I）：Agent 结构化 task_record → C7 persist + C6 事件。

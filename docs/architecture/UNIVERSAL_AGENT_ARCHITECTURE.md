@@ -80,6 +80,19 @@ L3_SENSITIVE  敏感（必须确认）
 
 既有 `furina/agent/permission.py` 的 `PermissionManager` 保持为唯一裁决入口。
 
+**Phase 14.1.1（Task-scoped Authorization）**：
+- 授权必须绑定**本次 Agent task**：`AuthorizationContext`（authorization_id / max_permission /
+  allowed_tools / allowed_path_root / source），每次 `AgentRuntime.execute` 拥有独立
+  immutable/task-local context；**禁止跨并发任务共享的全局 set{Permission}**。
+- 普通自然语言任务默认 L0/L1 only；L2/L3 deny —— 除非本 task 有匹配授权；
+  **L3 不得被 L2 token 覆盖**。
+- 菜单任务"整理下载文件夹"的 bounded L2：allowed_tools 限定 organize 确定性序列、
+  allowed_path_root 限定用户 Downloads；越界（fs.delete 任意路径 / doc.write outside root）→
+  Runtime DENIED（task_scope_mismatch）。并发任务 context 互不泄漏；任务结束只销毁自身 context。
+- 动态权限：已有文件覆盖 / overwrite=True → 至少 L2；delete → L2+；send → L3
+  （EffectivePermissionResolver，Planner validation 与 Runtime 一致）。
+- **Office *.create（docx/pptx/xlsx）永不覆盖已有文件**（工具层拒绝；未来用专门 edit capability）。
+
 ## 4. Filesystem Capability Expansion（Phase 14D）
 
 在既有 `fs.list_dir / fs.make_dirs / fs.read_file / fs.organize` 之上增加真实 primitives：

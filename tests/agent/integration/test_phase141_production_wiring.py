@@ -130,7 +130,7 @@ def test_4_l1_cannot_overwrite_existing(fapp, tmp_path):
 
 
 def test_5_l2_explicit_authorize_overwrites(fapp, tmp_path):
-    """L2 显式授权 → overwrite → reread verified。"""
+    """L2 显式授权（本次 task scoped AuthorizationContext）→ overwrite → reread verified。"""
     report = tmp_path / "report.md"
     report.write_text("original", encoding="utf-8")
     llm = _StubLLM(json.dumps({"goal": "覆盖", "steps": [{"tool": "doc.write",
@@ -139,8 +139,10 @@ def test_5_l2_explicit_authorize_overwrites(fapp, tmp_path):
                                                                    "overwrite": True},
                                                           "expect": "覆盖"}]}))
     fapp.agent.planner = PlannerV2(fapp.tools, fapp.capability_registry, llm=llm)
-    fapp.permission.authorize(Permission.L2_HIGH_RISK)
-    res = fapp.agent.execute("覆盖 report.md", {})
+    # Phase 14.1.1：授权 = 本次 task 的 AuthorizationContext（不再有全局 authorize set）
+    task_auth = fapp.permission.new_task_context(max_permission=Permission.L2_HIGH_RISK,
+                                                 source="test:L2")
+    res = fapp.agent.execute("覆盖 report.md", {}, task_auth=task_auth)
     assert res["status"] == "completed", f"L2 显式授权应可覆盖: {res}"
     assert report.read_text(encoding="utf-8") == "hacked", "覆盖后 reread verified"
 
@@ -185,22 +187,28 @@ def test_7_catalog_consumed_by_production_launch(fapp):
     assert res["status"] == "completed", f"真实 app.launch 必须完成: {res}"
 
 
-def test_7b_menu_task_grants_scoped_l2_only(fapp):
-    """精选安全菜单任务 → 本次任务 L2 授权；任意文本请求不授予。"""
-    granted = []
-    orig = fapp.permission.authorize
+def test_7b_menu_task_scoped_authorization_only(fapp):
+    """精选安全菜单任务 → 本次 task 独立 bounded AuthorizationContext（工具/路径限定）；
+    任意文本请求不授予。"""
+    captured = {}
 
-    def _spy(level, **kw):
-        granted.append((level, kw))
-        orig(level, **kw)
-    fapp.permission.authorize = _spy
-    with mock.patch("threading.Thread"):
-        fapp.submit_agent_task("整理下载文件夹")
-    assert any(lvl == Permission.L2_HIGH_RISK for lvl, _kw in granted), "菜单任务授予本次任务 L2"
-    granted.clear()
-    with mock.patch("threading.Thread"):
-        fapp.submit_agent_task("随便说的任意请求文本")
-    assert granted == [], "任意文本请求不得自动授权"
+    def _spy_execute(req, ctx=None, task_auth=None):
+        captured["auth"] = task_auth
+        return {"status": "skipped"}   # 不真正执行（只验证授权构造）
+    fapp.agent.execute = _spy_execute
+    fapp._agent_worker("整理下载文件夹")
+    auth = captured.get("auth")
+    assert auth is not None, "菜单任务必须构造 task-scoped AuthorizationContext"
+    assert auth.max_permission == Permission.L2_HIGH_RISK
+    assert "fs.organize" in auth.allowed_tools, "菜单 L2 必须限定 organize 确定性序列工具"
+    assert "fs.delete" not in auth.allowed_tools, "菜单 L2 不得覆盖任意工具（尤其 fs.delete）"
+    assert "Downloads" in auth.allowed_path_root, "菜单 L2 必须限定路径根 = 用户 Downloads"
+    # 任意文本请求不授予
+    captured.clear()
+    fapp._agent_worker("随便说的任意请求文本")
+    a2 = captured.get("auth")
+    assert a2 is None or a2.max_permission == Permission.L1_LOW_WRITE, \
+        "任意文本请求不得获得 L2 授权"
 
 
 # ================================================================ 8/9. C7 exact lifecycle preservation
