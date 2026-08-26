@@ -27,27 +27,29 @@
 
 ## 逐条目登记
 
-| SOURCE_ID | SOURCE_TYPE | ACCESS_SOURCE | ORIGINAL_MATERIAL | CANON_TIER | VERSION | QUEST | ACT | SCENE | FURINA_PRESENT | RELEVANCE | EVIDENCE_IDS | NOTES |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| SRC-001 | CURATED_EVIDENCE | repo: docs/persona/FURINA_CANON_EVIDENCE.md | 游戏内简体中文正式文本（角色故事/语音/主线/传说任务） | TIER 0 | 56 units (FUR-001~056) | Chapter IV + 传说任务"水的女儿" | I–V | 全 | 是 | C2 全阶段种子 | FUR-001~056 | 已人工筛过的 provenance seed；本 Phase 唯一 factual 来源 |
-| SRC-002 | CURATED_MODEL | repo: docs/persona/FURINA_PERSONA_MODEL.md | 从 Evidence 派生的统一人格模型 | TIER 0（派生） | 118 行 | — | — | 全 | 是 | C2 psychological/present-day 推导 | 见 §9 traceability | 用于 psychological_effects/present_day_effects 的结构化推导 |
-| SRC-003 | CURATED_MODEL | repo: furina/persona/furina_canon.py | Canon 常量（IDENTITY_FACTS/PERSONALITY_AXES/CORE_CONTRADICTIONS） | TIER 0（派生） | 342 行 | — | — | 全 | 是 | C1/C2 运行时权威 | FUR-015~044 | runtime 唯一 Canon 源 |
-| SRC-004 | OFFICIAL_GAME_TEXT | 不在 repo 直接保存（evidence doc 已概括；禁止大段复制原文） | 主线 Chapter IV Act I–V 中文原文 | TIER 0 | — | Chapter IV | I–V | 庭审/歌剧院/独处 | 是 | Act V 终局 | FUR-006/007/008/039/041/042/043/048/049/050/051 | 本 Phase 不复制大段台词；evidence doc 已保留 ≤15 字 snippet |
-| SRC-005 | OFFICIAL_GAME_TEXT | 不在 repo 直接保存 | 传说任务"水的女儿"中文原文 | TIER 0 | — | 传说任务 | I | 结尾神之眼 | 是 | CHOSEN_PERFORMANCE 锚点 | FUR-019, FUR-055 | 同上 |
-| SRC-006 | OFFICIAL_GAME_TEXT | 不在 repo 直接保存 | Character Stories 1–5 / Vision / Character Details / Voice-Over 中文原文 | TIER 0 | — | — | — | 全 | 是 | C2 长时段证据 | FUR-001~005, 009~018, 020~040, 044~047, 052~056 | 同上 |
-| SRC-007 | OFFICIAL_WEB | HoYoWiki Furina 官方角色页（cross-check 预留） | 官方角色资料 | TIER 1 | — | — | — | — | 是 | 身份/时间顺序交叉核验 | — | 本 Phase 未联网取用；标记为交叉核验入口 |
-| SRC-008 | OFFICIAL_MEDIA | 官方 Character Demo/Teaser/Story Teaser/Cutscene/trailers（cross-check 预留） | 官方视频 | TIER 1 | — | — | — | — | 是 | 场景语境补全 | — | 本 Phase 未联网取用 |
-| SRC-009 | COMMUNITY_MIRROR | 社区 Wiki（biligame/萌娘百科等，仅定位/交叉核验，不升级为 TIER 0） | 官方游戏文本的社区镜像 | TIER 2 | — | — | — | — | 是 | 定位文本/补完整上下文 | — | 本 Phase 未取用；如未来使用必须标 access_source=COMMUNITY_MIRROR, original_material=OFFICIAL_GAME_TEXT |
-| SRC-010 | FORBIDDEN | Reddit/论坛/MBTI/知乎人格分析/短视频/二创/同人/AI summary | 非官方解读 | TIER 3 | — | — | — | — | — | **禁止** | — | 绝不进入 CanonEpisode factual fields |
+| SOURCE_ID | SOURCE_TYPE | ACCESS_SOURCE | ACCESS_LOCATOR（Phase 15A：可复现定位） | ORIGINAL_MATERIAL | CANON_TIER | VERSION | QUEST | ACT | SCENE | FURINA_PRESENT | RELEVANCE | EVIDENCE_IDS | NOTES |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SRC-001 | CURATED_EVIDENCE | repo: docs/persona/FURINA_CANON_EVIDENCE.md | repo: docs/persona/FURINA_CANON_EVIDENCE.md (FUR-001..056) | 游戏内简体中文正式文本（角色故事/语音/主线/传说任务） | TIER 0 | 56 units (FUR-001~056) | Chapter IV + 传说任务"水的女儿" | I–V | 全 | 是 | C2 全阶段种子 | FUR-001~056 | 已人工筛过的 provenance seed；本 Phase 唯一 factual 来源 |
+| SRC-002 | CURATED_MODEL | repo: docs/persona/FURINA_PERSONA_MODEL.md | repo: docs/persona/FURINA_PERSONA_MODEL.md | 从 Evidence 派生的统一人格模型 | TIER 0（派生） | 118 行 | — | — | 全 | 是 | C2 psychological/present-day 推导 | 见 §9 traceability | 用于 psychological_effects/present_day_effects 的结构化推导 |
+| SRC-003 | CURATED_MODEL | repo: furina/persona/furina_canon.py | repo: furina/persona/furina_canon.py | Canon 常量（IDENTITY_FACTS/PERSONALITY_AXES/CORE_CONTRADICTIONS） | TIER 0（派生） | 342 行 | — | — | 全 | 是 | C1/C2 运行时权威 | FUR-015~044 | runtime 唯一 Canon 源 |
+| SRC-004 | OFFICIAL_GAME_TEXT | 官方游戏内文本（游戏内任务日志/官方 Story Archive）；repo 不保存大段原文 | 游戏内 Chapter IV Acts I–V 任务日志；repo 可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.2/2.8/2.9/2.11 | 主线 Chapter IV Act I–V 中文原文 | TIER 0 | — | Chapter IV | I–V | 庭审/歌剧院/独处 | 是 | Act V 终局 | FUR-006/007/008/039/041/042/043/048/049/050/051 | 本 Phase 不复制大段台词；evidence doc 已保留 ≤15 字 snippet |
+| SRC-005 | OFFICIAL_GAME_TEXT | 官方游戏内文本（游戏内任务日志）；repo 不保存大段原文 | 游戏内 传说任务《水的女儿》任务日志；repo 可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.4/2.5 (FUR-019/FUR-055) | 传说任务"水的女儿"中文原文 | TIER 0 | — | 传说任务 | I | 结尾神之眼 | 是 | CHOSEN_PERFORMANCE 锚点 | FUR-019, FUR-055 | 同上 |
+| SRC-006 | OFFICIAL_GAME_TEXT | 官方游戏内文本（游戏内角色档案）；repo 不保存大段原文 | 游戏内 Character Stories 1–5 / Character Details / Vision / Voice-Overs；repo 可复现证据摘要: FURINA_CANON_EVIDENCE.md §2.1–2.10 | Character Stories 1–5 / Vision / Character Details / Voice-Over 中文原文 | TIER 0 | — | — | — | 全 | 是 | C2 长时段证据 | FUR-001~005, 009~018, 020~040, 044~047, 052~056 | 同上 |
+| SRC-007 | OFFICIAL_WEB | HoYoWiki Furina 官方角色页 | https://wiki.hoyolab.com（官方检索"芙宁娜"角色页）；本 Phase 未联网取用（cross-check 预留） | 官方角色资料 | TIER 1 | — | — | — | — | 是 | 身份/时间顺序交叉核验 | — | 本 Phase 未联网取用；标记为交叉核验入口 |
+| SRC-008 | OFFICIAL_MEDIA | 官方 Character Demo/Teaser/Story Teaser/Cutscene/trailers | 官方账号（YouTube/Bilibili）检索 "Furina" / "Masquerade of the Guilty"；本 Phase 未联网取用 | 官方视频 | TIER 1 | — | — | — | — | 是 | 场景语境补全 | — | 本 Phase 未联网取用 |
+| SRC-009 | COMMUNITY_MIRROR | 社区 Wiki（biligame/萌娘百科等，仅定位/交叉核验，不升级为 TIER 0） | biligame 等社区 Wiki 检索"芙宁娜"（仅定位官方文本）；本 Phase 未取用 | 官方游戏文本的社区镜像 | TIER 2 | — | — | — | — | 是 | 定位文本/补完整上下文 | — | 本 Phase 未取用；如未来使用必须标 access_source=COMMUNITY_MIRROR, original_material=OFFICIAL_GAME_TEXT |
+| SRC-010 | FORBIDDEN | Reddit/论坛/MBTI/知乎人格分析/短视频/二创/同人/AI summary | N/A —— TIER 3 禁止来源，无 locator | 非官方解读 | TIER 3 | — | — | — | — | — | **禁止** | — | 绝不进入 CanonEpisode factual fields |
 
 ## C2 数据文件
 
 - `data/canon/furina_life_history.json` —— 20+ 条 CanonEpisode（version-controlled、只读）。
 - `data/canon/furina_life_sources.json` —— 上述 SOURCE_ID 机器可读登记。
 
-> **C2 状态（Phase 14.1 §10）**：`STRUCTURE IMPLEMENTED` / `CANON CORPUS = SEED / PARTIAL`。
-> 20 条 seed episodes；Act I–IV 具体场景标 PARTIAL。SRC-004/005/006 无可重定位 locator，
-> 不声称 source-complete；完整官方 source expansion 留 Phase 15。禁止写 FULL CANON LIFE COMPLETE。
+> **C2 状态（Phase 15A 更新）**：`STRUCTURE IMPLEMENTED` + `CANON CORPUS = SEED / PARTIAL`（20 条
+> seed episodes 覆盖全部 20 个 mandatory life stages；Act I–IV 具体场景证据不足处标 PARTIAL，不猜）。
+> SRC-004/005/006 提供**可复现 access_locator**（游戏内任务日志/角色档案 + repo 内证据摘要章节），
+> 但 repo 不保存大段原文，仍不声称"全文 transcript 级 source-complete"；完整官方全文扩展留后续
+> Phase（不在 Phase 15 复制盗版全文）。禁止写 FULL CANON LIFE COMPLETE。
 
 ## 验收计数（C2 ACCEPTANCE）
 

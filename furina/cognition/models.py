@@ -23,6 +23,7 @@ class CanonEpisode:
     episode_id: str
     timeline_order: int = 0
     period: str = ""
+    life_stage: str = ""                # Phase 15A：人生阶段标识（与 episode_id 对齐）
     version: str = ""
     quest: str = ""
     act: str = ""
@@ -50,6 +51,7 @@ class CanonEpisode:
     source_ids: List[str] = field(default_factory=list)
     confidence: str = "medium"          # low / medium / high
     canon_status: str = "canonical"     # canonical / derived / partial / unknown
+    status: str = ""                    # Phase 15A：数据状态别名（partial/unknown 等）
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CanonEpisode":
