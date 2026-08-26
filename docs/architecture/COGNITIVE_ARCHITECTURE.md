@@ -2,6 +2,9 @@
 
 > STATUS = IMPLEMENTED（furina/cognition/ + 既有 production modules）
 > 前身：docs/architecture/future/COGNITIVE_STORES.md（PLANNED reservation，已升级为本正式文档的 redirect）。
+> **Phase 15 状态更新**：C1–C7 结构契约保持不变（FROZEN）；Cognitive Life 行为（interpretation /
+> memory lifecycle / user model evolution / retrieval maturity / persistent loop / restart）见
+> [docs/architecture/COGNITIVE_LIFE.md](COGNITIVE_LIFE.md)。本文件只做 cross-reference，不重新设计。
 
 本文档是 Cognitive 层的**唯一架构契约**：7 个逻辑 Store 的 SOURCE / AUTHORITY / PHYSICAL STORAGE /
 WRITE OWNER / READERS / RETENTION / CONFLICT RULE / RUNTIME USE，以及 Context Assembler、
