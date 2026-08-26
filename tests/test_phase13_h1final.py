@@ -603,7 +603,8 @@ def test_one_petting_creates_at_most_one_semantic_long_term_memory():
 def test_one_poke_creates_at_most_one_semantic_long_term_memory():
     app, ie, bus, se, sched = _memory_counter_app()
     ie.emit_event("poke", "whole")
-    assert app._mem["semantic"] == 0 and app._cog_events.get("USER_PET") == 1, \
+    # Phase 14 R11：poke → 独立客观事件 USER_POKE（不再坍缩进 USER_PET）
+    assert app._mem["semantic"] == 0 and app._cog_events.get("USER_POKE") == 1, \
         (app._mem, app._cog_events)
     assert app._mem["consolidate"] == 0, app._mem
 
@@ -611,18 +612,22 @@ def test_one_poke_creates_at_most_one_semantic_long_term_memory():
 def test_one_drag_creates_at_most_one_semantic_long_term_memory():
     app, ie, bus, se, sched = _memory_counter_app()
     ie.emit_event("drag", "whole")
-    assert app._mem["semantic"] == 0 and app._cog_events.get("USER_PET") == 1, \
+    # Phase 14 R11：drag → 独立客观事件 USER_DRAG（不再坍缩进 USER_PET）
+    assert app._mem["semantic"] == 0 and app._cog_events.get("USER_DRAG") == 1, \
         (app._mem, app._cog_events)
     assert app._mem["consolidate"] == 0, app._mem
 
 
 def test_repeated_distinct_interactions_remain_distinct_events():
-    """三次**不同**语义事件（petting/poke/drag）→ 3 条独立 C6 事件；
+    """三次**不同**语义事件（petting/poke/drag）→ 3 条独立 C6 事件（USER_PET /
+    USER_POKE / USER_DRAG 各自客观类型）；
     C3 形成由 cognition 单一 owner（reinforce 合并），App 不直接 observe。"""
     app, ie, bus, se, sched = _memory_counter_app()
     ie.emit_event("petting", "head")
     ie.emit_event("poke", "whole")
     ie.emit_event("drag", "whole")
-    assert app._cog_events.get("USER_PET") == 3, f"3 次互动 → 3 条 C6 事件: {app._cog_events}"
+    assert app._cog_events.get("USER_PET") == 1, f"petting → 恰好 1 条 USER_PET: {app._cog_events}"
+    assert app._cog_events.get("USER_POKE") == 1, f"poke → 恰好 1 条 USER_POKE: {app._cog_events}"
+    assert app._cog_events.get("USER_DRAG") == 1, f"drag → 恰好 1 条 USER_DRAG: {app._cog_events}"
     assert app._mem["semantic"] == 0, f"App 不得直接形成 C3: {app._mem}"
     assert app._mem["consolidate"] == 0

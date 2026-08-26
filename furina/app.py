@@ -423,15 +423,20 @@ class Furina:
                 self.memory.store.save_relationship(self.relationship.state)
             except Exception:
                 pass
-        # Phase 15.1 §3：**C3 单一形成权威** —— 互动现实 → C6 USER_PET → cognition
-        # consolidation → C3（带 provenance；重复琐碎互动 reinforce/抑制）。
+        # Phase 15.1 §3：**C3 单一形成权威** —— 互动现实 → C6 → cognition consolidation →
+        # C3（带 provenance；重复琐碎互动 reinforce/抑制）。
+        # Phase 14 R6–R12（R11）：petting/poke/drag 使用**各自独立的客观 event_type**
+        # （USER_PET / USER_POKE / USER_DRAG，与 EventTimelineStore 白名单一致），
+        # 不再用 USER_PET 作"物理互动"伞型。
         # 不再由 App 直接 memory.observe（避免 provenance-less + 双重 owner）。
-        if kind in ("petting", "poke", "drag"):
+        _C6_INTERACTION_TYPES = {"petting": "USER_PET", "poke": "USER_POKE",
+                                 "drag": "USER_DRAG"}
+        if kind in _C6_INTERACTION_TYPES:
             try:
                 cog = getattr(self, "cognition", None)
                 if cog is not None:
                     cog.record_event(
-                        "USER_PET", source="interaction", importance=0.45,
+                        _C6_INTERACTION_TYPES[kind], source="interaction", importance=0.45,
                         payload={"kind": kind, "count": int(getattr(ev, "count", 0) or 0)},
                         consolidate=True)
             except Exception:
@@ -610,11 +615,12 @@ class Furina:
     def submit_user_message(self, text: str) -> None:
         """FINAL-R1 §3：**唯一用户直接对话生产入口**（GUI 输入框 + Harness 共用）。
 
-        owner（调用线程）：高置信语义事件 / 关系 / 情绪（恰好一次）+ 预留 direct 序号
-        + 冻结快照 + **入队 DirectDialogueQueue**（立即返回；单 worker 串行 FIFO 消费）；
+        owner（调用线程）：高置信语义事件 / 关系 / 情绪（恰好一次）+ **R10 两阶段
+        ingress**（reserve turn identity → 记录 canonical USER_MESSAGE（带 turn_id）→
+        C4 确定性演化精确绑定该事件 → 冻结快照 → 入队）→ 立即返回；
         worker：DialogueBrain LLM（有界）；owner（dispatcher）：最终 speech 应用 + 记忆提交。
-        B1（评审基线 0402e7f）：不再每个消息 spawn 独立线程 —— 专用 direct lane 保证
-        每个回合必达终态、ingress FIFO 保序、ambient 不堵 direct。
+        B1（评审基线 0402e7f）：专用 direct lane 保证每个回合必达终态、ingress FIFO 保序、
+        ambient 不堵 direct。
         """
         d = self._rt_dispatcher()
         d.require_owner("submit_user_message")
@@ -626,33 +632,61 @@ class Furina:
                 self.emotion.apply_event(EVENT_TALK, tired_hint=self._tired_hint())
             except Exception:
                 pass
-        # Phase 15D：用户直接消息 → C4 确定性演化（declaration → event → upsert(source_event_id)；
-        # explicit correction wins；PLAN_COMPLETED 关联 ACTIVE PLAN；'这首歌不错' 不形成 lifelong）。
-        cog = getattr(self, "cognition", None)
-        if cog is not None:
+        # 2. R10（Phase 14 R6–R12）：两阶段 ingress —— 先 reserve turn identity
+        #    （ingress 即起算 deadline；DirectDialogueQueue 仍是唯一 turn_id authority），
+        #    在 owner 语义效果**之前**记录 canonical USER_MESSAGE（带 turn_id），
+        #    使 C4 transition 事件能精确绑定触发它的 USER_MESSAGE 事件（event identity，
+        #    而非文本相等）。
+        q = self._direct_dialogue_queue()
+        turn_id = q.reserve_turn(user_text=text)
+        bridge = getattr(self, "_event_bridge", None)
+        umsg_id = ""
+        if bridge is not None and turn_id:
             try:
-                cog.apply_user_message(text, channel="DIRECT_USER_TURN")
+                # process=False：先落 canonical 事件，语义效果（apply_user_message）将
+                # 携带其 event_id 创建 transition —— 之后由 process_pending 幂等消费
+                # （dedupe 复用同一 transition 事件，不重复创建）。
+                umsg_id = bridge.record(
+                    "USER_MESSAGE", key=f"umsg:{turn_id}",
+                    payload={"text": text[:200]}, source="user",
+                    channel="DIRECT_USER_TURN", turn_id=turn_id, importance=0.2,
+                    process=False) or ""
+                bridge.record("DIRECT_TURN_STARTED", key=f"dstart:{turn_id}",
+                              source="app", channel="DIRECT_USER_TURN", turn_id=turn_id,
+                              importance=0.1, process=False)
             except Exception:
                 pass
-        # 2. R1.2-2：**不再在入队前 reserve DialogueBrain seq** —— DirectDialogueQueue
-        #    是 DIRECT_USER_TURN 的唯一串行 authority（turn_id = 用户 ingress identity）；
-        #    brain seq 只在 worker 真正执行 DialogueBrain 时由 say() 内部分配
-        #    （_next_seq()），与执行顺序天然一致；提前 reserve 会在 job 失败时制造
-        #    seq hole（N 永远没人 release → N+1 永久等待）。
-        # 3. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
-        snap = self._freeze_direct_snapshot(text)   # ingress_seq=None
-        # 4. R1.1-1：无论 dialogue_brain 是否为 None，都必须产生 DirectTurn + 可观察终态。
-        #    db=None → worker 立即 FAILED(reason=dialogue_brain_unavailable) + SYSTEM_STATUS，
-        #    绝不让用户消息静默消失；db 恢复后下一条消息正常回复。
-        turn_id = self._direct_dialogue_queue().submit(snap, user_text=text)
-        # Phase 14.1 §7：C6 USER_MESSAGE + DIRECT_TURN_STARTED（owner，exactly once per turn_id）
-        bridge = getattr(self, "_event_bridge", None)
-        if bridge is not None and turn_id:
-            bridge.record("USER_MESSAGE", key=f"umsg:{turn_id}",
-                          payload={"text": text[:200]}, source="user",
-                          channel="DIRECT_USER_TURN", turn_id=turn_id, importance=0.2)
-            bridge.record("DIRECT_TURN_STARTED", key=f"dstart:{turn_id}",
-                          source="app", channel="DIRECT_USER_TURN", turn_id=turn_id, importance=0.1)
+        # 3. Phase 15D：C4 确定性演化（绑定 exact USER_MESSAGE event id + turn_id；
+        #    explicit correction wins；PLAN_COMPLETED 关联 ACTIVE PLAN）
+        cog = getattr(self, "cognition", None)
+        try:
+            if cog is not None:
+                try:
+                    cog.apply_user_message(text, channel="DIRECT_USER_TURN",
+                                           turn_id=turn_id,
+                                           source_event_id=umsg_id or None)
+                except Exception:
+                    pass
+            # 4. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
+            snap = self._freeze_direct_snapshot(text)   # ingress_seq=None
+            # 5. R10：入队已 reserve 的 turn（FIFO 按 reserve 顺序；deadline 保持 reserve 时刻；
+            #    worker 在 owner 语义效果 + 快照冻结完成后才开始 —— 不违反 direct-lane 保证）
+            q.submit_reserved(turn_id, snap, user_text=text)
+            # 6. 幂等消费本轮 USER_MESSAGE/DIRECT_TURN_STARTED（interpretation dedupe
+            #    复用 apply_user_message 已创建的 transition 事件；无重复）
+            if cog is not None:
+                try:
+                    cog.process_pending(batch=5)
+                except Exception:
+                    pass
+        except Exception:
+            # R10-T7：reserve 后 owner 准备失败 → 该 turn 到达可观察终态（无永久 pending/
+            # sequence hole；不阻塞后续 turn）
+            try:
+                q.cancel_reserved(turn_id, reason="owner_prep_failed")
+            except Exception:
+                pass
+            raise
 
     # -------------------------------------------------- B1：DirectDialogueQueue（专用直接 lane）
     def _direct_dialogue_queue(self):
@@ -1239,26 +1273,36 @@ class Furina:
     # -------------------------------------------------- Phase 13C §28-31：对话→记忆（conservative）
     def _observe_with_provenance(self, content, *, level, source, importance,
                                  context="", outcome=""):
-        """对话语义观察记忆（Phase 15.1 G2）：先落 C6 USER_STATEMENT_OBSERVED（客观事件），
-        再带 source_event_ids 形成 C3 —— 单一形成 owner + 可追溯。
+        """对话语义观察记忆（Phase 15.1 G2 + R6 fail-closed）：先落 C6
+        USER_STATEMENT_OBSERVED（客观事件），再带 source_event_ids 形成 C3 ——
+        单一形成 owner + 可追溯。
 
-        cognition 缺失（测试外壳/旧直调）→ 退化为直接 observe（非 production 现实路径，
-        文档说明：仅测试 helper 与无 cognition 的兼容外壳）。
+        R6 硬不变量（production）：C6 事件创建失败 / 无有效 event_id → **FAIL CLOSED**：
+        记录日志、返回 None、**绝不**调用 MemoryEngine.observe（不产生 provenance-less C3）。
+        无 cognition 的兼容外壳（旧隔离单测）仍保持原行为，但**不是**生产路径
+        （production Furina 运行时始终装配 cognition，永不经过该退化分支）。
         """
         cog = getattr(self, "cognition", None)
-        src_ids = []
-        if cog is not None:
-            try:
-                ev = cog.record_event("USER_STATEMENT_OBSERVED",
-                                      payload={"text": (content or "")[:200],
-                                               "context": (context or "")[:50]},
-                                      source="dialogue", importance=0.2, consolidate=False)
-                src_ids = [ev.event_id]
-            except Exception:
-                pass
+        if cog is None:
+            # legacy compatibility shell（非生产路径；production 装配下不可达）
+            return self.memory.observe(content, level=level, source=source,
+                                       importance=importance, context=context,
+                                       outcome=outcome)
+        try:
+            ev = cog.record_event("USER_STATEMENT_OBSERVED",
+                                  payload={"text": (content or "")[:200],
+                                           "context": (context or "")[:50]},
+                                  source="dialogue", importance=0.2, consolidate=False)
+        except Exception as e:
+            log.warning("C6 USER_STATEMENT_OBSERVED 记录失败 —— C3 FAIL CLOSED（不形成 "
+                        "provenance-less 记忆）: %s", e)
+            return None
+        if ev is None or not getattr(ev, "event_id", ""):
+            log.warning("C6 USER_STATEMENT_OBSERVED 未返回有效事件 —— C3 FAIL CLOSED")
+            return None
         return self.memory.observe(content, level=level, source=source,
                                    importance=importance, context=context, outcome=outcome,
-                                   source_event_ids=src_ids)
+                                   source_event_ids=[ev.event_id])
 
     def _maybe_observe_conversation(self, text: str) -> None:
         """只对高置信"用户信息/计划/偏好/承诺"做记忆候选（不盲存所有闲聊；无新 LLM）。

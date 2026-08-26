@@ -43,7 +43,10 @@ class DirectTurn:
         self.ingress_seq = ingress_seq if ingress_seq is not None else turn_id
         self.user_text = user_text
         self.channel = channel
-        self.status = "QUEUED"          # QUEUED → GENERATING → 终态
+        # R10（Phase 14 R6–R12）：两阶段 ingress —— RESERVED（identity 已分配、deadline 已起算、
+        # 未入队）→ QUEUED → GENERATING → 终态。reserved 后被 cancel_reserved 的 turn 直接
+        # 进入终态 CANCELLED（可观察，无 sequence hole）。
+        self.status = "RESERVED"        # RESERVED → QUEUED → GENERATING → 终态
         self.failure_reason: str = ""
         self.latency_ms: float = 0.0
         self.created_at = time.time()
@@ -51,7 +54,7 @@ class DirectTurn:
         self.validation_issues: list = []
         self.hard_issues: list = []
         self.soft_issues: list = []
-        # R1.2-1：deadline 在 **submit 时刻** 设定（ingress→terminal 全生命周期预算，
+        # R1.2-1：deadline 在 **ingress/reserve 时刻** 设定（ingress→terminal 全生命周期预算，
         # 排队时间计入）；worker 绝不重置 —— 轮到 worker 时已过 deadline 必须快速 FAILED。
         self.created_monotonic: float = 0.0
         self.deadline: float = 0.0
@@ -130,6 +133,7 @@ class DirectDialogueQueue:
             turn = DirectTurn(turn_id, ingress_seq, user_text)
             turn.created_monotonic = time.monotonic()
             turn.deadline = turn.created_monotonic + self.timeout
+            turn.status = "QUEUED"
             self._turns[turn_id] = turn
             self._order.append(turn_id)
             self._trim_locked()
@@ -138,6 +142,55 @@ class DirectDialogueQueue:
         self._ensure_started()
         self._q.put((turn_id, snapshot))
         return turn_id
+
+    # -------------------------------------------------- R10：两阶段 ingress（Phase 14 R6–R12）
+    def reserve_turn(self, user_text: str = "") -> int:
+        """owner：reserve 一个 direct turn identity（ingress 即起算 deadline；不启动 worker）。
+
+        R10 用途：owner 语义效果（record USER_MESSAGE → apply C4）需要**先于**入队拿到
+        turn_id —— 这样 transition 事件能精确绑定 canonical USER_MESSAGE 事件与 turn。
+        之后必须调用 ``submit_reserved``（正常）或 ``cancel_reserved``（准备失败）——
+        保证无 sequence hole / 无永久 pending。
+        """
+        with self._lock:
+            self._next_turn_id += 1
+            turn_id = self._next_turn_id
+            turn = DirectTurn(turn_id, None, user_text)
+            turn.created_monotonic = time.monotonic()
+            turn.deadline = turn.created_monotonic + self.timeout
+            self._turns[turn_id] = turn
+            self._order.append(turn_id)
+            self._trim_locked()
+        self._trace(turn, "DIRECT_INGRESS")
+        return turn_id
+
+    def submit_reserved(self, turn_id: int, snapshot, user_text: str = "") -> None:
+        """owner：把已 reserve 的 turn 入队（严格按 reserve 顺序 FIFO；deadline 保持 reserve 时刻）。"""
+        with self._lock:
+            turn = self._turns.get(turn_id)
+            if turn is None:
+                return
+            if turn.status != "RESERVED":
+                return                    # 已入队/已终态 → 幂等跳过
+            turn.status = "QUEUED"
+            if user_text:
+                turn.user_text = user_text
+        self._trace(turn, "QUEUED")
+        self._ensure_started()
+        self._q.put((turn_id, snapshot))
+
+    def cancel_reserved(self, turn_id: int, reason: str = "owner_prep_failed") -> None:
+        """owner：reserve 后 owner 侧准备失败 → 该 turn 到达可观察终态 CANCELLED。
+
+        R10-T7：失败不得留下永久 pending / sequence hole —— 后续 reserve 照常分配新 id。
+        """
+        with self._lock:
+            turn = self._turns.get(turn_id)
+            if turn is None or turn.status != "RESERVED":
+                return                    # 幂等：仅 RESERVED 可取消
+            turn.status = "CANCELLED"
+            turn.failure_reason = reason
+        self._trace(turn, "CANCELLED", failure_reason=reason)
 
     # -------------------------------------------------- 串行 worker
     def _loop(self) -> None:

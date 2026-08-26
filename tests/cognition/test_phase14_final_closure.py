@@ -210,13 +210,16 @@ def test_c3_t7_real_ignore_path_event_and_provenance(tmp_path):
 
 # ================================================================ C3-T8：objective interaction content
 def test_c3_t8_poke_drag_not_recorded_as_pet_head(tmp_path):
-    """互动记忆内容必须来自可观察 payload（kind/count），不得硬编码成"摸头"。"""
+    """互动记忆内容必须来自可观察 payload（kind/count），不得硬编码成"摸头"。
+
+    Phase 14 R11 更新：poke/drag 使用各自独立的客观事件类型 USER_POKE / USER_DRAG
+    （原 USER_PET 伞型坍缩语义被 R11 取代）。"""
     hub = _hub(tmp_path)
-    hub.record_event("USER_PET", payload={"kind": "poke", "count": 1},
+    hub.record_event("USER_POKE", payload={"kind": "poke", "count": 1},
                      source="interaction", importance=0.5)
-    hub.record_event("USER_PET", payload={"kind": "drag", "count": 1},
+    hub.record_event("USER_DRAG", payload={"kind": "drag", "count": 1},
                      source="interaction", importance=0.5)
-    hub.record_event("USER_PET", payload={"kind": "poke", "count": 9},
+    hub.record_event("USER_POKE", payload={"kind": "poke", "count": 9},
                      source="interaction", importance=0.5)
     contents = [m.content for m in hub.autobiography.all_memories(status=None)]
     assert any("戳" in c for c in contents), f"poke 必须记成戳: {contents}"
@@ -226,9 +229,9 @@ def test_c3_t8_poke_drag_not_recorded_as_pet_head(tmp_path):
 
 
 def test_c3_t8b_interpreter_pet_kind_aware(tmp_path):
-    """process_pending（interpretation）路径同样 kind-aware。"""
+    """process_pending（interpretation）路径同样使用独立客观类型（R11）。"""
     hub = _hub(tmp_path)
-    hub.events.append(event_type="USER_PET", payload={"kind": "poke", "count": 1},
+    hub.events.append(event_type="USER_POKE", payload={"kind": "poke", "count": 1},
                       importance=0.6)
     hub.process_pending(batch=5)
     mems = hub.autobiography.all_memories(status=None)

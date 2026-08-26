@@ -10,6 +10,12 @@ dependencies = [
     "pillow>=10",
     "numpy>=1.26",
     "aiohttp>=3.9",
+    # Phase 14 R6–R12（R12）：Office 文档能力（docx.create / pptx.create / xlsx.create 及
+    # document planning/execution）的 production 运行时依赖 —— 由
+    # furina/agent/capabilities/documents/__init__.py 直接 import，必须声明在项目元数据。
+    "python-docx>=0.8.11",
+    "python-pptx>=0.6.18",
+    "openpyxl>=3.0.7",
 ]
 
 [project.optional-dependencies]

@@ -13,17 +13,17 @@ log = get_logger("cognition.consolidator")
 
 # 仅事件（不进 memory）的类型
 _EVENT_ONLY = {"ACTIVITY_STARTED", "ACTIVITY_FINISHED", "FURINA_SPOKE", "DIRECT_TURN_STARTED",
-               "USER_CLICK", "USER_DRAG", "SYSTEM_EVENT", "APP_LAUNCHED", "BROWSER_OPENED",
+               "USER_CLICK", "SYSTEM_EVENT", "APP_LAUNCHED", "BROWSER_OPENED",
                "USER_STATEMENT_OBSERVED",
                # Phase 14 Final Closure：C4 lifecycle transition 是 evidence 事件（供
                # user_model_items.transition_event_id 引用），本身不形成 C3。
                "USER_PREFERENCE_CHANGED", "USER_PLAN_COMPLETED"}
 
 # 可能形成 memory 的显著类型（仍需 importance 门槛）
-_SIGNIFICANT = {"USER_PET", "USER_POKE", "USER_FEED", "AGENT_COMPLETED", "AGENT_FAILED",
-                "USER_PLAN_DECLARED", "USER_PREFERENCE_DECLARED", "FILE_CREATED",
-                "FILE_MOVED", "DOCUMENT_CREATED", "RELATIONSHIP_MILESTONE", "MEMORY_FORMED",
-                "USER_IGNORED"}
+_SIGNIFICANT = {"USER_PET", "USER_POKE", "USER_DRAG", "USER_FEED", "AGENT_COMPLETED",
+                "AGENT_FAILED", "USER_PLAN_DECLARED", "USER_PREFERENCE_DECLARED",
+                "FILE_CREATED", "FILE_MOVED", "DOCUMENT_CREATED", "RELATIONSHIP_MILESTONE",
+                "MEMORY_FORMED", "USER_IGNORED"}
 
 
 class Consolidator:
@@ -49,23 +49,34 @@ class Consolidator:
             return plan
         # 显著事件：按类型给确定性处理
         if event_type == "USER_PET":
-            # Phase 14 Final Closure：记忆内容必须来自可观察 payload（kind/count），
-            # 不得把 poke/drag 硬编码成"摸头"（objective interaction semantics）。
+            # Phase 14 R6–R12（R11）：USER_PET 只对应 petting（不再作伞型）。
             if importance >= self._threshold or p.get("strong", False):
-                kind = p.get("kind", "petting")
+                plan["form_memory"] = True
+                plan["memory"] = {"content": "用户轻轻摸了摸我的头",
+                                  "level": MemoryLevel.EPISODIC,
+                                  "source": MemorySource.INTERACTION, "importance": 0.5,
+                                  "event_type": "user_positive_touch",
+                                  "source_event_ids": src}
+        elif event_type == "USER_POKE":
+            # 戳（客观类型）：普通戳 vs 高频重复戳（count>5 拒绝级，不记成摸头）
+            if importance >= self._threshold or p.get("strong", False):
                 count = int(p.get("count", 0) or 0)
-                if kind == "poke" and count > 5:
+                if count > 5:
                     content, mem_type = f"用户反复戳了我{count}下", "user_annoying_poke"
-                elif kind == "poke":
-                    content, mem_type = "用户戳了我一下", "user_poke"
-                elif kind == "drag":
-                    content, mem_type = "用户把我拎起来移动", "user_drag"
                 else:
-                    content, mem_type = "用户轻轻摸了摸我的头", "user_positive_touch"
+                    content, mem_type = "用户戳了我一下", "user_poke"
                 plan["form_memory"] = True
                 plan["memory"] = {"content": content, "level": MemoryLevel.EPISODIC,
                                   "source": MemorySource.INTERACTION, "importance": 0.5,
                                   "event_type": mem_type,
+                                  "source_event_ids": src}
+        elif event_type == "USER_DRAG":
+            if importance >= self._threshold or p.get("strong", False):
+                plan["form_memory"] = True
+                plan["memory"] = {"content": "用户把我拎起来移动",
+                                  "level": MemoryLevel.EPISODIC,
+                                  "source": MemorySource.INTERACTION, "importance": 0.5,
+                                  "event_type": "user_drag",
                                   "source_event_ids": src}
         elif event_type == "USER_IGNORED":
             # 语义忽略（真实 observed social bid 到期无回应）→ C3。内容来自事件 payload

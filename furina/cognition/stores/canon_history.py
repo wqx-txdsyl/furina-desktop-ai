@@ -98,9 +98,9 @@ class CanonHistoryStore:
     def _evidence_attribution_conflicts(self) -> List[Dict]:
         """episode（确定单幕）与其引用的 evidence registry act 归属矛盾清单。
 
-        规则：episode.act 为 Chapter IV 单幕（I..V）时，其引用的 evidence 若 registry
-        也登记了确定 act 且两者不一致 → 冲突（如 act=V 的 episode 引用 Act I 庭审场景）。
-        act 为跨度（I-V）或无 act 的 evidence → 不判定冲突。
+        规则：episode 声明 quest=Chapter IV + act 为单幕（I..V）时，其引用的 evidence
+        若 registry 也登记了确定 act 且两者不一致 → 冲突（如 act=V 的 episode 引用
+        Act I 庭审场景）。act 为跨度（I-V）或无 act 的 evidence → 不判定冲突。
         """
         reg = {u.get("evidence_id"): u for u in self._evidence_units}
         conflicts: List[Dict] = []
@@ -118,6 +118,49 @@ class CanonHistoryStore:
                     conflicts.append({"episode": e.episode_id, "evidence": eid,
                                       "episode_act": e.act, "evidence_act": ua})
         return conflicts
+
+    # -------------------------------------------------- Phase 14 R6–R12（R7）：语义 completeness
+    # 两类**不同**的完整性概念，必须分开报告：
+    #   A. mandatory life-stage provenance（结构 + 语义兼容性）
+    #   B. Chapter IV Act I–V curated main-story coverage（registry 级）
+    # 语义硬规则：声明 quest=Chapter IV + 精确 act 的 episode，其该 act 主张必须由
+    #   （MAIN_STORY, quest=Chapter IV, act=同一 act）的 evidence 支持；
+    #   CHARACTER_STORY / VOICE_LINE / PROFILE 且 act=null 的 evidence 无论多官方，
+    #   都不得满足精确主线 act 要求（不许 false-green）。
+
+    def _registry_duplicates(self) -> List[str]:
+        seen: Dict[str, int] = {}
+        for u in self._evidence_units:
+            eid = u.get("evidence_id", "")
+            seen[eid] = seen.get(eid, 0) + 1
+        return [eid for eid, n in seen.items() if n > 1]
+
+    def _act_support_gaps(self) -> List[Dict]:
+        """Chapter IV 精确 act episode 缺少同 act MAIN_STORY evidence 的缺口（语义不支撑）。"""
+        reg = {u.get("evidence_id"): u for u in self._evidence_units}
+        gaps: List[Dict] = []
+        for e in self._episodes:
+            if (e.quest or "") != "Chapter IV" or (e.act or "") not in ("I", "II", "III", "IV", "V"):
+                continue
+            supported = any(
+                (reg.get(eid) or {}).get("source_type") == "MAIN_STORY"
+                and (reg.get(eid) or {}).get("quest") == "Chapter IV"
+                and (reg.get(eid) or {}).get("act") == e.act
+                for eid in (e.evidence_ids or []))
+            if not supported:
+                gaps.append({"episode": e.episode_id, "act": e.act,
+                             "evidence": list(e.evidence_ids or [])})
+        return gaps
+
+    def _main_story_act_coverage(self) -> Dict[str, bool]:
+        """Chapter IV Act I–V 各自是否有 registry 登记的 MAIN_STORY 同 act 证据单元。"""
+        acts = {"I": False, "II": False, "III": False, "IV": False, "V": False}
+        for u in self._evidence_units:
+            if (u.get("source_type") == "MAIN_STORY"
+                    and (u.get("quest") or "") == "Chapter IV"
+                    and (u.get("act") or "") in acts):
+                acts[u["act"]] = True
+        return acts
 
     def tier_counts(self) -> Dict[str, int]:
         out = {"tier0": 0, "tier1": 0, "tier2": 0, "tier3": 0}
@@ -159,8 +202,40 @@ class CanonHistoryStore:
             # Phase 14 Final Closure：evidence attribution registry 一致性
             "evidence_registry_entries": len(self._evidence_units),
             "evidence_attribution_conflicts": self._evidence_attribution_conflicts(),
+            # Phase 14 R6–R12（R7）：两类完整性分离（语义真实性，禁止 false-green）
+            "evidence_registry_duplicates": self._registry_duplicates(),
+            "unregistered_evidence_ids": [c["evidence"] for c in self._evidence_attribution_conflicts()
+                                          if c.get("reason") == "unregistered"],
+            "episodes_without_exact_act_main_story_evidence": self._act_support_gaps(),
+            "main_story_act_coverage": self._main_story_act_coverage(),
+            "missing_main_story_acts": [a for a, ok in self._main_story_act_coverage().items() if not ok],
+            "main_story_act_coverage_status": (
+                "COMPLETE" if all(self._main_story_act_coverage().values()) else "PARTIAL"),
+            # 语义 mandatory life-stage 状态：结构（dangling）+ 冲突 + registry 有效性 +
+            # 精确 act 支撑全部干净才算 SOURCE_COMPLETE；任何语义缺口 → 如实 PARTIAL。
+            # （canon_span_status 保留为纯结构指标，兼容既有锁定测试。）
+            "mandatory_life_stage_source_status": self._life_stage_source_status(),
             "runtime_canon_mutable": False,
         }
+
+    def _life_stage_source_status(self) -> str:
+        conflicts = self._evidence_attribution_conflicts()
+        gaps = self._act_support_gaps()
+        dups = self._registry_duplicates()
+        used = [s for s in self._sources if s.get("status") == "USED"]
+        dangling = [e.episode_id for e in self._episodes
+                    if not [s for s in (e.source_ids or [])
+                            if s in {u["source_id"] for u in used}]]
+        if dangling:
+            return f"GAPS:dangling_sources={dangling}"
+        if conflicts:
+            return f"GAPS:attribution_conflicts={conflicts}"
+        if dups:
+            return f"GAPS:registry_duplicates={dups}"
+        if gaps:
+            return ("PARTIAL:episodes_without_exact_act_main_story_evidence="
+                    f"{[g['episode'] for g in gaps]}")
+        return "SOURCE_COMPLETE"
 
     def is_read_only(self) -> bool:
         return True

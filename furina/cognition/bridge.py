@@ -36,28 +36,37 @@ class EventBridge:
     # -------------------------------------------------- record
     def record(self, event_type: str, *, key: str, payload: Optional[Dict[str, Any]] = None,
                source: str = "runtime", channel: str = "", turn_id: Optional[int] = None,
-               task_id: str = "", importance: float = 0.0) -> bool:
-        """记录客观事件；同 key 已记录 → 跳过（exactly-once）。返回是否新记录。"""
+               task_id: str = "", importance: float = 0.0,
+               process: bool = True) -> Optional[str]:
+        """记录客观事件；同 key 已记录 → 跳过（exactly-once）。
+
+        Phase 14 R6–R12（R10）：返回新记录事件的 ``event_id``（未记录/未登记 → None），
+        供 owner 侧把 derived semantic 事件精确绑定到 canonical USER_MESSAGE。
+        ``process=False``：两阶段 ingress 中 USER_MESSAGE/DIRECT_TURN_STARTED 先落库
+        不立即解释（owner 语义效果将携带其 event_id 创建 transition 事件；事后由
+        process_pending 幂等消费，dedupe 保证不重复）。
+        """
         if event_type not in _BRIDGE_TYPES:
             log.debug("bridge: 未登记事件类型 %s（忽略）", event_type)
-            return False
+            return None
         if not key:
             key = f"{event_type}:{turn_id or task_id or id(payload)}"
         if key in self._seen:
-            return False                       # no duplicate
+            return None                       # no duplicate
         self._seen[key] = True
         if len(self._seen) > self._max_seen:
             self._trim()
-        self._hub.events.append(
+        ev = self._hub.events.append(
             event_type=event_type, payload=payload or {}, source=source,
             channel=channel, turn_id=turn_id, task_id=task_id, importance=importance)
         # Phase 15F：event terminal trigger —— 追加后由 owner 立即做 bounded 批处理
         # （idempotent：event_processing log 保证 restart/重复调用不重复 consolidation）。
-        try:
-            self._hub.process_pending(batch=5)
-        except Exception:
-            pass
-        return True
+        if process:
+            try:
+                self._hub.process_pending(batch=5)
+            except Exception:
+                pass
+        return ev.event_id
 
     def _trim(self) -> None:
         # 有界去重缓存：保留最近一半（新事件不受影响）

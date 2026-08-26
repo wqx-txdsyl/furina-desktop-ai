@@ -56,10 +56,22 @@
 - `data/canon/furina_evidence_units.json` —— FUR-001~056 的**唯一归因真源**（source_type / act / scene；
   由 `CanonHistoryStore` 只读加载，`metrics()["evidence_attribution_conflicts"]` 机器校验）。
 
-> **C2 状态（Phase 15.1 更新）**：
-> **MANDATORY CANON LIFE SPAN = SOURCE-COMPLETE** —— 20/20 mandatory life stages 全部有
+> **C2 状态（Phase 15.1 + R7 更新，两类完整性严格分离）**：
+>
+> **A. mandatory life-stage 结构 provenance（`canon_span_status`）**：
+> **MANDATORY_SPAN_SOURCE_COMPLETE** —— 20/20 mandatory life stages 全部有
 > **官方来源 provenance**（每条 CanonEpisode 的 source_ids/evidence_ids 解析到**实际使用**的
 > TIER 0 来源；无 dangling；未使用来源不计入完整性 N9）。
+>
+> **B. 语义完整性（R7，禁止 false-green）**：
+> - `mandatory_life_stage_source_status`（语义层）：**PARTIAL** —— 语义校验（无 act 冲突、
+>   无 unregistered/duplicate evidence、且 Chapter IV 精确 act episode 必须由
+>   （MAIN_STORY, quest=Chapter IV, act=同一 act）证据支撑）发现 1 处缺口：
+>   `INNER_WORLD_REVELATION`（act=V）引用 FUR-018（VOICE_LINE）与 FUR-037（MAIN_STORY，
+>   act 未定）—— 均非 Act V 精确主线单元，如实报告，不伪造支撑。
+> - `main_story_act_coverage_status`：**PARTIAL**，`missing_main_story_acts = ["II", "III"]`
+>   —— curated evidence 集中**不存在** Act II/III 的主线（MAIN_STORY）场景单元；
+>   不得用角色故事/语音/档案（如 FUR-052）冒充主线幕覆盖；如实标缺。
 >
 > 这不是说：
 > - repo 存有完整游戏原文（**禁止复制大段版权脚本**——模型 =
@@ -88,16 +100,22 @@
 >
 > 每条 mandatory CanonEpisode 都映射到上述覆盖段或长时段 span（source_ids/evidence_ids 可解析；
 > evidence act 冲突由 `metrics()["evidence_attribution_conflicts"]` 机器校验，当前为 0）。
+> **语义缺口如实暴露**（R7）：`metrics()["episodes_without_exact_act_main_story_evidence"]`
+> = [INNER_WORLD_REVELATION]；`metrics()["missing_main_story_acts"]` = ["II", "III"]。
 > 未使用的 Tier 1/2 来源（SRC-007/008/009，cross-check 预留）**不**计入完整性。
 
 ## 验收计数（C2 ACCEPTANCE）
 
 - canon_source_map_entries: 10（SRC-001~010；SRC-001~006=USED，SRC-007~009=NOT_USED，SRC-010=FORBIDDEN）
 - canon_episode_count: 20（20/20 mandatory stages 全覆盖）
-- canon_span_status: MANDATORY_SPAN_SOURCE_COMPLETE（metrics 计算：无 dangling source_ids）
+- canon_span_status: MANDATORY_SPAN_SOURCE_COMPLETE（结构：无 dangling source_ids）
 - evidence_registry_entries: 56（FUR-001~056；`data/canon/furina_evidence_units.json` 唯一归因真源）
 - evidence_attribution_conflicts: 0（episode 单幕 act 与 evidence registry act 无矛盾；
   FUR-006 → Act I，FUR-039 → Act IV，FUR-052 → CHARACTER_STORY（无 act））
+- **mandatory_life_stage_source_status: PARTIAL**（语义层；唯一缺口 =
+  INNER_WORLD_REVELATION 缺同 act MAIN_STORY 证据，如实报告不伪造）
+- **main_story_act_coverage_status: PARTIAL**（missing_main_story_acts = ["II", "III"]；
+  curated evidence 无 Act II/III 主线场景单元，不得用非主线来源冒充）
 - tier0_sources: SRC-001~006（evidence doc + 官方游戏文本/角色资料，全部 USED）
 - tier1_sources: SRC-007, SRC-008（NOT_USED —— 不计入完整性）
 - tier2_mirror_sources: SRC-009（NOT_USED —— 不计入完整性）

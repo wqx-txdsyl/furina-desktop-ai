@@ -178,20 +178,18 @@ class InterpretationEngine:
                              f"帮用户处理{payload.get('request', '')}时失败", 0.4, "EVENT",
                              "DATED", "C3", "Agent 失败（C7 FAILED 真相优先；不形成成功记忆）")]
         if et == "USER_PET":
-            # Phase 14 Final Closure：内容来自可观察 payload（kind/count），
-            # 不得把 poke/drag 硬编码成"摸头"。
-            kind = payload.get("kind", "petting")
+            # Phase 14 R6–R12（R11）：USER_PET 只对应 petting（不再作伞型）。
+            return [self._mk(ev_ids, "C3_CONDITIONAL", "furina", "interaction", "用户摸了我的头",
+                             0.45, "EVENT", "TRANSIENT", "C3", "有意义的互动（条件记忆）")]
+        if et == "USER_POKE":
             count = int(payload.get("count", 0) or 0)
-            if kind == "poke" and count > 5:
-                value = f"用户反复戳了我{count}下"
-            elif kind == "poke":
-                value = "用户戳了我一下"
-            elif kind == "drag":
-                value = "用户把我拎起来移动"
-            else:
-                value = "用户摸了我的头"
+            value = f"用户反复戳了我{count}下" if count > 5 else "用户戳了我一下"
             return [self._mk(ev_ids, "C3_CONDITIONAL", "furina", "interaction", value,
                              0.45, "EVENT", "TRANSIENT", "C3", "有意义的互动（条件记忆）")]
+        if et == "USER_DRAG":
+            return [self._mk(ev_ids, "C3_CONDITIONAL", "furina", "interaction",
+                             "用户把我拎起来移动", 0.45, "EVENT", "TRANSIENT", "C3",
+                             "有意义的互动（条件记忆）")]
         if et in ("ACTIVITY_STARTED", "ACTIVITY_FINISHED", "FURINA_SPOKE",
                   "DIRECT_TURN_STARTED", "DIRECT_TURN_TERMINAL", "MEANINGFUL_INTERACTION"):
             return []                       # 琐碎/常规事件 → 无候选（不机械成记忆）

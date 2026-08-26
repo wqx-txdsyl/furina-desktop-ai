@@ -1073,6 +1073,16 @@ class Scheduler:
             "elapsed": round(elapsed, 1), "planned_duration": round(planned, 1),
             "progress": round(progress, 2),
         }
+        # Phase 14 R6–R12（R8）：**执行型** social bid（reason="executed:<activity>"，
+        # 如 approach_user 在走动中被抢占）—— 发起尝试已被终止，用户不再有应回答的
+        # 有效 bid → 失效 pending（幂等；绝不产生 USER_IGNORED）。spoken 型 bid
+        # （可见台词已出话）不受后续活动抢占影响（用户确实看到了那次尝试）。
+        try:
+            bid = getattr(self, "_pending_social_bid", None)
+            if bid is not None and bid.get("reason") == f"executed:{inst['activity']}":
+                self._cancel_social_bid(f"preempted:{reason}:{inst['activity']}")
+        except Exception:
+            pass
         self._apply_activity_outcome(inst["activity"], success=False, reason=reason, progress=progress)
 
     @staticmethod
@@ -1247,6 +1257,17 @@ class Scheduler:
     _SOCIAL_BID_KINDS = ("talk", "approach_user", "greet", "invite_user", "seek_attention",
                          "ask_user", "comfort")
 
+    def _cancel_social_bid(self, reason: str = "cancelled") -> None:
+        """使 pending social bid 失效（幂等）。绝不产生 USER_IGNORED。
+
+        Phase 14 R6–R12（R8）：当发起方（Furina 侧）的社交尝试在响应窗口合法完成前被
+        中断/抢占时调用 —— 用户不再有"应回答的有效 bid"，到期不得判定 ignore。
+        """
+        if getattr(self, "_pending_social_bid", None) is None:
+            return
+        log.debug("social bid cancelled: %s", reason)
+        self._pending_social_bid = None
+
     def begin_social_bid(self, reason: str = "initiated") -> None:
         """芙宁娜发起**合格的直接社交尝试** → 开启响应窗口（pending token + deadline）。
 
@@ -1257,6 +1278,9 @@ class Scheduler:
         Phase 14 Residual（R3）：真实合格可见的 bid 开启时记录 canonical C6
         ``SOCIAL_BID_STARTED``（exactly-once per bid），pending bid 保存其 event_id ——
         之后 USER_IGNORED 的因果溯源指向该事件，而不是只靠 payload 描述文字。
+        Phase 14 R6–R12（R8 fail-closed）：production（cognition 已装配）下若
+        SOCIAL_BID_STARTED 无法持久化 → **不开启响应窗口**（无 canonical bid 事件 =
+        无 canonical ignore 计时器）。cognition=None 仅为旧隔离单测的兼容外壳。
         """
         if getattr(self, "_pending_social_bid", None) is not None:
             return   # 已有 pending，不重复
@@ -1277,7 +1301,12 @@ class Scheduler:
                     consolidate=False)
                 bid_event_id = ev.event_id
             except Exception:
-                log.warning("record SOCIAL_BID_STARTED failed", exc_info=True)
+                log.warning("SOCIAL_BID_STARTED 持久化失败 —— 不开启响应窗口（fail closed）",
+                            exc_info=True)
+                return
+            if not bid_event_id:
+                log.warning("SOCIAL_BID_STARTED 未返回有效事件 —— 不开启响应窗口（fail closed）")
+                return
         self._pending_social_bid = {
             "token": f"bid-{time.time_ns() % 10 ** 8}",
             "deadline": time.time() + self._social_bid_window,
