@@ -418,7 +418,8 @@ class CognitionHub:
     # -------------------------------------------------- Phase 15D：用户一句话 → C4 确定性演化（owner）
     def apply_user_message(self, text: str, *, channel: str = "DIRECT_USER_TURN",
                            turn_id: Optional[int] = None,
-                           source_event_id: Optional[str] = None) -> Dict[str, Any]:
+                           source_event_id: Optional[str] = None,
+                           require_source_event: bool = False) -> Dict[str, Any]:
         """owner：用户直接消息 → C4 演化（evidence-first，current explicit turn wins）。
 
         - declaration（我喜欢X/我今天准备做X/以后别总是X）→ declaration event 先落地 →
@@ -431,7 +432,27 @@ class CognitionHub:
         Phase 14 R6–R12（R10）：production turn 入口在调用本方法前已 reserve turn identity
         并记录 canonical USER_MESSAGE（``source_event_id`` = 该事件 id，``turn_id`` =
         直接回合身份）→ lifecycle transition 精确绑定到触发它的 USER_MESSAGE 事件。
+
+        R10-FC：``require_source_event=True``（生产 direct turn 契约）→ ``source_event_id``
+        必须解析到一条**真实存在的 canonical USER_MESSAGE**，否则整个本回合 C4 durable
+        应用 fail-closed 跳过（无 supersede / 无 plan complete / 无 orphan transition /
+        无 declaration upsert），只记可观察 warning。孤立单测外壳（默认 False）不受影响。
         """
+        if require_source_event:
+            ok = False
+            try:
+                ok = source_event_id is not None and self._db.query_one(
+                    "SELECT 1 FROM life_events WHERE event_id=? AND event_type='USER_MESSAGE'",
+                    (source_event_id,)) is not None
+            except Exception:
+                ok = False
+            if not ok:
+                log.warning(
+                    "C4 FAIL-CLOSED (R10-FC): production direct turn 缺少可解析的 canonical "
+                    "USER_MESSAGE(turn=%s, source_event_id=%r) → 本回合跳过全部证据依赖的 "
+                    "C4 durable 演化", turn_id, source_event_id)
+                return {"declarations": [], "superseded": [], "plans_completed": [],
+                        "events": [], "skipped": "missing_canonical_user_message"}
         applied: Dict[str, Any] = {"declarations": [], "superseded": [],
                                    "plans_completed": [], "events": []}
         try:

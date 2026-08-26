@@ -53,12 +53,15 @@ class EventBridge:
             key = f"{event_type}:{turn_id or task_id or id(payload)}"
         if key in self._seen:
             return None                       # no duplicate
-        self._seen[key] = True
-        if len(self._seen) > self._max_seen:
-            self._trim()
+        # R10-FC：dedupe key 只在 append **成功后**登记 —— append 失败不得把 key
+        # 留在 _seen 毒化合法重试（canonical 事件不存在 + seen=True = 静默丢失）。
+        # 单 owner 线程调用契约不变：check→append→mark 同步完成，exactly-once 语义保持。
         ev = self._hub.events.append(
             event_type=event_type, payload=payload or {}, source=source,
             channel=channel, turn_id=turn_id, task_id=task_id, importance=importance)
+        self._seen[key] = True
+        if len(self._seen) > self._max_seen:
+            self._trim()
         # Phase 15F：event terminal trigger —— 追加后由 owner 立即做 bounded 批处理
         # （idempotent：event_processing log 保证 restart/重复调用不重复 consolidation）。
         if process:

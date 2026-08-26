@@ -651,6 +651,9 @@ class Furina:
                     payload={"text": text[:200]}, source="user",
                     channel="DIRECT_USER_TURN", turn_id=turn_id, importance=0.2,
                     process=False) or ""
+            except Exception:
+                pass
+            try:
                 bridge.record("DIRECT_TURN_STARTED", key=f"dstart:{turn_id}",
                               source="app", channel="DIRECT_USER_TURN", turn_id=turn_id,
                               importance=0.1, process=False)
@@ -658,15 +661,25 @@ class Furina:
                 pass
         # 3. Phase 15D：C4 确定性演化（绑定 exact USER_MESSAGE event id + turn_id；
         #    explicit correction wins；PLAN_COMPLETED 关联 ACTIVE PLAN）
+        #    R10-FC fail-closed：canonical USER_MESSAGE 未落地（append 失败/桥不可用/
+        #    返回空 id）→ 本回合**不做任何证据依赖的 C4 durable 演化**
+        #    （无 preference supersede / 无 plan complete / 无 orphan transition），
+        #    对话本身继续（freeze/enqueue/reply 不受影响，F9）。
         cog = getattr(self, "cognition", None)
         try:
             if cog is not None:
-                try:
-                    cog.apply_user_message(text, channel="DIRECT_USER_TURN",
-                                           turn_id=turn_id,
-                                           source_event_id=umsg_id or None)
-                except Exception:
-                    pass
+                if umsg_id:
+                    try:
+                        cog.apply_user_message(text, channel="DIRECT_USER_TURN",
+                                               turn_id=turn_id,
+                                               source_event_id=umsg_id,
+                                               require_source_event=True)
+                    except Exception:
+                        pass
+                else:
+                    log.warning(
+                        "R10-FC FAIL-CLOSED: canonical USER_MESSAGE 未落地(turn=%s) → "
+                        "本回合跳过证据依赖的 C4 durable 演化（对话继续）", turn_id)
             # 4. H1 §10：owner 冻结对话上下文快照（只读事实副本，不引用 live 可变对象）
             snap = self._freeze_direct_snapshot(text)   # ingress_seq=None
             # 5. R10：入队已 reserve 的 turn（FIFO 按 reserve 顺序；deadline 保持 reserve 时刻；
