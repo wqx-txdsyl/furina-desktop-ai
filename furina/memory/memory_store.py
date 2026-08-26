@@ -44,6 +44,8 @@ _MIGRATIONS = [
     ("ALTER TABLE memories ADD COLUMN world_context TEXT", "world_context"),
     ("ALTER TABLE memories ADD COLUMN recurrence_count INTEGER DEFAULT 0", "recurrence_count"),
     ("ALTER TABLE memories ADD COLUMN summary TEXT", "summary"),
+    # Phase 15C：C3 事件溯源（forward migration，幂等：列已存在则跳过）
+    ("ALTER TABLE memories ADD COLUMN source_event_ids TEXT DEFAULT '[]'", "source_event_ids"),
 ]
 
 
@@ -86,6 +88,8 @@ class MemoryStore:
             "world_context": getattr(m, "world_context", ""),
             "recurrence_count": int(getattr(m, "recurrence_count", 0)),
             "summary": getattr(m, "summary", ""),
+            "source_event_ids": json.dumps(list(getattr(m, "source_event_ids", []) or []),
+                                        ensure_ascii=False),
         }
         with self._lock:
             with self._conn:
@@ -93,11 +97,11 @@ class MemoryStore:
                     "INSERT OR REPLACE INTO memories(mem_id,level,content,source,importance,confidence,"
                     "timestamp,context,outcome,participants,strength,last_recalled,last_reinforced,"
                     "valid_from,valid_to,status,relationship_delta,embedding,tags,event_type,"
-                    "world_context,recurrence_count,summary) "
+                    "world_context,recurrence_count,summary,source_event_ids) "
                     "VALUES(:mem_id,:level,:content,:source,:importance,:confidence,:timestamp,:context,"
                     ":outcome,:participants,:strength,:last_recalled,:last_reinforced,:valid_from,:valid_to,"
                     ":status,:relationship_delta,:embedding,:tags,:event_type,:world_context,"
-                    ":recurrence_count,:summary)", row)
+                    ":recurrence_count,:summary,:source_event_ids)", row)
         return m.mem_id
 
     # -------------------------------------------------- read
@@ -170,6 +174,10 @@ class MemoryStore:
             tags = json.loads(row["tags"] or "[]")
         except Exception:
             tags = []
+        try:
+            src_ev = json.loads(row["source_event_ids"] or "[]")
+        except Exception:
+            src_ev = []
         return Memory(
             mem_id=row["mem_id"], level=MemoryLevel(row["level"]), content=row["content"],
             source=MemorySource(row["source"]), importance=row["importance"],
@@ -184,4 +192,5 @@ class MemoryStore:
             world_context=row["world_context"] if "world_context" in row.keys() else "",
             recurrence_count=int(row["recurrence_count"] or 0) if "recurrence_count" in row.keys() else 0,
             summary=row["summary"] if "summary" in row.keys() else "",
+            source_event_ids=src_ev if "source_event_ids" in row.keys() else [],
         )

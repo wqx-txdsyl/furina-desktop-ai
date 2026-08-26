@@ -129,14 +129,10 @@ class CognitionHub:
         try:
             plan = self.consolidator.consider(ev.event_type, payload=ev.payload,
                                               importance=ev.importance,
-                                              verified=bool(ev.task_id))
+                                              verified=bool(ev.task_id),
+                                              source_event_ids=[ev.event_id])
             if plan.get("form_memory") and self.autobiography is not None and plan.get("memory"):
-                mem = plan["memory"]
-                self.autobiography.observe(mem["content"], level=mem.get("level"),
-                                           source=mem.get("source"),
-                                           importance=mem.get("importance", 0.5),
-                                           context=ev.event_type,
-                                           outcome=mem.get("outcome", ""))
+                self._form_memory(ev, plan["memory"])
             if plan.get("user_model"):
                 u = plan["user_model"]
                 self.user_model.upsert_item(category=u["category"], key=u["key"],
@@ -148,6 +144,46 @@ class CognitionHub:
                                                    plan["milestone"].get("note", ""))
         except Exception as e:
             log.warning("consolidation failed: %s", e)
+
+    def _form_memory(self, ev, mem: Dict[str, Any]) -> None:
+        """Phase 15C：C3 形成（deterministic dedupe + provenance）。
+
+        - 同 event_type 的 ACTIVE 近 24h 记忆 → **reinforce**（recurrence++ / importance 取 max /
+          strength↑ / 累积 source_event_ids），**不重复插行**（N3：pet×4 只 1 条）。
+        - 否则 observe 新记忆（带 source_event_ids provenance）。
+        """
+        auto = self.autobiography
+        etype = mem.get("event_type", ev.event_type)
+        src_ids = list(mem.get("source_event_ids") or [ev.event_id])
+        import time as _t
+        now = _t.time()
+        dup = None
+        try:
+            for m in auto.recent(50):
+                if (m.status.value == "active" and m.event_type == etype
+                        and (now - m.timestamp) < 86400.0):
+                    dup = m
+                    break
+        except Exception:
+            dup = None
+        if dup is not None:
+            dup.recurrence_count += 1
+            dup.importance = max(float(dup.importance), float(mem.get("importance", 0.5)))
+            dup.strength = min(1.0, float(dup.strength) + 0.05)
+            dup.last_reinforced = now
+            for eid in src_ids:
+                if eid and eid not in dup.source_event_ids:
+                    dup.source_event_ids.append(eid)
+            auto.insert(dup)
+            return
+        m = auto.observe(mem["content"], level=mem.get("level"), source=mem.get("source"),
+                         importance=mem.get("importance", 0.5), context=ev.event_type,
+                         outcome=mem.get("outcome", ""), source_event_ids=src_ids)
+        if m is not None:
+            # 补写 event_type（dedupe 键）并回写（保持单一持久化 = MemoryEngine.store）
+            if not getattr(m, "event_type", ""):
+                m.event_type = etype
+                auto.insert(m)
 
     def extract_user_model(self, text: str) -> Optional[Dict[str, Any]]:
         """Phase 14J：deterministic conservative extraction（owner 决定是否 persist）。"""

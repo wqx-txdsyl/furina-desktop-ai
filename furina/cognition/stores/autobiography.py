@@ -22,10 +22,21 @@ class AutobiographicalMemoryStore:
     # -------------------------------------------------- write（delegate，单一 owner = MemoryEngine）
     def observe(self, content: str, *, level: MemoryLevel = MemoryLevel.EPISODIC,
                 source: MemorySource = MemorySource.SYSTEM, importance: float = 0.4,
-                context: str = "", outcome: str = ""):
-        """桌面时代经历 → existing MemoryEngine.observe（未达阈值则不入库）。"""
+                context: str = "", outcome: str = "", source_event_ids=None):
+        """桌面时代经历 → existing MemoryEngine.observe（未达阈值则不入库）。
+
+        Phase 15C：source_event_ids[]（C6 事件溯源）随记忆持久化（provenance）。
+        """
         return self._engine.observe(content, level=level, source=source,
-                                    importance=importance, context=context, outcome=outcome)
+                                    importance=importance, context=context, outcome=outcome,
+                                    source_event_ids=list(source_event_ids or []))
+
+    # -------------------------------------------------- Phase 15C：生命周期（遗忘=归档，不删 C6）
+    def archive(self, mem_id: str, reason: str = ""):
+        return self._engine.archive(mem_id, reason=reason)
+
+    def supersede(self, mem_id: str, reason: str = ""):
+        return self._engine.supersede(mem_id, reason=reason)
 
     def consolidate(self, exp) -> Optional[object]:
         """委托 existing MemoryEngine.consolidate（Experience → 长期记忆）。"""
@@ -40,6 +51,14 @@ class AutobiographicalMemoryStore:
 
     def recent(self, n: int = 5):
         return self._engine.store.recall_recent(n)
+
+    def all_memories(self, status=None, limit: int = 200):
+        """读取任意状态记忆（含 SUPERSEDED/ARCHIVED；status=None = 全部）。"""
+        return self._engine.store.query(limit=limit, status=status)
+
+    def insert(self, m) -> None:
+        """reinforce/生命周期更新写回（经 MemoryEngine.store 单一持久化）。"""
+        self._engine.store.insert(m)
 
     # -------------------------------------------------- deletion（复用现有 MemoryEngine 能力）
     def delete(self, mem_id: str) -> None:

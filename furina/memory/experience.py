@@ -35,6 +35,8 @@ class Experience:
     # 关系维度快照（供 debug，不用于 Memory 更新 Relationship）
     relationship_snapshot: Dict[str, float] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
+    # Phase 15C：经历的事件溯源（C6 event_ids → C3 memory provenance）
+    source_event_ids: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- Importance（确定性）

@@ -65,6 +65,8 @@ class Memory:
     world_context: str = ""                           # coding / idle / browsing ...
     recurrence_count: int = 0                         # 相似经历合并计数
     summary: str = ""                                 # 结构化摘要（模板生成）
+    # Phase 15C：C3 事件溯源（source_event_ids[] → C6 events 精确解析）
+    source_event_ids: list = field(default_factory=list)
 
     def to_row(self) -> Dict[str, Any]:
         d = dict(self.__dict__)

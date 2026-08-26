@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Mapping, Optional
 
 from furina.core import EventBus, EventType, get_logger
 from .memory_store import MemoryStore
-from .memory_types import Memory, MemoryLevel, MemorySource, RelationshipState
+from .memory_types import Memory, MemoryLevel, MemorySource, MemoryStatus, RelationshipState
 
 log = get_logger("memory")
 
@@ -50,19 +50,40 @@ class MemoryEngine:
     # -------------------------------------------------- 记录事件（骨架）
     def observe(self, content: str, level: MemoryLevel = MemoryLevel.EPISODIC, *,
                 source: MemorySource = MemorySource.SYSTEM,
-                importance: float = 0.4, context: str = "", outcome: str = "") -> Optional[Memory]:
+                importance: float = 0.4, context: str = "", outcome: str = "",
+                source_event_ids=None) -> Optional[Memory]:
         s = self.score(importance=importance, future=0.2, repetition=0.0, emotional=0.1)
         if not self.should_form(s):
             log.debug("memory: 未达形成阈值, discard: %s", content[:30])
             return None
         m = Memory(level=level, content=content, source=source, importance=importance,
-                   context=context, outcome=outcome)
+                   context=context, outcome=outcome,
+                   source_event_ids=list(source_event_ids or []))
         if self.embed_fn:
             m.embedding = self.embed_fn(content)
         mid = self.store.insert(m)
         self.bus.emit(EventType.MEMORY_CREATED, payload={"id": mid, "content": content},
                       source="memory")
         return m
+
+    # -------------------------------------------------- Phase 15C：生命周期（遗忘=归档，不删 C6）
+    def archive(self, mem_id: str, reason: str = "") -> Optional[Memory]:
+        """遗忘 = 归档（recall 概率下降），**绝不 DELETE FROM life_events**。"""
+        for m in self.store.query(limit=10000, status=None):
+            if m.mem_id == mem_id:
+                m.status = MemoryStatus.ARCHIVED
+                self.store.insert(m)
+                return m
+        return None
+
+    def supersede(self, mem_id: str, reason: str = "") -> Optional[Memory]:
+        """旧记忆被新事实取代 → SUPERSEDED（历史保留，不再最高权重检索）。"""
+        for m in self.store.query(limit=10000, status=None):
+            if m.mem_id == mem_id:
+                m.status = MemoryStatus.SUPERSEDED
+                self.store.insert(m)
+                return m
+        return None
 
     # -------------------------------------------------- 关系更新（§18）【RC1 DEPRECATED】
     def apply_relationship(self, delta: Dict[str, float], reason: str = "") -> None:
@@ -140,7 +161,7 @@ class MemoryEngine:
         score = importance_of(exp)
         if score < self._threshold:
             return None   # 低重要性 → 不长期保存
-        # 去重：同 event_key + 时间窗口内 → 强化既有记忆
+        # 去重：同 event_key + 时间窗口内 → 强化既有记忆（Phase 15C：累积 source_event_ids）
         key = event_key(exp.event_type, exp.world_context, exp.activity)
         dup = self._find_similar(key, window=86400.0)
         if dup is not None:
@@ -149,6 +170,9 @@ class MemoryEngine:
             dup.confidence = min(1.0, dup.confidence + 0.05)
             dup.last_reinforced = time.time()
             dup.strength = min(1.0, dup.strength + 0.05)
+            for eid in (exp.source_event_ids or []):
+                if eid and eid not in dup.source_event_ids:
+                    dup.source_event_ids.append(eid)     # reinforcement 累积证据
             self.store.insert(dup)
             return dup
         m = Memory(
