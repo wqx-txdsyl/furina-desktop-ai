@@ -99,6 +99,9 @@ class CognitionHub:
         from .interpretation import InterpretationEngine
         self.interpretation = InterpretationEngine()
         self.willingness = WorkWillingnessModel()     # model-only（Phase 14K 预留）
+        # Phase 15E：Derived Semantic Vector Index（DERIVED/REBUILDABLE/NON-AUTHORITATIVE）
+        from .retrieval import SemanticVectorIndex, default_index_path
+        self.index = SemanticVectorIndex(index_path=default_index_path(self._db._path))
         self.assembler = CognitiveContextAssembler(
             canon_identity=self.canon_identity,
             canon_history=self.canon_history,
@@ -288,6 +291,33 @@ class CognitionHub:
         """owner ingress：构造有界 immutable cognitive context。"""
         return self.assembler.assemble(query=query, topic=topic,
                                        current_facts=current_facts, trust=trust)
+
+    # -------------------------------------------------- Phase 15E：Derived Index 管理
+    def build_index(self) -> int:
+        """从 source stores 的选中条目重建 derived index（幂等）。"""
+        return self.index.build(
+            canon_episodes=self.canon_history.all_episodes(),
+            memories=self.autobiography.all_memories(status=None, limit=200)
+            if self.autobiography else [],
+            user_items=self.user_model.query_active(limit=200),
+            agent_tasks=self.agent_history.query_recent(limit=50))
+
+    def rebuild_index(self) -> int:
+        return self.build_index()
+
+    def delete_index(self) -> None:
+        """删除 derived index（**不触碰 source stores**）。"""
+        self.index.delete()
+
+    def index_status(self) -> Dict[str, Any]:
+        return self.index.status()
+
+    def lookup_index(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """NON-AUTHORITATIVE 语义提示；缺失/不可用 → []（cognition 仍工作）。"""
+        try:
+            return self.index.lookup(query, top_k=top_k)
+        except Exception:
+            return []
 
     def willingness_input(self, **kw: float) -> WorkWillingnessInput:
         return WorkWillingnessInput(**{k: float(v) for k, v in kw.items()

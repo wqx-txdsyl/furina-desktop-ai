@@ -21,7 +21,7 @@ from .stores.user_model import UserModelStore
 
 log = get_logger("cognition.context")
 
-DEFAULT_BOUNDS = {"canon": 2, "memories": 3, "user": 5, "agent": 2, "events": 5}
+DEFAULT_BOUNDS = {"canon": 2, "memories": 3, "user": 3, "agent": 2, "events": 3}
 
 
 class CognitiveContextAssembler:
@@ -61,11 +61,20 @@ class CognitiveContextAssembler:
 
         episodes, activation = self._retriever.retrieve(query, topic=topic, trust=trust)
 
-        mems: List[str] = []
+        # Phase 15E：C3 回忆经 RetrievalRanker（authority/relevance/recency/importance/
+        # strength/status/diversity），不 dump、不纯 cosine topK。
+        from .retrieval.ranker import RetrievalRanker
+        ranker = RetrievalRanker()
         try:
-            mems = [m.content for m in auto.retrieve(query=query, limit=b["memories"])]
+            mems = [m.content for m in ranker.rank_memories(
+                auto.retrieve(query=query, limit=b["memories"] * 4),
+                query=query, limit=b["memories"])]
         except Exception:
             mems = []
+            try:
+                mems = [m.content for m in auto.retrieve(query=query, limit=b["memories"])]
+            except Exception:
+                mems = []
 
         ctx = CognitiveContext(
             current_facts=dict(current_facts or {}),
