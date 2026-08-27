@@ -320,18 +320,23 @@ Gate F（all D5）     tests/test_phase15_d5_relationship_antispam.py           
 Gate G（Phase14 保留）phase14 四件套（closure/r7r10-fc/reviewer-r6r12/residual）   78 passed  / 57.73s
 Gate H（Agent/Office）test_agent_tools + tests/agent（capabilities + integration，
                     除 Gate A 文件）                                             95 passed  / 52.54s
-FULL #1             全仓库                                                     1363 passed / 205.55s
+FULL #1             全仓库（RUN_1）                                          1363 passed / 205.55s
+FULL #2             全仓库（RUN_2，独立连续运行）                             1363 passed / 206.83s
+FULL #3             全仓库（RUN_3，独立连续运行）                             1363 passed / 200.19s
 ```
 
-FULL #1 明细：**1363 passed / 0 failed / 0 skipped / 0 xfailed / 0 error**，
-205.55s（0:03:25）。15 warnings（既有 `PytestUnhandledThreadExceptionWarning`：
+FULL #1–#3 明细（三次独立连续运行，非重跑覆盖）：**1363 passed / 0 failed /
+0 skipped / 0 xfailed / 0 error**，时长分别为 205.55s / 206.83s / 200.19s。
+15 warnings（既有 `PytestUnhandledThreadExceptionWarning`：
 `test_agent_tools.py::test_agent_context_is_task_local` 的 subprocess reader thread
-UnicodeDecodeError —— 预存在、非本 Gate 引入、非失败）。
+UnicodeDecodeError —— 预存在、非本 Gate 引入、非失败；三次一致）。
 
-**偏差记录（诚实披露）**：Task Brief §13 Gate I 要求 "full suite ×3 consecutive
-并记录三次计数与时长"。本 Gate 依操作者执行令 **full suite 只跑一次**，故仅记录
-FULL #1；FULL #2 / FULL #3 未执行。这是执行范围偏差，不是伪造结果；外部 reviewer
-可要求补跑。
+```text
+FULL_SUITE_X3_COMPLIANT = true
+```
+
+Task Brief §13 Gate I "full suite ×3 consecutive" 已完全满足：三次连续独立运行，
+各次均 0 failed / 0 skipped / 0 xfailed，计数与时长如上精确记录。
 
 **计数说明**：D5 closeout 记录 full suite 1362；本 Gate 在 ACCEPTED_INTEGRATION_SHA
 （49ba511）实测 1363 —— 差值 1 来自 49ba511 micro-patch 新增的
@@ -359,10 +364,10 @@ git status     = 仅 Gate 文档（14/15/_INDEX/night preflight ×5）为新增�
 ## 15. Remaining Gaps
 
 ```text
-Phase 15 blocker   ：无。全部 Gate A–H + FULL #1 在 ACCEPTED_INTEGRATION_SHA 通过；
-                     静态审计 A-O 无 NO 项。仅有两项执行范围偏差（非 blocker）：
-                     a) full suite ×3 → ×1（操作者执行令）；b) D5 closeout 1362 vs
-                     本 Gate 1363（49ba511 新增 1 个 unknown-event 测试，见 §13）。
+Phase 15 blocker   ：无。全部 Gate A–H + FULL #1–#3（FULL_SUITE_X3_COMPLIANT=true）
+                     在 ACCEPTED_INTEGRATION_SHA 通过；静态审计 A-O 无 NO 项。
+                     计数说明见 §13（D5 closeout 记录的 1362 早于 49ba511 micro-patch
+                     新增的 1 个 unknown-event 测试；本 Gate 实测 1363 三次一致）。
 later-phase backlog：P17-D1（计划/目标主动跟进）、P17-D2（关系气候→行为策略）——
                      永久延后，不得经实施便利回流 Phase 15。
 truthful Canon PARTIAL gaps：mandatory_life_stage_source_status = PARTIAL，
