@@ -124,10 +124,14 @@ class DerivedRetrievalIndex:
         if len(raw) > MAX_INDEXED_ITEMS:
             self._truncated = len(raw) - MAX_INDEXED_ITEMS
             raw = raw[:MAX_INDEXED_ITEMS]
-        # 向量编码（R4/R7：build 即校验/归一化 —— 畸形向量置 None 不落库；
-        # 全部畸形 → vector_unavailable=True，诚实退化到 lexical）
+        # 向量编码（R4/R7/B1：基数严格相等 + 逐条校验/归一化 —— 任何偏离 → 整批
+        # 无向量状态（vector_unavailable=True），lexical 继续；绝不接受部分位置映射）
         try:
             vecs = self._encoder.encode([d["text"] for d in raw])
+            if len(vecs) != len(raw):
+                raise ValueError(
+                    f"vector batch cardinality mismatch: got {len(vecs)}, "
+                    f"want {len(raw)}")
             unusable = 0
             for d, v in zip(raw, vecs):
                 dv = self._norm_vector(v)
@@ -196,21 +200,34 @@ class DerivedRetrievalIndex:
             self._loaded = True
             self._corrupt = False
             self._vector_unavailable = bool(not data.get("vector_ok", True))
-            # R3 兼容契约：version / backend / dim 任一不符 → 持久化向量不可用
-            # （lexical 文本/引用投影仍可用；向量绝不混用）。原因暴露在 status。
-            ver = str(data.get("version", ""))
-            backend = str(data.get("backend", ""))
-            dim = int(data.get("dim", 0) or 0)
+            # R3/B2 兼容契约：持久化向量使用要求 version/backend/dim **全部存在且匹配**；
+            # 缺失/空/零同样视为不兼容（fail-closed），原因精确暴露在 status。
+            ver = str(data.get("version", "") or "")
+            backend = str(data.get("backend", "") or "")
+            dim_raw = data.get("dim")
+            dim = int(dim_raw) if dim_raw else 0
             rt_kind = str(getattr(self._encoder, "kind", "UNKNOWN"))
-            if ver and ver != INDEX_VERSION:
+            if not ver:
+                self._vector_invalid = True
+                self._vector_invalid_reason = "missing_version"
+                log.warning("D2 index missing version metadata → vector off")
+            elif ver != INDEX_VERSION:
                 self._vector_invalid = True
                 self._vector_invalid_reason = f"version_mismatch:{ver}!={INDEX_VERSION}"
                 log.warning("D2 index version mismatch %s != %s → vector off", ver, INDEX_VERSION)
-            elif backend and backend != rt_kind:
+            elif not backend:
+                self._vector_invalid = True
+                self._vector_invalid_reason = "missing_backend"
+                log.warning("D2 index missing backend metadata → vector off")
+            elif backend != rt_kind:
                 self._vector_invalid = True
                 self._vector_invalid_reason = f"backend_mismatch:{backend}!={rt_kind}"
                 log.warning("D2 index backend mismatch %s != %s → vector off", backend, rt_kind)
-            elif dim and self._dim() and dim != self._dim():
+            elif not dim_raw or dim <= 0:
+                self._vector_invalid = True
+                self._vector_invalid_reason = "missing_dim"
+                log.warning("D2 index missing/zero dim metadata → vector off")
+            elif dim != self._dim():
                 self._vector_invalid = True
                 self._vector_invalid_reason = f"dimension_mismatch:{dim}!={self._dim()}"
                 log.warning("D2 index dimension mismatch %s != %s → vector off", dim, self._dim())

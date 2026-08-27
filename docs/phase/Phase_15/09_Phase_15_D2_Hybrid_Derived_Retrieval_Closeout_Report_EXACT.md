@@ -174,6 +174,27 @@ source 计数全程不变）；其余 T1-T20 与全部回归锁原样保持。
 静态复审：`hash(` 仅存于 docstring（生产零内置哈希）；`np.dot` 单一调用点且双端已
 归一化；测试文件无 `or True`；PYTHONHASHSEED 无生产依赖；无新 source-store writer；
 无 Chroma/新重依赖。
+## 14. External Reviewer Residual Closure II（Review_2 = NEEDS_NARROW_PATCH → 已闭合）
+
+针对 91be1da 的两个阻塞闭合（同分支追加 commit）：
+
+| ID | 内容 | 实现 / 证据 |
+|---|---|---|
+| B1 | 向量批量基数 | build 在 `encode` 后显式校验 `len(vecs) == len(raw)`；不符 → 抛 ValueError → 整批 `vec=None`、`vector_unavailable=True`、`last_vector_error` 含精确 "cardinality mismatch: got N, want M"，**绝不接受部分位置映射**；lexical 可用。C1（3 doc→1 vec）/C2（1 doc→2 vec）锁定全批无向量 |
+| B2 | 元数据缺失 fail-closed | load 改为“**必须存在且相等**”：version 缺失→`missing_version`；backend 缺失→`missing_backend`；dim 缺失或 ≤0→`missing_dim`；存在但不等沿用 mismatch 原因。任何一项不满足 → `vector_invalid=True`、`vector_enabled=False`、原因精确可观察；lexical 文本/引用投影保持可用。C3/C4/C5（含 dim=0 变体）锁定 |
+
+**Gates**：
+```text
+Gate A  D2 两套件（hybrid+residual）   37 passed（T/R 系列 + C1-C5）
+Gate C/D D1 + D4 + Phase14 provenance  99 passed
+Gate E  tests/cognition 全目录         259 passed
+Gate F  FULL SUITE ×2                 1324 passed / 0 failed（306s, 279s）
+```
+静态 grep：测试无 `or True`（唯一命中为 T2 docstring 中的禁止性说明文字）；生产
+`len(vecs) != len(raw)` 基数校验在档。回归锁全保持（语义 paraphrase、blake2b 稳定
+哈希、跨进程直载、显式 mismatch 三型、真 cosine、畸形 fail-soft、懒激活、零重复构建、
+权威召回并集、build 失败真状态、C2/C4/C7 权威、D4 零重解析、无 C8、无新 writer、
+有界上下文、secret 排除）。
 ## 12. Final Line
 
 ```text

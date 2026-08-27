@@ -241,3 +241,87 @@ def test_d2_r12_build_encoder_failure_truthful_and_persisted(tmp_path):
                                  encoder=ProviderVectorEncoder(boom, dim=8))
     st2 = idx2.status()
     assert st2["vector_enabled"] is False and st2["vector_unavailable"] is True
+
+
+# ================================================================
+# Final Residual II（Review_2）C1-C5：批量基数 + 元数据缺失 fail-closed
+# ================================================================
+
+def _mkdocs(*contents):
+    return [type("M", (), {"mem_id": f"m{i}", "content": c, "timestamp": float(i),
+                           "status": "active"})
+            for i, c in enumerate(contents)]
+
+
+def test_d2_c1_provider_fewer_vectors_fails_closed(tmp_path):
+    """C1：3 docs → provider 只回 1 个向量 → 整批无向量、lexical 可用、错误可观察。"""
+    from furina.cognition.retrieval.index import DerivedRetrievalIndex
+    from furina.cognition.retrieval.encoders import ProviderVectorEncoder
+    idx = DerivedRetrievalIndex(encoder=ProviderVectorEncoder(
+        lambda texts: [[1.0, 0.0, 0.0, 0.0]], dim=4))
+    idx.build(memories=_mkdocs("冷萃咖啡", "户外骑行", "周报"))
+    st = idx.status()
+    assert st["vector_enabled"] is False and st["vector_unavailable"] is True
+    assert "cardinality mismatch" in st["last_vector_error"]
+    assert all(it.get("vec") is None for it in idx._items), \
+        "不得接受部分位置映射（任何条目都不该有向量）"
+    assert idx.lexical_lookup("冷萃咖啡"), "lexical 必须可用"
+
+
+def test_d2_c2_provider_more_vectors_fails_closed(tmp_path):
+    """C2：1 doc → provider 回 2 个向量 → 同样 fail-closed。"""
+    from furina.cognition.retrieval.index import DerivedRetrievalIndex
+    from furina.cognition.retrieval.encoders import ProviderVectorEncoder
+    idx = DerivedRetrievalIndex(encoder=ProviderVectorEncoder(
+        lambda texts: [[1.0, 0.0], [0.0, 1.0]], dim=2))
+    idx.build(memories=_mkdocs("冷萃咖啡"))
+    st = idx.status()
+    assert st["vector_enabled"] is False and st["vector_unavailable"] is True
+    assert "cardinality mismatch" in st["last_vector_error"]
+    assert all(it.get("vec") is None for it in idx._items)
+    assert idx.lexical_lookup("冷萃咖啡")
+
+
+def _persisted_missing(tmp_path, *, version="15E.2", backend="HASHED_LEXICAL_VECTOR",
+                        dim=256, omit=()):
+    from furina.cognition.retrieval.index import INDEX_MARKER, default_index_path
+    ip = default_index_path(Path(tmp_path) / "cog.db")
+    data = {"marker": INDEX_MARKER, "version": version, "built_at": 0.0,
+            "dim": dim, "backend": backend, "vector_ok": True, "truncated": 0,
+            "items": [{"store": "C3", "ref_id": "m1", "text": "冷萃咖啡",
+                       "keywords": [], "vec": [0.1] * dim,
+                       "ts": 0.0, "status": "active"}]}
+    for k in omit:
+        data.pop(k, None)
+    ip.parent.mkdir(parents=True, exist_ok=True)
+    ip.write_text(json.dumps(data), encoding="utf-8")
+    return ip
+
+
+def _assert_vector_disabled(tmp_path, **kw):
+    from furina.cognition.retrieval.index import DerivedRetrievalIndex
+    ip = _persisted_missing(tmp_path, **kw)
+    idx = DerivedRetrievalIndex(index_path=ip)
+    st = idx.status()
+    assert st["vector_enabled"] is False
+    assert st["vector_invalid"] is True
+    assert idx.vector_lookup("冷萃咖啡") == []
+    assert idx.lexical_lookup("冷萃咖啡"), "lexical 文本/引用投影仍可用"
+    return st
+
+
+def test_d2_c3_missing_version_fails_closed(tmp_path):
+    st = _assert_vector_disabled(tmp_path, omit=("version",))
+    assert st["vector_invalid_reason"] == "missing_version"
+
+
+def test_d2_c4_missing_backend_fails_closed(tmp_path):
+    st = _assert_vector_disabled(tmp_path, omit=("backend",))
+    assert st["vector_invalid_reason"] == "missing_backend"
+
+
+def test_d2_c5_missing_zero_dim_fails_closed(tmp_path):
+    st = _assert_vector_disabled(tmp_path, omit=("dim",))
+    assert st["vector_invalid_reason"] == "missing_dim"
+    st2 = _assert_vector_disabled(tmp_path, dim=0)
+    assert st2["vector_invalid_reason"] == "missing_dim"
