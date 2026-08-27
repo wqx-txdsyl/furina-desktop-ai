@@ -14,7 +14,9 @@ READY_FOR_REVIEW
 ```text
 accepted D2 SHA（PART 0 已 --ff-only 快进集成分支并推送）: 55c5959780883b0d0504653dfab9a4e6958e4c8b
 task branch: feature/phase15-d3-retrieval-exposure-cooldown（自 55c5959 切出）
-final local SHA : 见 §10（本任务最后 commit）
+D3 主实现 commit : 3267ba7480f42ccba27542fbb110e4115384de8c
+reviewer blockers 修复（功能+测试）: 5e14f3dc9cf5bb0cc8e18bc91cf02d863bdbf89a
+final local SHA : 见 §10（本任务最后 commit；push 后校验 local == remote）
 final remote SHA: == final local SHA（push 后校验）
 ```
 
@@ -27,20 +29,26 @@ final remote SHA: == final local SHA（push 后校验）
   进程内纯内存，无迁移、无持久化文件；重启即清空。
 - **受影响 store**：仅 C3 记忆桶的**自动注入排序**。C4/C7/C2 桶与 C5/C6 完全不经账本。
 - **mark 时点**：`CognitiveContext.assemble()` 成功构造并通过 `is_bounded` 校验后，
-  对最终入选（`selected_objs[: memories]`）逐条 mark —— 候选生成失败/中途异常/
-  被 ranker 排除的对象一律不标（T4/T5/T6）。
+  对最终入选（`selected_objs[: memories]`）逐条 mark —— **最终装配失败/中止绝不
+  标记**（异常向上传播、`return ctx` 未到达 → 零记录，T6）；**fallback 成功进入
+  context 后仍标记**（fallback 对象同样落入 `selected_objs`，与主路径共用同一 mark
+  点）；被 ranker 排除/候选池截断的对象一律不标（T4/T5）。
 
 ## 4. Explicit Recall Bypass
 
-`is_recall_intent()`：确定性 bounded 正则（你还记得|刚才你说/提|再说说|再说一次|
-重复一下|之前说/提的/过 等）；绝不调 LLM。
+`is_recall_intent()`：确定性 bounded 正则（你还记得|**刚才那个**|刚才你说/提|再说说|
+再说一次|重复一下|之前说/提的/过 等）；**「刚才那个…」为任务书锁定说法**，已命中；
+绝不调 LLM。
 
-实测 trace（D3 测试 `test_d3_t2b_explicit_recall_bypasses_cooldown`）：
+实测 trace（D3 测试 `test_d3_t2b_explicit_recall_bypasses_cooldown` +
+`test_d3_t2e_recall_bypass_with_locked_phrase`）：
 
 ```text
 “冷萃咖啡”         → ctx 含「用户喜欢喝冷萃咖啡」（首现并标记）
 “聊聊咖啡相关的话题” → ctx 不含该记忆（TTL 内抑制生效）
 “你还记得我说的咖啡吗”→ ctx 再次含该记忆（显式召回绕过冷却）
+“给我讲讲咖啡吧”    → ctx 不含该记忆（非召回措辞 → 冷却抑制）
+“刚才那个冷萃咖啡的配方再讲一遍” → ctx 再次含该记忆（锁定说法绕过冷却）
 ```
 
 ## 5. Truth Non-Mutation Proof
@@ -60,11 +68,11 @@ ledger 内部零 DB 访问（纯 OrderedDict）；stores/base.py 本任务零改
 
 | Gate | Scope | Result |
 |---|---|---|
-| A（new D3 tests） | tests/cognition/test_phase15_d3_exposure.py | **16 passed** |
+| A（new D3 tests） | tests/cognition/test_phase15_d3_exposure.py | **19 passed**（16 + t2e/t1b/t7b；T9/T15 增强） |
 | B（all D2 retrieval） | hybrid + residual 两套件 | **37 passed** |
 | C（D1 + D4 + Phase14 provenance） | d1_canon_evidence + d4_temporal + Phase14 三件套 + r7r10 | **133 passed** |
-| D/E 合（cognition 全目录） | tests/cognition | **275 passed** |
-| F（FULL SUITE ×2） | 全仓库 | **1340 passed / 0 failed / 0 skipped**（334s, 320s；1324+16） |
+| D/E 合（cognition 全目录） | tests/cognition | **278 passed**（275 + 3 新增） |
+| F（FULL SUITE） | 全仓库 | **1343 passed / 0 failed / 0 skipped**（原 ×2：334s/320s 各 1340；reviewer 修复轮 ×1：285s 1343） |
 
 静态审计要点（执行令 §5）：单一代码策略点=RetrievalExposureLedger；唯一 mark 点=
 context.assemble 成功返回前一处；生产零引用泄漏到 stores 层（grep 验证 0）；源层零
@@ -90,9 +98,11 @@ DB writes 增量=0（本任务未触碰任何 store/schema）。
 ```text
 commit 仅含 D3-scoped 文件（新增 exposure.py + test_phase15_d3_exposure.py；
 改写 context.py/hub.py 接线；closeout 11 + 10 任务书入库）
+reviewer blockers 修复 commit：exposure.py（「刚才那个…」锁定说法）+ 测试
+（t2e/t1b/t7b 新增、T9/T15 增强）+ closeout 本文件 —— 未触碰任何其他源码
 unrelated untracked（data/assets_v2/, scripts/assets_v2/, Phase_16/_night_*,
 其余 _night_*/12-15 文档, nul）一律未 add/commit/move
-local SHA == remote SHA 于 push 后校验；未 merge integration；未开始 D5
+final local SHA == final remote SHA 于 push 后校验；未 merge integration；未开始 D5
 ```
 
 ## 11. Final Line
