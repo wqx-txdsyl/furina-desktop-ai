@@ -137,6 +137,40 @@ def test_d3_t1b_same_candidate_suppressed_in_adjacent_query(tmp_path):
     ctrl.close()
 
 
+def test_d3_t1c_unrelated_query_suppressed_via_stub(tmp_path, monkeypatch):
+    """reviewer D3-T1（stub 版）：monkeypatch 强制同一 C3 候选在**无关** query
+    （“今天天气怎么样”）中返回 —— 对照组：未曝光时能进入 context；
+    实验组：首次曝光后，相邻无关 turn 被 cooldown 抑制。
+    仅测试层 stub，零生产代码改动。"""
+    def _force(mobj):
+        def _retrieve(*, query="", limit=3, context=None):
+            return [mobj]
+        return _retrieve
+
+    # ---------- 对照组：零曝光 → 无关 query（stub 强制返回）能进入 context ----------
+    hub_c, _ = _hub(Path(tempfile.mkdtemp()))
+    mc = _mem(hub_c, "用户喜欢喝冷萃咖啡")
+    hub_c.build_index()
+    monkeypatch.setattr(hub_c.autobiography, "retrieve", _force(mc))
+    ctrl = hub_c.assemble(query="今天天气怎么样")
+    assert (any("冷萃" in m for m in ctrl.autobiographical_memories)), (
+        "对照：未曝光时同一 C3 候选必须能进入 context")
+    hub_c.close()
+
+    # ---------- 实验组：首次曝光后 → 相邻无关 turn 被 cooldown 抑制 ----------
+    hub_e, ledger_e = _hub(Path(tempfile.mkdtemp()))
+    me = _mem(hub_e, "用户喜欢喝冷萃咖啡")
+    hub_e.build_index()
+    monkeypatch.setattr(hub_e.autobiography, "retrieve", _force(me))
+    first = hub_e.assemble(query="冷萃咖啡")            # 首次曝光（stub 亦返回同一候选）
+    assert any("冷萃" in m for m in first.autobiographical_memories)
+    assert ledger_e.cooled(f"C3:{me.mem_id}"), "首次曝光后必须已标记"
+    nxt = hub_e.assemble(query="今天天气怎么样")         # 相邻无关 turn（stub 强制返回同一候选）
+    assert (not any("冷萃" in m for m in nxt.autobiographical_memories)), (
+        "实验：首次曝光后相邻无关 turn 必须被 cooldown 抑制")
+    hub_e.close()
+
+
 def test_d3_t7b_c6_events_enter_context_during_c3_cooldown(tmp_path):
     """reviewer D3-T7：C3 冷却前后，当前 C6 event 仍正常进入 context。"""
     hub, ledger = _hub(tmp_path)

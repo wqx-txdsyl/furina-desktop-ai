@@ -68,11 +68,11 @@ ledger 内部零 DB 访问（纯 OrderedDict）；stores/base.py 本任务零改
 
 | Gate | Scope | Result |
 |---|---|---|
-| A（new D3 tests） | tests/cognition/test_phase15_d3_exposure.py | **19 passed**（16 + t2e/t1b/t7b；T9/T15 增强） |
+| A（new D3 tests） | tests/cognition/test_phase15_d3_exposure.py | **20 passed**（16 + t2e/t1b/t1c/t7b；T9/T15 增强） |
 | B（all D2 retrieval） | hybrid + residual 两套件 | **37 passed** |
 | C（D1 + D4 + Phase14 provenance） | d1_canon_evidence + d4_temporal + Phase14 三件套 + r7r10 | **133 passed** |
-| D/E 合（cognition 全目录） | tests/cognition | **278 passed**（275 + 3 新增） |
-| F（FULL SUITE） | 全仓库 | **1343 passed / 0 failed / 0 skipped**（原 ×2：334s/320s 各 1340；reviewer 修复轮 ×1：285s 1343） |
+| D/E 合（cognition 全目录） | tests/cognition | **279 passed**（275 + 4 新增） |
+| F（FULL SUITE） | 全仓库 | **1344 passed / 0 failed / 0 skipped**（原 ×2：334s/320s 各 1340；reviewer 修复轮 ×2：285s 1343 + 242s 1344） |
 
 静态审计要点（执行令 §5）：单一代码策略点=RetrievalExposureLedger；唯一 mark 点=
 context.assemble 成功返回前一处；生产零引用泄漏到 stores 层（grep 验证 0）；源层零
@@ -99,7 +99,8 @@ DB writes 增量=0（本任务未触碰任何 store/schema）。
 commit 仅含 D3-scoped 文件（新增 exposure.py + test_phase15_d3_exposure.py；
 改写 context.py/hub.py 接线；closeout 11 + 10 任务书入库）
 reviewer blockers 修复 commit：exposure.py（「刚才那个…」锁定说法）+ 测试
-（t2e/t1b/t7b 新增、T9/T15 增强）+ closeout 本文件 —— 未触碰任何其他源码
+（t2e/t1b/t1c/t7b 新增、T9/T15 增强）+ closeout 本文件 —— 未触碰任何其他源码
+（t1c 为 monkeypatch/stub 版无关 query 抑制测试，追加 commit；**零生产代码改动**）
 unrelated untracked（data/assets_v2/, scripts/assets_v2/, Phase_16/_night_*,
 其余 _night_*/12-15 文档, nul）一律未 add/commit/move
 final local SHA == final remote SHA 于 push 后校验；未 merge integration；未开始 D5
