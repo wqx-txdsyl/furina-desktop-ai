@@ -188,8 +188,10 @@ class CognitionHub:
         self.willingness = WorkWillingnessModel()     # model-only（Phase 14K 预留）
         # Phase 15E：Derived Semantic Vector Index（DERIVED/REBUILDABLE/NON-AUTHORITATIVE）
         from .retrieval import SemanticVectorIndex, default_index_path
+        from .retrieval.exposure import RetrievalExposureLedger
         self.index = SemanticVectorIndex(index_path=default_index_path(self._db._path))
         self._index_fingerprint = ""
+        self.exposure_ledger = RetrievalExposureLedger()   # D3：session-local
         self.assembler = CognitiveContextAssembler(
             canon_identity=self.canon_identity,
             canon_history=self.canon_history,
@@ -199,6 +201,7 @@ class CognitionHub:
             events=self.events,
             agent_history=self.agent_history,
             index=self.index,
+            exposure_ledger=self.exposure_ledger,
         )
         self._session_id = session_id
         log.info("CognitionHub ready: schema_version=%s", self._db.schema_version)

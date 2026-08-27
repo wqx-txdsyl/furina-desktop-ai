@@ -6,7 +6,7 @@ CURRENT FACTS > RECENT EVENT > AGENT TASK FACT > USER MODEL FACT > AUTOBIO MEMOR
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from furina.core import get_logger
 from .models import CognitiveContext
@@ -35,7 +35,8 @@ class CognitiveContextAssembler:
                  events: EventTimelineStore,
                  agent_history: AgentTaskHistoryStore,
                  bounds: Optional[Dict[str, int]] = None,
-                 index: Optional[Any] = None) -> None:
+                 index: Optional[Any] = None,
+                 exposure_ledger: Optional[Any] = None) -> None:
         self._stores = {
             "canon_identity": canon_identity,
             "canon_history": canon_history,
@@ -49,6 +50,9 @@ class CognitiveContextAssembler:
         self._retriever = CanonLifeRetriever(canon_history)
         # D2：DERIVED 检索索引（非权威提示；None = 保持旧路径）。
         self._index = index
+        # D3：session-local 曝光账本（DERIVED/非权威；None → 内部默认实例）。
+        from .retrieval.exposure import RetrievalExposureLedger
+        self._exposure = exposure_ledger or RetrievalExposureLedger()
 
     def assemble(self, *, query: str = "", topic: str = "",
                  current_facts: Optional[Dict[str, Any]] = None,
@@ -67,12 +71,24 @@ class CognitiveContextAssembler:
         # Phase 15E：C3 回忆经 RetrievalRanker（authority/relevance/recency/importance/
         # strength/status/diversity），不 dump、不纯 cosine topK。
         # D2 + R6：hybrid 解析对象 与 权威 retrieve 候选 **合并去重**（mem_id）后交
-        # ranker —— derived 是增强而非独占闸门，绝不压制权威基线召回。
+        # ranker —— derived 是增强而非独占闸门。
+        # D3：显式召回绕过冷却；自动注入对 TTL 内已曝光记忆做有界抑制；候选全部被
+        # 冷却 → 本轮静默（绝不二次回退复活）；只有**成功装配进最终 context** 的对象
+        # 才被标记曝光（mark-after-success）。
         from .retrieval.ranker import RetrievalRanker
         from .retrieval.hybrid import HybridRetriever
+        from .retrieval.exposure import is_recall_intent
         ranker = RetrievalRanker()
         mems: List[Any] = []
-        try:
+        selected_objs: List[Any] = []
+        recall = is_recall_intent(query)
+        cooled_fn = (self._exposure.cooled
+                     if (self._exposure and not recall) else None)
+
+        def _key(m) -> str:
+            return f"C3:{getattr(m, 'mem_id', '') or ''}"
+
+        def _collect() -> Tuple[List[Any], bool]:
             pool: List[Any] = []
             if self._index is not None:
                 res = HybridRetriever(self._index, auto).candidates(
@@ -87,15 +103,32 @@ class CognitiveContextAssembler:
                     continue
                 seen.add(mid)
                 merged.append(m)
-            if merged:
-                mems = [m.content for m in ranker.rank_memories(
-                    merged, query=query, limit=b["memories"])]
-            if not mems:
-                mems = [m.content for m in auto.retrieve(query=query, limit=b["memories"])]
-        except Exception:
+            had_merge = bool(merged)
+            if cooled_fn:
+                merged = [m for m in merged if not cooled_fn(_key(m))]
+            return merged, had_merge
+
+        try:
+            candidate_input, had_merge = _collect()
+            if candidate_input:
+                selected_objs = list(ranker.rank_memories(
+                    candidate_input, query=query, limit=b["memories"]))
+                mems = [m.content for m in selected_objs]
+            elif had_merge and cooled_fn:
+                selected_objs = []                       # 全冷却：本轮静默，不复活
+            if not mems and not (had_merge and cooled_fn):
+                legacy_fallback = list(auto.retrieve(query=query,
+                                                     limit=b["memories"]))
+                selected_objs = legacy_fallback
+                mems = [m.content for m in selected_objs]
+        except Exception as e:
+            log.warning("D3 C3 hybrid/fallback 失败（降级原路径；零曝光标记）: %s", e)
+            selected_objs = []
             mems = []
             try:
-                mems = [m.content for m in auto.retrieve(query=query, limit=b["memories"])]
+                legacy_fallback = list(auto.retrieve(query=query, limit=b["memories"]))
+                selected_objs = legacy_fallback
+                mems = [m.content for m in selected_objs]
             except Exception:
                 mems = []
 
@@ -112,4 +145,14 @@ class CognitiveContextAssembler:
         )
         # 断言有界（防未来改动把整库 dump 给 LLM）
         assert ctx.is_bounded(b), f"cognitive context 超出 bounds: {ctx.is_bounded(b)}"
+        # D3：mark-after-success —— 只标记成功装配且真正进入最终 context 的记忆；
+        # 失败/中止绝不标记；标记不触碰任何 source truth。
+        if self._exposure is not None:
+            try:
+                for m in selected_objs[: b["memories"]]:
+                    mid = str(getattr(m, "mem_id", "") or "")
+                    if mid:
+                        self._exposure.mark(f"C3:{mid}")
+            except Exception as e:                       # pragma: no cover
+                log.warning("D3 exposure mark failed（不影响真值）: %s", e)
         return ctx
