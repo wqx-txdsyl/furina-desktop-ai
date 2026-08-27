@@ -33,31 +33,38 @@ D5_FINAL_SHA           = 见外部 handoff（closeout 不包含自身 commit SHA
 | **bounded hybrid（选定）** | 确定性、有界、time-aware、族隔离 | 实现最"重"（仍仅 ~30 行） | **采用** |
 
 **选定机制**：`RelationshipEngine` 唯一写入口 `apply()` 内，按**事件族**维护一个
-**rolling-window 时间戳账本**（`_family_hits: Dict[family, List[ts]]`）。事件到达时：
+**rolling-window 时间戳账本**（per-family `deque(maxlen=max_hits_per_family)`——
+硬容量：持续 spam 也不会线性增长，总 ledger 长度 ≤ distinct_families × capacity）。
+事件到达时：
 
 ```text
-k = 最近 WINDOW 秒内该族已发生的事件数（旧事件逐出后）
-本次影响乘数 mult = DIMINISH_BASE ** k   （首次 k=0 → mult=1.0，与 D5 前完全一致）
+k = 最近 WINDOW 秒内该族已发生的事件数（队首过期逐出；deque 满则 append 自动淘汰最旧，
+    绝不在满容量后停止更新时间戳）
+本次影响乘数 mult = DIMINISH_BASE ** k   （首次 k=0 → mult=1.0，与 D5 前完全一致；
+                                         持续 spam 封底 ≈ DIMINISH_BASE ** capacity）
 实际 delta = 基础 delta × (trust×0.5 / LONG_TERM×0.7 既有规则) × strength × mult
 ```
 
 选择理由：最小、可解释（"短窗口内同族每多一次，影响 ×0.5"）、可测试（纯函数 +
-可注入时钟）、满足全部约束——总影响有界（几何级数 ≤ 1/(1-0.5) = 2× 单次）、
-时间感知（事件随窗口滚动逐出 → 逐步恢复正常影响）、族隔离（每族独立账本）。
+可注入时钟）、满足全部约束——总影响有界（几何级数 ≤ 1/(1-0.5) = 2× 单次，硬容量
+进一步给出封闭形式上界 `single×(2 + N×0.5^cap)`）、时间感知（事件随窗口滚动逐出 →
+逐步恢复正常影响）、族隔离（每族独立账本）、存储有界（deque maxlen）。
 
 **Event-family 定义**（`EVENT_FAMILIES`）：
 
 ```text
 positive_social : positive_response / user_initiated / accepted_invitation / long_positive_session
 positive_touch  : positive_touch（pet-like 独立族：猛摸不压制 help/social）
-help            : successful_help / failed_help（"帮忙互动"族，成功/失败共享饱和）
+help_success    : successful_help（正向）
+help_failure    : failed_help（负向；**相反语义拆分独立族** —— 成功饱和绝不压制真实
+                  失败的首个负向影响，反之亦然）
 negative        : reject / ignore / cancel / negative_response
-未知事件        : 自身 event 名成独立族（delta 为空 → 天然 no-op，不污染账本）
+未知事件        : 自身 event 名成独立族（delta 为空 → early-return，不创建账本条目）
 ```
 
 **参数**（均可注入，构造 kwargs）：`window_seconds=120.0`、`diminish_base=0.5`、
-`time_fn`（默认 `time.monotonic`；测试用 `_FakeClock`，禁 sleep）。`window_seconds=0`
-= 关闭饱和（仅测试对照用，等于旧线性行为）。
+`max_hits_per_family=64`（安全默认）、`time_fn`（默认 `time.monotonic`；测试用
+`_FakeClock`，禁 sleep）。`window_seconds=0` = 关闭饱和（仅测试对照用，等于旧线性行为）。
 
 ## 4. Before / After Behavior（确定性 traces）
 
@@ -83,13 +90,20 @@ negative        : reject / ignore / cancel / negative_response
 
 ## 5. C6 / Provenance Preservation
 
-- `apply()` 不触碰 C6 event store；C6 事件写路径零改动。
+- C6 客观真值**直接验证**（`test_d5_c6_events_preserved_during_c5_saturation`）：
+  真实 CognitionHub/EventTimelineStore，连续记录 40 条客观 interaction C6 events
+  （USER_PET/USER_MESSAGE），同时让对应 C5 delta 进入 saturation —— 40 条 event_id
+  全部保留、数量不变；anti-spam 只影响 C5 delta，不吞 C6 truth。
 - Milestones：`test_d5_milestone_provenance_preserved_no_fake_milestones` ——
   record_milestone("first_positive", source_event_id="lev_abc_123") 后经 50×touch +
   50×reject burst，milestones 仍为 1 条且 `source_event_id == "lev_abc_123"` 精确保留，
   **anti-spam 不创建任何虚假 milestone**。
 - C5 current truth owner 未改变：仍是 `RelationshipEngine`（`RelationshipStore.truth_owner`
   属性不变；store 仍仅为 adapter，无第二个 current-state owner）。
+- Restart：`test_d5_real_db_restart_roundtrip` —— MemoryStore save → close → 同一 DB
+  重开 → load → 新 engine：C5 raw truth 按既有 2 位小数持久化契约（
+  `RelationshipState.as_dict()` round 2，Phase 04 起）精确保留；新 engine operational
+  ledger 为空；restart 后首事件恢复全额；无新 schema（同一 DB 直接重开）。
 
 ## 6. Product Boundary Audit
 
@@ -111,41 +125,51 @@ milestone provenance 未删除/伪造               ✓
 
 | Gate | Scope | Result |
 |---|---|---|
-| A（new D5 tests） | tests/test_phase15_d5_relationship_antispam.py | **12 passed** |
+| A（new D5 tests） | tests/test_phase15_d5_relationship_antispam.py | **18 passed** |
 | B（既有 relationship） | tests/test_relationship.py | **8 passed** |
-| C（C5 store / milestone / provenance） | test_cognitive_stores.py + test_phase151_truth_closure.py | **38 passed** |
+| B2（rc1_freeze 回归） | tests/test_rc1_freeze.py | **8 passed** |
+| C（C5 store / milestone / C6 provenance） | test_cognitive_stores.py + test_phase151_truth_closure.py | **38 passed** |
 | D（Phase 14 relationship normalization / consumer） | phase14 四件套 | **78 passed** |
 | E（D1/D4/D2/D3 regression） | d1_canon_evidence + d4_temporal + d2×2 + d3_exposure | **112 passed** |
 | F（cognition 全目录） | tests/cognition | **279 passed** |
-| G（FULL SUITE） | 全仓库 | **1356 passed / 0 failed / 0 skipped** |
+| G（FULL SUITE ×2） | 全仓库 | **1362 passed / 0 failed / 0 skipped** |
 
 断言纪律：NO skip / NO xfail / NO deleted test / NO weakened assertion / NO fabricated
-result。唯一既有测试调整：`tests/test_rc1_freeze.py::test_relationship_event_applied_once`
-原断言"两次 apply 增量相等"编码**旧线性契约**，与 D5 强制的新契约（边际递减）直接冲突；
-按"修根因"升级为**更强**断言（首次增量=完整单次 delta 4.2、第二次=×0.5=2.1，精确值锁定
-"恰好一次路由"——若事件被重复路由，首次增量会是 8.4）。`tests/test_relationship.py` 全数
-通过且断言未弱化（Gate B）。
+result。`tests/test_rc1_freeze.py::test_relationship_event_applied_once` 数值断言保持
+4.2/2.1 精确值（未弱化），注释改为准确表述：该断言锁定 **engine 单次调用的数学契约**
+（确定性 delta），不声称独立证明生产 routing exactly-once（routing 由既有集成/freeze
+断言覆盖）。`tests/test_relationship.py` 全数通过且断言未弱化（Gate B）。
+注：Gate G 首轮全量有 1 例 `test_gui_integration.py::test_gui_timer_advances_runtime`
+时序 flake（全量负载下偶发；隔离重跑通过，且本轮改动零 GUI/timer 文件）；重跑全量
+确认 1362 passed / 0 failed。
 
 ## 8. Static Audit
 
 - 生产改动仅 `furina/relationship/engine.py`：新增 `EVENT_FAMILIES` / `event_family()` /
-  `DEFAULT_ANTISPAM_WINDOW_SECONDS` / `DEFAULT_DIMINISH_BASE` / `_now()` /
-  `_family_multiplier()`；`__init__` 增 3 个注入参数；`apply()` 增 early-return + 乘数。
-- 账本纯内存（`_family_hits`），零 DB 访问、零 schema、零 migration；`decay()` /
-  `relationship_factors()` / `_bump` clamp / `RelationshipState` / `RelationshipStore` /
-  C5 milestones 表全部原样。
-- `relationship_factors()` 仍是唯一 canonical 0..1 consumer contract（未改）。
+  `DEFAULT_ANTISPAM_WINDOW_SECONDS` / `DEFAULT_DIMINISH_BASE` /
+  `DEFAULT_MAX_HITS_PER_FAMILY` / `_now()` / `_family_multiplier()` /
+  `saturation_snapshot()`；`__init__` 增 4 个注入参数（含 `max_hits_per_family`）；
+  `apply()` 增 early-return + 乘数；`_family_hits` 为 per-family `deque(maxlen)`。
+- 账本纯内存（`_family_hits: Dict[str, deque]`），零 DB 访问、零 schema、零 migration；
+  `decay()` / `relationship_factors()` / `_bump` clamp / `RelationshipState` /
+  `RelationshipStore` / C5 milestones 表全部原样。
+- `apply()` 返回值语义已在 docstring 准确表述：**base delta × 饱和乘数（round 3），
+  不含 strength / LONG_TERM / trust 乘数与 clamp 后的 state 差值**；既有公开返回结构
+  未改变（recon 未发现依赖返回值的调用方需要修复——app/scheduler/store 均忽略返回值）。
+- `relationship_factors()` 仍是唯一 canonical 0..1 consumer contract（未改；
+  `test_d5_canonical_factors_0_1_after_burst` 验证 engine.factors() 委托关系）。
 - 无关 untracked（data/assets_v2/, scripts/assets_v2/, Phase_16/_night_*, 其余
   _night_*/14-15 文档, nul）一律未 add/commit/move。
 
 ## 9. Remaining Gaps
 
-- window/base 为模块常量 + 构造注入，未暴露到 AppConfig（如需运营调参另行任务）；
-- `failed_help` 与 `successful_help` 共享 help 族饱和（有意的设计选择：同属"帮忙互动"；
-  如需按结果拆族需重定义 family 映射）；
+- window/base/max_hits 为模块常量 + 构造注入，未暴露到 AppConfig（如需运营调参另行任务）；
 - 饱和账本不持久化：restart 后清空（**有意的**——C5 truth 由 `RelationshipState` 经
-  MemoryStore `save/load_relationship` 持久化，账本只是 operational 防刷状态）；
-- 事件族映射为白名单式；新增事件类型需显式登记族（fail-safe：未登记 → 独立族 no-op）。
+  MemoryStore `save/load_relationship` 按既有 2 位小数契约持久化，账本只是 operational
+  防刷状态）；
+- 事件族映射为白名单式；新增事件类型需显式登记族（fail-safe：未登记 → 独立族 no-op）；
+- `apply()` 返回值为 base delta × 饱和乘数（round 3），不含 strength/LONG_TERM/trust
+  乘数与 clamp —— 已按 reviewer 要求准确表述，未改变既有公开返回结构（无调用方依赖）。
 
 ## 10. Git State
 
@@ -158,6 +182,8 @@ commit 仅含 D5-scoped 文件：
 unrelated untracked 一律未 add/commit/move
 final local SHA == final remote SHA 于 push 后校验；未 merge D5 → integration；
 未开始 Integrated Final Gate；未开始 Phase 16
+reviewer narrow patch 轮：ledger deque 硬容量 + help 族拆分 + C6/真实 restart/
+canonical 测试 + 文档措辞修正（仍在同一 D5 分支、同一 D5 文件范围）
 ```
 
 ## 11. Final Line

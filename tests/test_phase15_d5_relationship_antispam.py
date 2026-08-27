@@ -7,7 +7,6 @@ short-window 内同族重复 → 边际影响确定性递减；首次事件完�
 """
 from __future__ import annotations
 
-import copy
 import os
 from pathlib import Path
 
@@ -18,7 +17,8 @@ from pytest import approx
 
 from furina.relationship.engine import (
     RelationshipEngine,
-    EV_POSITIVE_RESPONSE, EV_POSITIVE_TOUCH, EV_SUCCESSFUL_HELP, EV_REJECT,
+    EVENT_FAMILIES,
+    EV_POSITIVE_RESPONSE, EV_POSITIVE_TOUCH, EV_SUCCESSFUL_HELP, EV_FAILED_HELP, EV_REJECT,
 )
 
 
@@ -193,16 +193,33 @@ def test_d5_milestone_provenance_preserved_no_fake_milestones(tmp_path):
     hub.close()
 
 
-# ================================================================ 10. restart 语义
-def test_d5_restart_truth_persists_ledger_clears():
+# ================================================================ 10. 真实 restart round-trip
+def test_d5_real_db_restart_roundtrip(tmp_path):
+    """MemoryStore 真实持久化 round-trip：save → close → 同一 DB 重开 → load → 新 engine。
+
+    断言：C5 raw truth 精确保留；新 engine operational ledger 为空；restart 后首次
+    事件恢复全额；同一 DB 直接重开（无新 schema / migration）。
+    """
+    from furina.memory import MemoryStore
+    db = Path(tmp_path) / "mem.db"
     clk = _FakeClock()
     re1 = RelationshipEngine(time_fn=clk)
     for _ in range(5):
         re1.apply(EV_POSITIVE_TOUCH)
-    # 模拟 restart：C5 current truth 随 state 保留（MemoryStore.save/load_relationship），
-    # operational 饱和账本（纯内存）清空 → 首次事件恢复全额。
-    re2 = RelationshipEngine(state=copy.copy(re1.state))
-    assert re2.state.familiarity == re1.state.familiarity, "C5 current truth 不丢失"
+    s1 = MemoryStore(db)
+    s1.save_relationship(re1.state)
+    s1.close()
+    s2 = MemoryStore(db)                                 # 同一 DB 重新打开
+    state2 = s2.load_relationship()
+    s2.close()
+    re2 = RelationshipEngine(state=state2)
+    # 持久化契约为 RelationshipState.as_dict() 2 位小数存储（Phase 04 起既有行为）；
+    # "精确保留" = 按该契约无丢失、无损坏。
+    assert re2.state.familiarity == pytest.approx(re1.state.familiarity, abs=0.005)
+    assert re2.state.familiarity == round(re1.state.familiarity, 2), (
+        "C5 raw truth 按 2 位小数持久化契约精确保留")
+    assert re2.state.comfort == round(re1.state.comfort, 2)
+    assert re2.saturation_snapshot() == {}, "新 engine operational ledger 为空"
     before = re2.state.familiarity
     re2.apply(EV_POSITIVE_TOUCH)
     assert re2.state.familiarity - before == approx(2.5 * 0.7), (
@@ -245,3 +262,127 @@ def test_d5_unknown_event_safe_noop_no_ledger_pollution():
     # 未知事件不得污染饱和账本：随后真实事件仍为全额
     re.apply(EV_POSITIVE_TOUCH)
     assert re.state.familiarity == approx(2.5 * 0.7)
+
+
+# ================================================================ Blocker 1：账本硬容量
+def test_d5_ledger_hard_capacity_bounded():
+    """高频调用远超 capacity：每族 ledger 长度 ≤ capacity；总 ledger 有固定上界；
+    saturation 仍生效；持续 spam 仍更新最近 timestamp；窗口过后恢复正常影响。"""
+    clk = _FakeClock()
+    cap = 8
+    re = RelationshipEngine(time_fn=clk, max_hits_per_family=cap)
+    last_t = None
+    for i in range(500):
+        clk.advance(0.5)
+        last_t = clk.t
+        re.apply(EV_POSITIVE_TOUCH)
+    snap = re.saturation_snapshot()
+    assert len(snap["positive_touch"]) <= cap, "每族 ledger 长度必须 ≤ capacity"
+    assert len(snap) <= len(set(EVENT_FAMILIES.values())), "family 数量确定性有界"
+    total = sum(len(v) for v in snap.values())
+    assert total <= len(set(EVENT_FAMILIES.values())) * cap, "总 ledger 长度有固定上界"
+    assert snap["positive_touch"][-1] == approx(last_t), (
+        "持续 spam 仍记录最近 timestamp（达容量后不停止更新）")
+    # saturation 仍生效：冲击期后乘数封底 = 0.5^cap（deque 硬容量），
+    # 总影响 ≤ single×(2 + N×0.5^cap)（封闭形式，远低于线性 500×single）
+    single = 2.5 * 0.7
+    closed_form_bound = single * (2.0 + 500 * 0.5 ** cap)
+    assert re.state.familiarity <= closed_form_bound, (
+        f"总影响必须 ≤ 封闭形式上界 {closed_form_bound:.4f}")
+    assert re.state.familiarity < 500 * single * 0.02, "远低于线性累计"
+    assert re.state.familiarity > single, "仍须有真实积累"
+    # 窗口过去 → 恢复正常影响
+    clk.advance(121.0)
+    before = re.state.familiarity
+    re.apply(EV_POSITIVE_TOUCH)
+    assert re.state.familiarity - before == approx(2.5 * 0.7), (
+        "窗口过去后恢复全额影响")
+
+
+# ================================================================ Blocker 2：help 族拆分
+def test_d5_help_success_saturation_does_not_dampen_failed_help():
+    """help_success 饱和后，一次 failed_help 必须获得首次完整负向影响（D5-T6）。"""
+    re = RelationshipEngine()
+    for _ in range(100):
+        re.apply(EV_SUCCESSFUL_HELP)                    # help_success 饱和
+    ret = re.apply(EV_FAILED_HELP)                       # help_failure 族首次
+    assert ret["annoyance"] == approx(4.5), "failed_help 首次负向影响必须完整"
+    assert ret["trust"] == approx(-0.8)
+    assert re.state.annoyance == approx(4.5), (
+        "successful_help 饱和不得压制真实失败（annoyance 仅来自 failed_help）")
+    assert re.state.trust == approx(2.0 * 0.5 * (2.0 - 2.0 ** -99) - 0.4), (
+        "trust = 累积成功(几何有界) - 本次失败全额")
+
+
+def test_d5_help_failure_saturation_does_not_dampen_successful_help():
+    """help_failure 饱和后，一次 successful_help 必须获得首次完整正向影响（D5-T7）。"""
+    re = RelationshipEngine()
+    for _ in range(100):
+        re.apply(EV_FAILED_HELP)                        # help_failure 饱和
+    ret = re.apply(EV_SUCCESSFUL_HELP)                   # help_success 族首次
+    assert ret["respect"] == approx(3.0), "successful_help 首次正向影响必须完整"
+    assert ret["comfort"] == approx(3.0)
+    assert re.state.respect == approx(3.0), (
+        "failed_help 饱和不得压制真实成功（respect 仅来自 successful_help）")
+
+
+def test_d5_same_help_type_repeats_diminish_within_own_family():
+    """同一种 help 重复 → 各自族内正常递减（互不串扰）。"""
+    re = RelationshipEngine()
+    prev = 0.0
+    margins = []
+    for _ in range(5):
+        re.apply(EV_SUCCESSFUL_HELP)
+        margins.append(re.state.respect - prev)
+        prev = re.state.respect
+    for i in range(4):
+        assert margins[i] > margins[i + 1], "successful_help 族内递减"
+    re2 = RelationshipEngine()
+    prev = 0.0
+    margins2 = []
+    for _ in range(5):
+        re2.apply(EV_FAILED_HELP)
+        margins2.append(re2.state.annoyance - prev)
+        prev = re2.state.annoyance
+    for i in range(4):
+        assert margins2[i] > margins2[i + 1], "failed_help 族内递减"
+
+
+# ================================================================ C6 objective truth
+def test_d5_c6_events_preserved_during_c5_saturation(tmp_path):
+    """真实 CognitionHub/EventTimelineStore：连续记录多次客观 interaction C6 events，
+    同时让对应 C5 delta 进入 saturation → C6 event 数量与 event_id 全部保留；
+    anti-spam 只影响 C5 delta，不吞 C6 truth。"""
+    from furina.cognition import CognitionHub
+    eng = RelationshipEngine()
+    hub = CognitionHub(Path(tmp_path) / "cog.db", relationship_engine=eng)
+    ids = []
+    for i in range(40):
+        ev = hub.record_event(
+            "USER_PET" if i % 2 == 0 else "USER_MESSAGE",
+            payload={"text": f"互动 {i}"}, turn_id=i, consolidate=False)
+        ids.append(ev.event_id)
+        eng.apply(EV_POSITIVE_TOUCH)                    # 同时让 C5 delta 进入 saturation
+    recent = hub.events.query_recent(limit=200)
+    got = [e.event_id for e in recent]
+    assert len(got) == 40, "C6 event 数量全部保留"
+    assert set(got) == set(ids), "C6 event_id 全部保留，anti-spam 不得吞 C6 truth"
+    assert eng.state.familiarity < 10, "C5 delta 确实进入 saturation（有界）"
+    hub.close()
+
+
+# ================================================================ canonical factors
+def test_d5_canonical_factors_0_1_after_burst():
+    """burst 后 canonical factors 全部在 0..1，且 engine.factors() 委托
+    relationship_factors（canonical 实现未被复制）。"""
+    from furina.relationship.engine import relationship_factors
+    re = RelationshipEngine()
+    for _ in range(100):
+        re.apply(EV_POSITIVE_TOUCH)
+    for _ in range(100):
+        re.apply(EV_REJECT)
+    f = re.factors()
+    for k, v in f.items():
+        assert 0.0 <= v <= 1.0, f"{k}={v} 超出 0..1"
+    assert f == relationship_factors(re.state), "engine.factors 必须委托 canonical 实现"
+    assert len(f) >= 9, "consumer factors 齐全"

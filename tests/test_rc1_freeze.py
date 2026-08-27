@@ -212,8 +212,9 @@ def test_relationship_event_applied_once():
     """一次用户正向事件 → 关系引擎恰好 apply 一次（无重复）。
 
     Phase 15 D5 anti-spam 后，同一窗口内第二次 apply 的边际确定性递减（×0.5），
-    因此两次增量不再相等；改为断言精确单次 delta（首次=完整、第二次=×0.5）——
-    若事件被重复路由，首次增量会是 2×，此断言比"相等"更严格地锁定恰好一次。
+    因此两次增量不再相等；改为断言精确单次 delta（首次=完整 4.2、第二次=×0.5 2.1）。
+    注意：这锁定的是 **engine 单次调用的数学契约**（确定性 delta），并非独立证明
+    生产 routing 恰好一次 —— routing exactly-once 由既有集成/freeze 断言覆盖。
     """
     store = MemoryStore(_tmp_db())
     me = MemoryEngine(EventBus(), store)

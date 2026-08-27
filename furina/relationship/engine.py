@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -38,28 +39,34 @@ EV_NEGATIVE_RESPONSE = "negative_response"
 
 # D5 — 事件族（anti-spam 饱和的单位；**不同族绝不共享饱和计数**）。
 # positive_touch（pet-like）独立成族：猛摸不会错误压制 successful_help / 社交正向。
-# help 族成功/失败共享饱和（同属"帮忙互动"）；负向事件统一为 negative 族。
+# successful_help / failed_help **相反语义，拆分独立族**：帮忙成功的饱和绝不允许
+# 压制一次真实失败的负向影响（反之亦然）。负向事件统一为 negative 族。
 EVENT_FAMILIES: Dict[str, str] = {
     EV_POSITIVE_RESPONSE: "positive_social",
     EV_USER_INITIATED: "positive_social",
     EV_ACCEPTED_INVITATION: "positive_social",
     EV_LONG_POSITIVE_SESSION: "positive_social",
     EV_POSITIVE_TOUCH: "positive_touch",
-    EV_SUCCESSFUL_HELP: "help",
-    EV_FAILED_HELP: "help",
+    EV_SUCCESSFUL_HELP: "help_success",
+    EV_FAILED_HELP: "help_failure",
     EV_REJECT: "negative",
     EV_IGNORE: "negative",
     EV_CANCEL: "negative",
     EV_NEGATIVE_RESPONSE: "negative",
 }
 
-# D5 参数：短窗口（秒）+ 窗口内每次同族事件的递减底数（均可注入；确定性）
+# D5 参数（均可注入；确定性）：
+# 短窗口（秒）+ 窗口内每次同族事件的递减底数 + 每族保留最近时间戳的硬容量。
+# 账本 = per-family deque(maxlen=max_hits_per_family)：窗口内事件数线性增长被硬容量
+# 截断 → 总 ledger 长度 ≤ distinct_families × max_hits_per_family，确定性有界。
 DEFAULT_ANTISPAM_WINDOW_SECONDS = 120.0
 DEFAULT_DIMINISH_BASE = 0.5
+DEFAULT_MAX_HITS_PER_FAMILY = 64
 
 
 def event_family(event: str) -> str:
-    """事件 → 饱和族。未知事件按自身 event 名成独立族（其 delta 为空 → 天然 no-op）。"""
+    """事件 → 饱和族。未知事件按自身 event 名成独立族（其 delta 为空 → 天然 no-op，
+    且永远不会创建 family 账本条目）。"""
     return EVENT_FAMILIES.get(event, event)
 
 # canonical raw 单位（C-R2 §3）。任何生产消费者（Dialogue/Embodiment/Motivation/Persona appraisal）
@@ -123,14 +130,18 @@ class RelationshipEngine:
     def __init__(self, state: Optional[RelationshipState] = None, *,
                  window_seconds: float = DEFAULT_ANTISPAM_WINDOW_SECONDS,
                  diminish_base: float = DEFAULT_DIMINISH_BASE,
+                 max_hits_per_family: int = DEFAULT_MAX_HITS_PER_FAMILY,
                  time_fn: Optional[Any] = None) -> None:
         self.state = state or RelationshipState()
         # D5 anti-spam（有界 operational 状态，纯内存；无 schema、无持久化）：
+        # per-family deque(maxlen) —— 每族只保留最近 max_hits_per_family 个时间戳，
+        # 持续 spam 也会持续更新（append 自动淘汰最旧），绝不因满容量停止记账。
         # window=0 → 关闭饱和（恢复旧线性行为，仅用于测试/诊断对照）。
         self._window = float(max(0.0, window_seconds))
         self._base = float(max(0.0, min(1.0, diminish_base)))
+        self._max_hits = int(max(1, max_hits_per_family))
         self._time_fn = time_fn or time.monotonic
-        self._family_hits: Dict[str, List[float]] = {}   # family → 窗口内事件时间戳
+        self._family_hits: Dict[str, deque] = {}   # family → 窗口内最近时间戳（有界）
 
     # -------------------------------------------------- 归一化 consumer 契约（C-R2 唯一实现）
     @property
@@ -182,23 +193,35 @@ class RelationshipEngine:
     def _family_multiplier(self, family: str) -> float:
         """窗口内同族已发生次数 k → 本次影响乘数 base**k（首次=1.0，完全不受削弱）。
 
-        rolling window：旧事件随时间逐出 → 窗口过去后该类事件**逐步**恢复正常影响。
-        每次调用都会把本次事件的时间戳记入该族窗口（记录发生在计算乘数之后）。
+        rolling window + 硬容量：时间戳按序入队，过期者从队首逐出；deque(maxlen)
+        保证每族至多保留最近 max_hits_per_family 个 → 持续 spam 时乘数被 0.5^容量
+        封底（≈0），总影响几何有界；窗口滚动逐出旧事件 → 影响**逐步**恢复。
+        记录发生在计算乘数之后（本次事件计入后续事件的 k）。
         """
         if self._window <= 0:
             return 1.0
         now = self._now()
-        hits = self._family_hits.setdefault(family, [])
-        hits[:] = [ts for ts in hits if now - ts < self._window]
+        hits = self._family_hits.setdefault(family, deque(maxlen=self._max_hits))
+        while hits and now - hits[0] >= self._window:
+            hits.popleft()                             # 逐出窗口外旧事件
         k = len(hits)
-        hits.append(now)
+        hits.append(now)                               # 满容量自动淘汰最旧（持续更新）
         return self._base ** k
 
+    def saturation_snapshot(self) -> Dict[str, List[float]]:
+        """诊断视图：各事件族当前保留的时间戳（OPERATIONAL / 非真值；用于测试与审计）。"""
+        return {f: list(ts) for f, ts in self._family_hits.items()}
+
     def apply(self, event: str, strength: float = 1.0, reason: str = "") -> Dict[str, float]:
-        """应用一个关系事件（渐进）。返回实际 delta（含 anti-spam 乘数；strength 参与实际落地）。"""
+        """应用一个关系事件（渐进）。
+
+        返回值 = 基础事件 delta × anti-spam 饱和乘数（round 3 位）；**不含** strength、
+        LONG_TERM/trust 乘数与 clamp —— 实际 state 落地是 v×strength×mult 经 _bump
+        按字段单位 clamp 后的结果，不可把返回值当作完整 state 差值。
+        """
         delta = self._event_delta(event)
         if not delta:
-            return {}                                   # 未知事件安全 no-op（不污染饱和账本）
+            return {}                                   # 未知事件安全 no-op（不创建/污染 family）
         # D5：短窗口内同族重复 → 本次影响确定性递减（首次=1.0；总影响有界 ≈ 1/(1-base) 倍单次）
         mult = self._family_multiplier(event_family(event))
         # 长期维度慢速：familiarity/comfort 可较快积累，trust 格外慢（不能一次刷满）
