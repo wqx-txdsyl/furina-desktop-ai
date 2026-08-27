@@ -2,10 +2,11 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED + Reviewer Patch 1/2 已落实（等待外部验收；不声明 16A_PASS）
+STATUS                         = EXECUTED + Reviewer Patch 1/2/3 已落实（等待外部验收；不声明 16A_PASS）
 BASE_SHA                       = b107edf33a459a5b7080f1b0b575dd8a93cac06c（初版）
                                  b23d8fee51956efccab358be8520a96c05ec10ec（Patch 1 起点）
                                  6902a805339bcd782d79028e45c36235c984399e（Patch 2 起点）
+                                 ab70ad7448bc330ff98cddf0928d05d8e146c90a（Patch 3 起点）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，沿用 Phase 15 惯例）
 BRANCH                         = feature/phase16-16a-work-contract
 LOCAL_REMOTE_MATCH             = push 后核验，结论记录于外部 handoff
@@ -26,6 +27,29 @@ NESTED_FROM_DICT_STRICT        = true（Patch 2 #1：全部嵌套 from_dict 无�
                                   numeric-string→float、number→str 一律拒绝；
                                   嵌套载荷缺键/形状损坏统一折为
                                   WorkContractValidationError，不泄漏 KeyError/TypeError）
+EXACT_SCHEMA_KEYS              = true（Patch 3：require_exact_mapping 统一 helper——所有 key
+                                  必须 str、缺失键拒绝、未知键拒绝、禁止 from_dict 自动补
+                                  canonical 序列化字段。精确键集已锁定并导出：
+                                  WorkContract=全部 dataclass fields+schema_marker
+                                  （含 created_at_epoch/content_hash 与全部默认值字段）；
+                                  CostBudget={amount,currency}；
+                                  WorkspaceScope={read_roots,write_roots}；
+                                  ExecutionBudget={max_duration_seconds,cost_limit,
+                                  max_attempts}；
+                                  ArtifactExpectation={artifact_id,artifact_type,
+                                  expected_path,required}；
+                                  VerificationCriterion={criterion_id,kind,params}；
+                                  VerificationStandard={criteria,verifier_refs}；
+                                  ApprovalPolicyRef={policy_id,policy_kind,scope_note,
+                                  grant_record_ref}。
+                                  criterion.params 强制 Mapping——list-of-pairs 在直接构造
+                                  与嵌套 from_dict 双路径均被拒绝，无 dict(...) 自动接受；
+                                  直接构造 content_hash：isinstance(str) 首检，
+                                  None/False/0/0.0/list/dict/tuple 全拒，"" 仅作新建哨兵，
+                                  非空串仍须 64 位小写 hex 且与实算一致；
+                                  from_transport_json 严格解析：object_pairs_hook 拒绝重复
+                                  键（含嵌套层级）、parse_constant 拒绝 NaN/Infinity/
+                                  -Infinity，随后仍过 exact-mapping 校验）
 VERSION_HASH_RULE              = contract_version 强制 semver 三段式并计入 hash 载荷；
                                   content_hash = SHA-256(canonical JSON)；canonical =
                                   json.dumps(sort_keys=True, separators=(",",":"),
@@ -66,25 +90,23 @@ PRODUCTION_FILES_CHANGED       = 仅新增 furina/agent/work_contract.py（独�
 TEST_FILES_CHANGED             = 仅新增 tests/agent/integration/test_phase16a_work_contract.py
 
 TARGETED_TESTS                 = tests/agent/integration/test_phase16a_work_contract.py：
-                                 94 passed。覆盖任务书 §6 十项 + Patch 1 全部 blocker
-                                 （B1–B8、B10：criteria 防御拷贝、required 严格 bool、
-                                 CostBudget/created_at 严格校验与 currency 规范化、
-                                 from_dict fail-closed 矩阵、严格 JSON 域、非 abs 根前置拒绝
-                                 +UNC+sibling 否证、transport 往返稳定、path 判据 scope 内）
-                                 + Patch 2 全部 blocker：
-                                 P2-1 嵌套 scalar 拒绝矩阵——max_attempts True/1.9/"3"、
-                                 duration "60.0"、cost amount "5.0"/True 与 currency 数值、
-                                 criterion_id/kind/policy_id/policy_kind/scope_note/
-                                 grant_record_ref 合法字符串改数值全部拒绝（原 payload 未触
-                                 碰时重算 hash 保持一致）；缺键/坏形载荷统一
-                                 WorkContractValidationError 无 KeyError/TypeError 泄漏；
-                                 直接构造显式 content_hash 格式前置校验；P2-2 C5 快照修复见
-                                 C1_C7_PROOF。
+                                 128 passed。覆盖任务书 §6 十项 + Patch 1（B1–B8、B10）
+                                 + Patch 2（P2-1 嵌套标量拒绝矩阵与无泄漏；P2-2 C5 真实
+                                 engine 快照）+ Patch 3 攻击测试：nested unknown
+                                 （unlimited/grant_permanent/backend_verified 及 cost/
+                                 workspace/artifact/standard 各自未知键）、top-level
+                                 unknown 与非 str 键、删除 created_at_epoch/
+                                 commitment_scope_excluded/artifact_expectations、每个
+                                 nested mapping ≥1 缺失键用例×8、params list-of-pairs
+                                 双路径、falsey 非字符串 content_hash（None/False/0/0.0/
+                                 []/{}/() 全拒且 "" 哨兵保留）、transport 重复键
+                                 （顶层+嵌套）与 NaN/Infinity/-Infinity、键集 vocabulary
+                                 导出断言。
 AGENT_COGNITION_REGRESSION     = pytest tests/agent tests/cognition tests/test_c2_contract.py
-                                 tests/test_agent_tools.py：485 passed（15 warnings 为既有
+                                 tests/test_agent_tools.py：519 passed（15 warnings 为既有
                                  线程 ResourceWarning 类告警，与本阶段无关）
 FULL_SUITE                     = .venv/Scripts/python.exe -m pytest tests -q（本轮仅一次）：
-                                 1457 passed, 0 failed（209.01s，exit 0）
+                                 1491 passed, 0 failed（222.10s，exit 0）
 SKIP_XFAIL_ADDED               = false
 
 C1_C7_PROOF                    = 重写后的

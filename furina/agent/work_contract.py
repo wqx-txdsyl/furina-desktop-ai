@@ -32,24 +32,32 @@ from typing import Any, Dict, Mapping, Tuple
 
 __all__ = [
     "APPROVAL_POLICY_KINDS",
+    "APPROVAL_POLICY_REF_KEYS",
+    "ARTIFACT_EXPECTATION_KEYS",
     "ArtifactExpectation",
     "ApprovalPolicyRef",
     "CONTRACT_SCHEMA_MARKER",
+    "COST_BUDGET_KEYS",
     "ContractIdConflictError",
     "CostBudget",
+    "EXECUTION_BUDGET_KEYS",
     "ExecutionBudget",
     "HASH_VERSION",
     "MAX_ATTEMPTS",
     "MAX_BUDGET_DURATION_SECONDS",
     "MAX_COST_AMOUNT",
+    "VERIFICATION_CRITERION_KEYS",
     "VERIFICATION_CRITERION_KINDS",
+    "VERIFICATION_STANDARD_KEYS",
     "VerificationCriterion",
     "VerificationStandard",
+    "WORKSPACE_SCOPE_KEYS",
     "WorkspaceScope",
     "WorkContract",
     "WorkContractValidationError",
     "compute_content_hash",
     "ensure_no_conflict",
+    "require_exact_mapping",
 ]
 
 # ---------------------------------------------------------------------------
@@ -135,6 +143,44 @@ def _nested_from_dict(cls_name: str, build):
         raise WorkContractValidationError(f"{cls_name}.from_dict 载荷损坏（缺键/形状错误）: {exc}") from exc
 
 
+# ---------------------------------------------------------------------------
+# canonical serialized 精确键集（Patch 3）：from_dict 一律 exact-mapping 校验
+# ---------------------------------------------------------------------------
+
+COST_BUDGET_KEYS = ("amount", "currency")
+WORKSPACE_SCOPE_KEYS = ("read_roots", "write_roots")
+EXECUTION_BUDGET_KEYS = ("max_duration_seconds", "cost_limit", "max_attempts")
+ARTIFACT_EXPECTATION_KEYS = ("artifact_id", "artifact_type", "expected_path", "required")
+VERIFICATION_CRITERION_KEYS = ("criterion_id", "kind", "params")
+VERIFICATION_STANDARD_KEYS = ("criteria", "verifier_refs")
+APPROVAL_POLICY_REF_KEYS = ("policy_id", "policy_kind", "scope_note", "grant_record_ref")
+
+
+def require_exact_mapping(cls_name: str, data: Any, required_keys: Tuple[str, ...]) -> Mapping[str, Any]:
+    """exact-mapping 校验（canonical schema closure）：
+
+    - data 必须是 Mapping；
+    - 所有 key 必须是 str；
+    - required_keys 之外的未知键拒绝；
+    - required_keys 内的缺失键拒绝——**不允许**由 from_dict 自动补
+      canonical 序列化字段（含默认值字段）。
+    """
+    if not isinstance(data, Mapping):
+        _fail(f"{cls_name}.from_dict 需要 Mapping 输入，得到 {type(data).__name__}")
+    non_str = sorted(k for k in data.keys() if not isinstance(k, str))
+    if non_str:
+        _fail(f"{cls_name}.from_dict 键必须全部是 str，非 str 键: {non_str}")
+    keys = set(data.keys())
+    need = set(required_keys)
+    missing = sorted(need - keys)
+    unknown = sorted(keys - need)
+    if unknown:
+        _fail(f"{cls_name}.from_dict 拒绝未知字段: {unknown}")
+    if missing:
+        _fail(f"{cls_name}.from_dict 缺失必需键: {missing}")
+    return data
+
+
 def compute_content_hash(payload: Mapping[str, Any]) -> str:
     """确定性内容摘要：SHA-256 over canonical JSON（sorted keys、紧凑分隔符、ASCII、严格域）。
 
@@ -188,11 +234,10 @@ class CostBudget:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "CostBudget":
-        if not isinstance(d, Mapping):
-            _fail("CostBudget.from_dict 需要 Mapping 输入")
+        exact = require_exact_mapping("CostBudget", d, COST_BUDGET_KEYS)
         return _nested_from_dict(
             "CostBudget",
-            lambda: cls(amount=d["amount"], currency=d.get("currency", "CNY")),
+            lambda: cls(amount=exact["amount"], currency=exact["currency"]),
         )
 
 
@@ -257,13 +302,12 @@ class WorkspaceScope:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "WorkspaceScope":
-        if not isinstance(d, Mapping):
-            _fail("WorkspaceScope.from_dict 需要 Mapping 输入")
+        exact = require_exact_mapping("WorkspaceScope", d, WORKSPACE_SCOPE_KEYS)
         return _nested_from_dict(
             "WorkspaceScope",
             lambda: cls(
-                read_roots=tuple(d.get("read_roots", ())),
-                write_roots=tuple(d.get("write_roots", ())),
+                read_roots=tuple(exact["read_roots"]),
+                write_roots=tuple(exact["write_roots"]),
             ),
         )
 
@@ -312,18 +356,17 @@ class ExecutionBudget:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "ExecutionBudget":
-        if not isinstance(d, Mapping):
-            _fail("ExecutionBudget.from_dict 需要 Mapping 输入")
+        exact = require_exact_mapping("ExecutionBudget", d, EXECUTION_BUDGET_KEYS)
 
         def _build():
-            raw_cost = d["cost_limit"]
+            raw_cost = exact["cost_limit"]
             cost = raw_cost if isinstance(raw_cost, CostBudget) else CostBudget.from_dict(raw_cost)
             # scalar 一律原值透传：bool/float/numeric-string 由 __post_init__ 严格拒绝，
             # 不做 float()/int() 有损转换
             return cls(
-                max_duration_seconds=d["max_duration_seconds"],
+                max_duration_seconds=exact["max_duration_seconds"],
                 cost_limit=cost,
-                max_attempts=d["max_attempts"],
+                max_attempts=exact["max_attempts"],
             )
 
         return _nested_from_dict("ExecutionBudget", _build)
@@ -367,15 +410,14 @@ class ArtifactExpectation:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "ArtifactExpectation":
-        if not isinstance(d, Mapping):
-            _fail("ArtifactExpectation.from_dict 需要 Mapping 输入")
+        exact = require_exact_mapping("ArtifactExpectation", d, ARTIFACT_EXPECTATION_KEYS)
         return _nested_from_dict(
             "ArtifactExpectation",
             lambda: cls(
-                artifact_id=d["artifact_id"],
-                artifact_type=d["artifact_type"],
-                expected_path=d["expected_path"],
-                required=d.get("required", True),  # 原值透传，由 __post_init__ 严格校验
+                artifact_id=exact["artifact_id"],
+                artifact_type=exact["artifact_type"],
+                expected_path=exact["expected_path"],
+                required=exact["required"],  # 原值透传，无默认补齐
             ),
         )
 
@@ -399,6 +441,9 @@ class VerificationCriterion:
                 f"criterion.kind '{self.kind}' 不在机器可查白名单 "
                 f"{sorted(VERIFICATION_CRITERION_KINDS)} 内——不可校验的成功标准被拒绝"
             )
+        if not isinstance(self.params, Mapping):
+            # list-of-pairs 等形状不得被 dict(...) 自动接受
+            _fail(f"criterion '{cid}' params 必须是 Mapping，得到 {type(self.params).__name__}")
         param_map = dict(self.params)
         if set(param_map) != set(VERIFICATION_CRITERION_KINDS[self.kind]):
             _fail(
@@ -423,14 +468,14 @@ class VerificationCriterion:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "VerificationCriterion":
-        if not isinstance(d, Mapping):
-            _fail("VerificationCriterion.from_dict 需要 Mapping 输入")
+        exact = require_exact_mapping("VerificationCriterion", d, VERIFICATION_CRITERION_KEYS)
         return _nested_from_dict(
             "VerificationCriterion",
             lambda: cls(
-                criterion_id=d["criterion_id"],  # 原值透传（禁止 str() 转换）
-                kind=d["kind"],
-                params=dict(d.get("params", {})),
+                criterion_id=exact["criterion_id"],  # 原值透传（禁止 str() 转换）
+                kind=exact["kind"],
+                # 原值透传：params 必须 Mapping，list-of-pairs 由 __post_init__ 拒绝
+                params=exact["params"],
             ),
         )
 
@@ -478,13 +523,12 @@ class VerificationStandard:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "VerificationStandard":
-        if not isinstance(d, Mapping):
-            _fail("VerificationStandard.from_dict 需要 Mapping 输入")
+        exact = require_exact_mapping("VerificationStandard", d, VERIFICATION_STANDARD_KEYS)
         return _nested_from_dict(
             "VerificationStandard",
             lambda: cls(
-                criteria=tuple(VerificationCriterion.from_dict(x) for x in d.get("criteria", ())),
-                verifier_refs=tuple(d.get("verifier_refs", ())),
+                criteria=tuple(VerificationCriterion.from_dict(x) for x in exact["criteria"]),
+                verifier_refs=tuple(exact["verifier_refs"]),
             ),
         )
 
@@ -525,15 +569,14 @@ class ApprovalPolicyRef:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "ApprovalPolicyRef":
-        if not isinstance(d, Mapping):
-            _fail("ApprovalPolicyRef.from_dict 需要 Mapping 输入")
+        exact = require_exact_mapping("ApprovalPolicyRef", d, APPROVAL_POLICY_REF_KEYS)
         return _nested_from_dict(
             "ApprovalPolicyRef",
             lambda: cls(
-                policy_id=d["policy_id"],  # 原值透传（禁止 str() 转换）
-                policy_kind=d["policy_kind"],
-                scope_note=d.get("scope_note", ""),
-                grant_record_ref=d.get("grant_record_ref", ""),
+                policy_id=exact["policy_id"],  # 原值透传（禁止 str() 转换）
+                policy_kind=exact["policy_kind"],
+                scope_note=exact["scope_note"],
+                grant_record_ref=exact["grant_record_ref"],
             ),
         )
 
@@ -665,14 +708,16 @@ class WorkContract:
             _fail("created_at_epoch 不允许 NaN/Inf")
         object.__setattr__(self, "created_at_epoch", ca_f)
 
-        if self.content_hash:
-            # 直接构造时显式提供的 content_hash 同样严格要求 64 位小写 hex
-            provided = self.content_hash
-            if not isinstance(provided, str) or not re.fullmatch(r"[0-9a-f]{64}", provided):
-                _fail(f"content_hash 必须是 64 位小写 hex（或留空由内部计算），得到 {provided!r}")
+        provided = self.content_hash
+        if not isinstance(provided, str):
+            # Patch 3：isinstance(str) 首检——None/False/0/0.0/list/dict 等一切非 str
+            # 全部拒绝；仅 "" 作为"新建时内部计算"哨兵放行。
+            _fail(f"content_hash 必须是 str（新建留空 ''），得到 {type(provided).__name__}")
+        if provided and not re.fullmatch(r"[0-9a-f]{64}", provided):
+            _fail(f"content_hash 必须是 64 位小写 hex（或留空由内部计算），得到 {provided!r}")
 
         computed = compute_content_hash(self._hash_payload())
-        if self.content_hash and self.content_hash != computed:
+        if provided and provided != computed:
             raise WorkContractValidationError(
                 f"content_hash 与内容不符（传入 {self.content_hash[:12]}…, 实算 {computed[:12]}…）："
                 "拒绝篡改载荷"
@@ -750,26 +795,21 @@ class WorkContract:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "WorkContract":
-        """Fail-closed 反序列化：marker 必须匹配、content_hash 必须存在且合法
-        （缺失/空一律拒绝，**从不重新签名**）、未知字段拒绝（不静默丢弃）、
-        摘要不符拒绝（载荷被篡改或跨版本）。"""
-        if not isinstance(d, Mapping):
-            raise WorkContractValidationError("from_dict 需要 Mapping 输入")
-        data = dict(d)
-        marker = data.get("schema_marker")
+        """Fail-closed 反序列化：exact-mapping（键全 str、无缺失、无未知、不自动补
+        canonical 字段）→ marker 必须匹配 → content_hash 必须存在且合法
+        （缺失/空一律拒绝，**从不重新签名**）→ 摘要不符拒绝。"""
+        known = set(cls.__dataclass_fields__) | {"schema_marker"}
+        data = dict(require_exact_mapping("WorkContract", d, tuple(sorted(known))))
+        marker = data["schema_marker"]
         if marker != CONTRACT_SCHEMA_MARKER:
             raise WorkContractValidationError(
-                f"from_dict 拒绝：schema_marker 缺失或不匹配，期望 {CONTRACT_SCHEMA_MARKER!r}，得到 {marker!r}"
+                f"from_dict 拒绝：schema_marker 不匹配，期望 {CONTRACT_SCHEMA_MARKER!r}，得到 {marker!r}"
             )
         provided_hash = data.get("content_hash")
         if not isinstance(provided_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", provided_hash):
             raise WorkContractValidationError(
                 "from_dict 拒绝：content_hash 缺失/空/非法——16A 从不重新签名"
             )
-        known = set(cls.__dataclass_fields__)
-        unknown = sorted(set(data) - known - {"schema_marker"})
-        if unknown:
-            raise WorkContractValidationError(f"from_dict 拒绝未知字段（不静默丢弃）: {unknown}")
         try:
             return cls(**{k: v for k, v in data.items() if k != "schema_marker"})
         except TypeError as exc:
@@ -791,12 +831,38 @@ class WorkContract:
 
     @classmethod
     def from_transport_json(cls, blob: str) -> "WorkContract":
+        """严格 JSON 解析（Patch 3）：
+
+        - object_pairs_hook 拒绝重复键（含嵌套层级的重复）；
+        - parse_constant 拒绝 NaN / Infinity / -Infinity 常量；
+        - 之后仍进入 exact-mapping 的 from_dict 校验。
+        """
         if not isinstance(blob, str):
             raise WorkContractValidationError("from_transport_json 需要 str 输入")
+
+        def _no_duplicate_keys(pairs):
+            seen: Dict[str, Any] = {}
+            for k, v in pairs:
+                if k in seen:
+                    raise WorkContractValidationError(f"transport JSON 含重复键: {k!r}")
+                seen[k] = v
+            return seen
+
+        def _reject_constant(token: str) -> Any:
+            raise WorkContractValidationError(f"transport JSON 拒绝非有限常量: {token}")
+
         try:
-            payload = json.loads(blob)
+            payload = json.loads(
+                blob,
+                object_pairs_hook=_no_duplicate_keys,
+                parse_constant=_reject_constant,
+            )
+        except WorkContractValidationError:
+            raise
         except json.JSONDecodeError as exc:
             raise WorkContractValidationError(f"transport JSON 解析失败: {exc}") from exc
+        except ValueError as exc:  # pragma: no cover - 标准库极少在 hook 外抛 ValueError
+            raise WorkContractValidationError(f"transport JSON 非法值: {exc}") from exc
         return cls.from_dict(payload)
 
     # -- backend 只读 projection ----------------------------------------------

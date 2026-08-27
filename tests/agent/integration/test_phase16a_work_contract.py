@@ -181,11 +181,11 @@ def test_from_dict_fail_closed_matrix():
         with pytest.raises(WorkContractValidationError, match="重新签名|content_hash"):
             WorkContract.from_dict(bad)
 
-    # 篡改后再删 hash —— 同样拒绝
+    # 篡改后再删 hash —— 同样拒绝（exact-mapping 或 hash 层先行均视为 fail-closed）
     bad = dict(good)
     bad["objective"] = bad["objective"] + " 篡改"
     bad.pop("content_hash")
-    with pytest.raises(WorkContractValidationError, match="重新签名"):
+    with pytest.raises(WorkContractValidationError, match="重新签名|content_hash"):
         WorkContract.from_dict(bad)
 
     # 未知字段不静默丢弃
@@ -329,6 +329,183 @@ def test_direct_constructor_content_hash_format_strict():
     # 格式合法但值不符 → 篡改拒绝（既有路径）
     with pytest.raises(WorkContractValidationError, match="篡改"):
         WorkContract(**_minimal_kwargs(content_hash="b" * 64))
+
+
+# ================================================================
+# Patch 3 — canonical schema closure：exact-mapping 键集锁定
+# ================================================================
+
+_NESTED_BUILDERS = {
+    "cost": lambda frag: CostBudget.from_dict(frag),
+    "workspace": lambda frag: WorkspaceScope.from_dict(frag),
+    "budget": lambda frag: ExecutionBudget.from_dict(frag),
+    "artifact": lambda frag: ArtifactExpectation.from_dict(frag),
+    "criterion": lambda frag: VerificationCriterion.from_dict(frag),
+    "standard": lambda frag: VerificationStandard.from_dict(frag),
+    "policy": lambda frag: ApprovalPolicyRef.from_dict(frag),
+}
+
+
+def _nested_payload(kind):
+    p = WorkContract(**_minimal_kwargs()).to_dict()
+    full = _full_contract().to_dict()
+    source = {
+        "cost": p["budget"]["cost_limit"],
+        "workspace": p["workspace_scope"],
+        "budget": p["budget"],
+        "artifact": full["artifact_expectations"][0],
+        "criterion": p["verification_standard"]["criteria"][0],
+        "standard": p["verification_standard"],
+        "policy": p["approval_policy"],
+    }
+    return json.loads(json.dumps(source[kind]))
+
+
+@pytest.mark.parametrize(
+    "kind,bad_key",
+    [
+        ("budget", "unlimited"),
+        ("policy", "grant_permanent"),
+        ("criterion", "backend_verified"),
+        ("cost", "forever_free"),
+        ("workspace", "root_all"),
+        ("artifact", "auto_blessed"),
+        ("standard", "trust_me"),
+    ],
+)
+def test_nested_unknown_keys_rejected_exactly(kind, bad_key):
+    frag = _nested_payload(kind)
+    frag[bad_key] = True
+    build = _NESTED_BUILDERS[kind]
+    try:
+        build(frag)
+    except WorkContractValidationError as exc:
+        assert "未知字段" in str(exc) and bad_key in str(exc)
+    except (KeyError, TypeError) as exc:
+        pytest.fail(f"{kind}.from_dict 泄漏 {type(exc).__name__}: {exc}")
+    else:
+        pytest.fail(f"{kind}.from_dict 未拒绝未知键 {bad_key}")
+
+
+@pytest.mark.parametrize(
+    "kind,missing_key",
+    [
+        ("cost", "currency"),
+        ("workspace", "read_roots"),
+        ("budget", "max_attempts"),
+        ("artifact", "required"),
+        ("criterion", "kind"),
+        ("standard", "verifier_refs"),
+        ("policy", "scope_note"),
+        ("policy", "grant_record_ref"),
+    ],
+)
+def test_every_nested_mapping_missing_required_key_rejected(kind, missing_key):
+    frag = _nested_payload(kind)
+    del frag[missing_key]
+    build = _NESTED_BUILDERS[kind]
+    try:
+        build(frag)
+    except WorkContractValidationError as exc:
+        assert "缺失必需键" in str(exc) and missing_key in str(exc)
+    else:
+        pytest.fail(f"{kind}.from_dict 自动补齐了 canonical 字段 {missing_key}")
+
+
+@pytest.mark.parametrize(
+    "dropped_field",
+    ["created_at_epoch", "commitment_scope_excluded", "artifact_expectations"],
+)
+def test_top_level_canonical_fields_may_not_be_dropped(dropped_field):
+    base = WorkContract(**_minimal_kwargs())
+    d = base.to_dict()
+    del d[dropped_field]
+    with pytest.raises(WorkContractValidationError, match="缺失必需键"):
+        WorkContract.from_dict(d)
+
+
+def test_top_level_non_str_keys_rejected():
+    base = WorkContract(**_minimal_kwargs())
+    d = base.to_dict()
+    d[7] = "int-key"
+    with pytest.raises(WorkContractValidationError, match="str"):
+        WorkContract.from_dict(d)
+
+
+def test_params_list_of_pairs_rejected_on_both_paths():
+    # 直接构造路径
+    with pytest.raises(WorkContractValidationError, match="Mapping"):
+        VerificationCriterion(
+            criterion_id="pair_style_crit",
+            kind="text_contains",
+            params=[("path", "x.md"), ("needle", "y")],
+        )
+    # 嵌套 from_dict 路径
+    frag = _nested_payload("criterion")
+    frag["params"] = [["path", "x.md"], ["needle", "y"]]
+    with pytest.raises(WorkContractValidationError, match="Mapping"):
+        VerificationCriterion.from_dict(frag)
+
+
+@pytest.mark.parametrize(
+    "falsey",
+    [None, False, 0, 0.0, [], {}, ()],
+)
+def test_falsey_non_string_content_hash_rejected_directly(falsey):
+    with pytest.raises(WorkContractValidationError, match="必须是 str"):
+        WorkContract(**_minimal_kwargs(content_hash=falsey))
+
+
+def test_empty_string_content_hash_remains_new_creation_sentinel():
+    c = WorkContract(**_minimal_kwargs(content_hash=""))
+    freshly_computed = WorkContract(**_minimal_kwargs()).content_hash
+    assert c.content_hash == freshly_computed
+
+
+STRICT_MARKER = wc_mod.CONTRACT_SCHEMA_MARKER
+
+
+def test_transport_json_duplicate_keys_rejected_including_nested():
+    top_dup = '{"schema_marker":"' + STRICT_MARKER + '","schema_marker":"' + STRICT_MARKER + '"}'
+    with pytest.raises(WorkContractValidationError, match="重复键"):
+        WorkContract.from_transport_json(top_dup)
+
+    nested_dup = '{"top":{"inner":1,"inner":2}}'
+    with pytest.raises(WorkContractValidationError, match="重复键"):
+        WorkContract.from_transport_json(nested_dup)
+
+
+@pytest.mark.parametrize(
+    "nonfinite",
+    [
+        '{"budget":{"max_duration_seconds":NaN}}',
+        '{"budget":{"max_duration_seconds":Infinity}}',
+        '{"budget":{"max_duration_seconds":-Infinity}}',
+        '{"created_at_epoch":NaN}',
+    ],
+)
+def test_transport_json_nan_infinity_constants_rejected(nonfinite):
+    with pytest.raises(WorkContractValidationError, match="非有限常量"):
+        WorkContract.from_transport_json(nonfinite)
+
+
+def test_exact_schema_keys_vocabulary_exports():
+    assert set(wc_mod.COST_BUDGET_KEYS) == {"amount", "currency"}
+    assert set(wc_mod.WORKSPACE_SCOPE_KEYS) == {"read_roots", "write_roots"}
+    assert set(wc_mod.EXECUTION_BUDGET_KEYS) == {
+        "max_duration_seconds", "cost_limit", "max_attempts",
+    }
+    assert set(wc_mod.ARTIFACT_EXPECTATION_KEYS) == {
+        "artifact_id", "artifact_type", "expected_path", "required",
+    }
+    assert set(wc_mod.VERIFICATION_CRITERION_KEYS) == {"criterion_id", "kind", "params"}
+    assert set(wc_mod.VERIFICATION_STANDARD_KEYS) == {"criteria", "verifier_refs"}
+    assert set(wc_mod.APPROVAL_POLICY_REF_KEYS) == {
+        "policy_id", "policy_kind", "scope_note", "grant_record_ref",
+    }
+    fields = {f.name for f in dataclasses.fields(WorkContract)}
+    serialized_top = set(json.loads(_full_contract().to_transport_json()).keys())
+    assert serialized_top == fields | {"schema_marker"}
 
 
 # ================================================================
