@@ -46,9 +46,11 @@ k = 最近 WINDOW 秒内该族已发生的事件数（队首过期逐出；deque
 ```
 
 选择理由：最小、可解释（"短窗口内同族每多一次，影响 ×0.5"）、可测试（纯函数 +
-可注入时钟）、满足全部约束——总影响有界（几何级数 ≤ 1/(1-0.5) = 2× 单次，硬容量
-进一步给出封闭形式上界 `single×(2 + N×0.5^cap)`）、时间感知（事件随窗口滚动逐出 →
-逐步恢复正常影响）、族隔离（每族独立账本）、存储有界（deque maxlen）。
+可注入时钟）、满足全部约束——**有限 N 次攻击**总影响有界：同一窗口内瞬时爆发几何
+级数 ≤ 1/(1-0.5) = 2× 单次；对任意有限 N 次（含跨窗口）攻击，封闭形式上界 =
+`single×(2 + N×0.5^cap)`（事件在窗口内连续到达时）。**不做**无限时域总影响 ≤2×single
+的声明——窗口滚动逐出后同类事件恢复全额，长时间跨度下关系本应继续积累
+（long-term building），这是有意的语义而非漏洞。
 
 **Event-family 定义**（`EVENT_FAMILIES`）：
 
@@ -69,9 +71,9 @@ negative        : reject / ignore / cancel / negative_response
 ## 4. Before / After Behavior（确定性 traces）
 
 ```text
-① positive burst：100 × positive_response
+① positive burst（100 次同一窗口内瞬时爆发）：100 × positive_response
    linear: familiarity → 3.5×0.7×100 = 245（clamp 100）   familiarity=100
-   D5    : familiarity → 3.5×0.7×2 ≈ 4.9                  （2× 单次，几何有界）
+   D5    : familiarity → ≈ 4.9（同窗口几何有界 ≤ 2× 单次；有限 N 封闭上界见 §3）
 
 ② spaced positive events（窗口过后恢复）
    t=1000 touch → mult 1.0（+1.75 familiarity）
@@ -121,11 +123,17 @@ Phase 17 Character Agency 未引入               ✓
 milestone provenance 未删除/伪造               ✓
 ```
 
+```text
+PRODUCTION_BEHAVIOR_POLICY_CHANGED = true     （anti-spam 本身即生产行为策略变更）
+POLICY_CHANGE_AUTHORIZED_BY_D5       = true     （由 D5 任务书显式授权）
+DATABASE_SCHEMA_CHANGED             = false    （无 schema / migration / DB 修改）
+```
+
 ## 7. Tests
 
 | Gate | Scope | Result |
 |---|---|---|
-| A（new D5 tests） | tests/test_phase15_d5_relationship_antispam.py | **18 passed** |
+| A（new D5 tests） | tests/test_phase15_d5_relationship_antispam.py | **19 passed** |
 | B（既有 relationship） | tests/test_relationship.py | **8 passed** |
 | B2（rc1_freeze 回归） | tests/test_rc1_freeze.py | **8 passed** |
 | C（C5 store / milestone / C6 provenance） | test_cognitive_stores.py + test_phase151_truth_closure.py | **38 passed** |
@@ -140,8 +148,8 @@ result。`tests/test_rc1_freeze.py::test_relationship_event_applied_once` 数值
 （确定性 delta），不声称独立证明生产 routing exactly-once（routing 由既有集成/freeze
 断言覆盖）。`tests/test_relationship.py` 全数通过且断言未弱化（Gate B）。
 注：Gate G 首轮全量有 1 例 `test_gui_integration.py::test_gui_timer_advances_runtime`
-时序 flake（全量负载下偶发；隔离重跑通过，且本轮改动零 GUI/timer 文件）；重跑全量
-确认 1362 passed / 0 failed。
+失败，**未稳定复现**（隔离重跑通过、第二轮全量 1362 passed / 0 failed；本轮改动
+零 GUI/timer 文件）。
 
 ## 8. Static Audit
 

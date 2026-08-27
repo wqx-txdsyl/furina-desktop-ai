@@ -264,6 +264,22 @@ def test_d5_unknown_event_safe_noop_no_ledger_pollution():
     assert re.state.familiarity == approx(2.5 * 0.7)
 
 
+def test_d5_unknown_events_never_allocate_ledger_families():
+    """大量不同未知 event_type 必须全部 no-op，不得创建 ledger family：
+    saturation_snapshot() family 数量不增长（攻击面：未知事件被当作新族记账）。"""
+    re = RelationshipEngine(time_fn=_FakeClock())
+    for i in range(300):
+        assert re.apply(f"unknown_event_{i}") == {}, f"未知事件 {i} 必须 no-op"
+        assert re.state.familiarity == 0.0 and re.state.trust == 0.0
+    assert re.saturation_snapshot() == {}, (
+        "300 个不同未知事件不得创建任何 ledger family")
+    # 已知事件仍正常：账本未被未知事件污染，且只创建其自身族
+    re.apply(EV_POSITIVE_TOUCH)
+    assert re.state.familiarity == approx(2.5 * 0.7)
+    assert list(re.saturation_snapshot().keys()) == ["positive_touch"], (
+        "仅已知事件族被创建，family 数量不增长")
+
+
 # ================================================================ Blocker 1：账本硬容量
 def test_d5_ledger_hard_capacity_bounded():
     """高频调用远超 capacity：每族 ledger 长度 ≤ capacity；总 ledger 有固定上界；
