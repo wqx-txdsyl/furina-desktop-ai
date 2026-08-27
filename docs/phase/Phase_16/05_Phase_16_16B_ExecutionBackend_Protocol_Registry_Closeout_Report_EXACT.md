@@ -53,8 +53,10 @@ NO_SILENT_FALLBACK             = true（dispatch 先 route：拒绝 → 类型�
                                  （failure_code=submit_error），绝不静默换到另一个
                                  backend，测试锁定被跳过 backend submit_calls==0）
 NATIVE_SEMANTICS_PRESERVED     = true（任务记录 task_record、ToolResult 验证
-                                 （ok ∧ verified）、权限行为全部原样透传；task_auth=None
-                                 → AgentRuntime 默认 L0/L1 任务上下文，不伪造 16D 授权；
+                                 （ok ∧ verified）、权限行为全部原样透传；Patch 2 起
+                                 Native 每次 submit 构造 task-scoped AuthorizationContext
+                                 （allowed_tools=冻结快照∩契约能力，max_permission=L1，
+                                 is_default=False），不伪造 16D 授权；
                                  L2（fs.organize）在默认上下文下如实 permission_denied；
                                  native “completed” 结果在 Phase 16 backend 边界仍属
                                  unverified（16F 拥有 verifier），adapter 不做二次验证
@@ -140,10 +142,11 @@ REVIEWER_PATCH_2                = 三项 blocker 修复：
 
 C1_C7_SCHEMA_CHANGED           = false
 DATABASE_MIGRATION_ADDED       = false
-PRODUCTION_FILES_CHANGED       = 仅新增 furina/agent/backend/ 包（models.py/protocol.py/
-                                 registry.py/router.py/native.py/__init__.py）；
-                                 未修改任何既有生产文件（app.py/agent_runtime.py/
-                                 work_contract.py 等零改动）
+PRODUCTION_FILES_CHANGED       = 新增 furina/agent/backend/ 包（models.py/protocol.py/
+                                 registry.py/router.py/native.py/__init__.py）+ 既有
+                                 furina/agent/agent_runtime.py 增加默认关闭的窄
+                                 execution_guard（None 时行为零变化）；其余生产文件
+                                 （app.py/work_contract.py 等）零改动
 TEST_FILES_CHANGED             = 仅新增 tests/agent/integration/test_phase16b_execution_backend.py
 TARGETED_TESTS                 = tests/agent/integration/test_phase16b_execution_backend.py：
                                  33 passed。任务书 §7 全部 12 项 + Patch 1 否证 11 项 +
