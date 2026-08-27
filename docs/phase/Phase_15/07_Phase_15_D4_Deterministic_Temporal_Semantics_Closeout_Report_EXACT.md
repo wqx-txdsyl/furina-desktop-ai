@@ -153,6 +153,29 @@ Gate E  FULL SUITE ×2                                1278 passed / 0 failed（1
 ```
 （1273 = 前值 + 本补丁新增 5 个测试。）
 
+## 13. External Reviewer Residual Closure II（Review_2 = NEEDS_NARROW_PATCH → 已闭合）
+
+针对 e90d129 的三项残余闭合（同分支追加 commit；测试 +7）：
+
+| ID | 内容 | 实现 / 证据 |
+|---|---|---|
+| R1 | 真实生产配置接线 | `load_config()` 新增 `timezone=os.environ.get("FURINA_TIMEZONE","")` 装载（最小显式契约 `FURINA_TIMEZONE=<IANA>`；空=未配置→时间语义 fail-closed，绝不猜测/固定偏移）。F1：env 注入 America/New_York → 真 load_config → Furina(cfg)（dispatcher 绑定 harness）→ submit → 行 tz==配置值、午夜场景 start==NY 本地“明天”08-28（≠Asia/Shanghai 视角）；F2：空 env → 行存在但零日期零标记。共用 `_real_furina` 增加加性 `timezone=/cfg=` 参数（旧调用零变化） |
+| R2 | 无年 Feb29 最近将来策略 | 缺年分支重写为沿 Gregorian 周期向后搜索有效候选年（≤8 年窗口必含闰周）：2026 basis “2月29日提交材料”→**2028-02-29**；闰年 basis 在 2月29日前→同年 02-29；“2月30日”多年无解→uncertain。年度生日 ANNUAL 行为不受影响 |
+| R3 | 显式 年-月 | 新增 `YYYY年M月` 窄语法（负向 lookahead 防误吃全日期）：`2026年9月我要搬家`→RANGE 2026-09-01..09-30 precision=month；`2028年2月`→…02-29（闰）；`2026年13月`→uncertain 永不 clamp。裸 `9月`/`九月` **显式 DEFERRED**：缺年词法在冻结策略里仅对“日级表达式”定义了最近将来规则，月份裸形式语义未冻结——留待后续任务再定 |
+
+静态复审更新：`DEFAULT_USER_TZ` 引用面仍仅限 temporal.py 内部（签名默认值/_zone 兜底）；
+生产路径（App→hub→interpreter）完全由配置驱动；无 read-time 重解释、无 auto-complete、
+无新 C4 writer。
+
+**Gates**：
+```text
+Gate A  tests/cognition/test_phase15_d4_temporal.py   29 passed（17+5+7）
+Gate C  Phase14 R10/R10-FC                             20 passed
+Gate D  tests/cognition 全目录                         220 passed
+Gate E  FULL SUITE ×2                                1285 passed / 0 failed（172s, 182s）
+```
+（1278 = 前值 + 本补丁新增 7 个测试。）
+
 ## 11. Final Line
 
 ```text

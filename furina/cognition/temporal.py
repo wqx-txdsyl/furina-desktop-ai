@@ -194,23 +194,39 @@ def resolve_temporal(text: str, *, basis_epoch: float,
         return out(_payload("POINT", start=iso, matched=m.group(0),
                             basis_epoch=basis_epoch, tz_name=tz_name))
 
-    # 3) no-year date（M月D日[/号]）：取 basis 起最近将来的该日期（规则显式）
+    # 2b) explicit year-month（R3：YYYY年M月 → 当月日历 RANGE；月份非法不 clamp）
+    m_ym = re.search(r"(\d{4})年(\d{1,2})月(?!\d)", t)
+    if m_ym and "日" not in m_ym.group(0):
+        y, mo = int(m_ym.group(1)), int(m_ym.group(2))
+        if not 1 <= mo <= 12:
+            return out(None, unc=True, matched=m_ym.group(0),
+                       notes=("invalid_month",))
+        try:
+            first = local.replace(year=y, month=mo, day=1).date()
+        except ValueError:
+            return out(None, unc=True, matched=m_ym.group(0),
+                       notes=("invalid_date",))
+        last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        return out(_payload("RANGE", start=_iso(first), end=_iso(last),
+                            matched=m_ym.group(0), basis_epoch=basis_epoch,
+                            tz_name=tz_name, precision="month"))
+
+    # 3) no-year date（M月D日[/号]）：取 basis 起最近将来的**有效**该日期
+    #    （R2：2月29日等在缺年场景沿 Gregorian 闰周期向后搜索，永不视为非法；
+    #     连续多年都不存在（如 2月30日）→ uncertain。）
     m = _ABS_NOYEAR_RE.search(t)
     if m:
         mo, d = int(m.group(1)), int(m.group(2))
-        try:
-            cand = local.replace(year=local.year, month=mo, day=d)
-        except ValueError:
-            return out(None, unc=True, matched=m.group(0),
-                       notes=("invalid_date",))
-        if cand < local:
+        for yy in range(local.year, local.year + 8):        # ≤8 年窗口必含闰周
             try:
-                cand = cand.replace(year=local.year + 1)
-            except ValueError:                     # 2/29 edge
-                return out(None, unc=True, matched=m.group(0),
-                           notes=("invalid_leap",))
-        return out(_payload("POINT", start=_iso(cand), matched=m.group(0),
-                            basis_epoch=basis_epoch, tz_name=tz_name))
+                cand = local.replace(year=yy, month=mo, day=d).date()
+            except ValueError:
+                continue                                    # 该年无此日期
+            if cand >= local.date():
+                return out(_payload("POINT", start=_iso(cand), matched=m.group(0),
+                                    basis_epoch=basis_epoch, tz_name=tz_name))
+        return out(None, unc=True, matched=m.group(0),
+                   notes=("invalid_date",))
 
     # 4) relative days（大后天>后天>明天>今天；最长优先避免"后天"吃掉"大后天"）
     for word, offset in _RELATIVE_DAYS:

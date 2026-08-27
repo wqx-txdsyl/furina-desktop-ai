@@ -481,3 +481,129 @@ def test_d4_r3b_invalid_calendar_inputs_fail_closed(tmp_path):
     ann = [x for x in leap if x.temporal_payload.get("md") == "02-29"]
     assert ann and ann[0].temporal_payload["kind"] == "ANNUAL"
     hub.close()
+
+
+# ================================================================
+# External Reviewer Residual Closure II（Review_2 = NEEDS_NARROW_PATCH）
+# ================================================================
+
+def test_d4_f1_env_timezone_flows_through_real_load_config(tmp_path, monkeypatch):
+    """F1：FURINA_TIMEZONE 环境变量 → 真 load_config() → Furina → submit
+    → 行内 tz/env 配置一致、午夜场景日期正确（非 Asia/Shanghai）。"""
+    import furina.app as app_mod
+    from furina.config import load_config
+    import types as _types
+
+    tmp = Path(tmp_path)
+    monkeypatch.setenv("FURINA_TIMEZONE", "America/New_York")
+    monkeypatch.setenv("FURINA_ROOT", str(tmp))
+    from tests.cognition.test_phase14_final_reviewer_r6_r12 import _real_furina
+    cfg = load_config()                                # 真实配置装载路径
+    assert cfg.timezone == "America/New_York"
+    f, _sched = _real_furina(tmp, cfg=cfg)
+    fixed = _basis(2026, 8, 27, 20, 30, tz="UTC")      # NY=08-27 / SH=08-28
+    real_time = app_mod.time
+    app_mod.time = _types.SimpleNamespace(time=lambda: fixed,
+                                          sleep=lambda *_: None,
+                                          localtime=_time.localtime,
+                                          monotonic=_time.monotonic)
+    try:
+        assert f._user_tz == "America/New_York"
+        f.submit_user_message("我明天要写报告")
+        q = f._direct_dialogue_queue()
+        assert q.wait_idle(timeout=15.0)
+        rows = f.cognition._db.query_all(
+            "SELECT * FROM user_model_items WHERE category='PLAN' AND status='active'")
+        assert rows and rows[0]["temporal_json"]
+        p = json.loads(rows[0]["temporal_json"])
+        assert p["tz"] == "America/New_York"
+        assert p["start"] == "2026-08-28"              # NY 本地“明天”
+    finally:
+        app_mod.time = real_time
+        try:
+            f.cognition.close()
+        except Exception:
+            pass
+
+
+def test_d4_f2_empty_env_timezone_no_guessed_date(tmp_path, monkeypatch):
+    """F2：FURINA_TIMEZONE="" → 计划文本仍落库，但零时间载荷（fail-closed）。"""
+    import furina.app as app_mod
+    from furina.config import load_config
+    import types as _types
+
+    tmp = Path(tmp_path)
+    monkeypatch.setenv("FURINA_TIMEZONE", "")
+    monkeypatch.setenv("FURINA_ROOT", str(tmp))
+    cfg = load_config()
+    assert cfg.timezone == ""
+    from tests.cognition.test_phase14_final_reviewer_r6_r12 import _real_furina as _rf
+    f, _sched = _rf(tmp, cfg=cfg)
+    fixed = _basis(2026, 8, 27, 20, 30, tz="UTC")
+    real_time = app_mod.time
+    app_mod.time = _types.SimpleNamespace(time=lambda: fixed,
+                                          sleep=lambda *_: None,
+                                          localtime=_time.localtime,
+                                          monotonic=_time.monotonic)
+    try:
+        assert f._user_tz is None
+        f.submit_user_message("我明天要写报告")
+        q = f._direct_dialogue_queue()
+        assert q.wait_idle(timeout=15.0)
+        rows = f.cognition._db.query_all(
+            "SELECT * FROM user_model_items WHERE category='PLAN' AND status='active'")
+        assert rows, rows
+        for r in rows:
+            assert (r["temporal_json"] or "") == ""     # 不猜任何日历
+    finally:
+        app_mod.time = real_time
+        try:
+            f.cognition.close()
+        except Exception:
+            pass
+
+
+def test_d4_f3_non_leap_basis_feb29_nexts_to_leap_year():
+    """F3：2026 非闰年 basis 的“2月29日”→ 最近将来有效日期 2028-02-29。"""
+    from furina.cognition.temporal import resolve_temporal
+    r = resolve_temporal("2月29日提交材料", basis_epoch=_basis(2026, 8, 27),
+                         tz_name=SH)
+    assert r.payload and r.payload["kind"] == "POINT"
+    assert r.payload["start"] == "2028-02-29", r.payload
+
+
+def test_d4_f4_leap_basis_before_feb29_same_year():
+    """F4：闰年 basis 在 2月29日前 → 同年 02-29。"""
+    from furina.cognition.temporal import resolve_temporal
+    r = resolve_temporal("2月29日提交材料", basis_epoch=_basis(2024, 1, 10),
+                         tz_name=SH)
+    assert r.payload and r.payload["start"] == "2024-02-29"
+
+
+def test_d4_f5_explicit_year_month_range(tmp_path):
+    """F5：『2026年9月我要搬家』→ RANGE 2026-09-01..2026-09-30 precision=month。"""
+    hub = _hub(tmp_path)
+    _apply(hub, "2026年9月我要搬家", 1, _basis(2026, 8, 27))
+    it = [x for x in hub.user_model.query_active(category="PLAN")
+          if x.key == "plan:搬家"][0]
+    p = it.temporal_payload
+    assert p["kind"] == "RANGE" and p["precision"] == "month"
+    assert (p["start"], p["end"]) == ("2026-09-01", "2026-09-30")
+    hub.close()
+
+
+def test_d4_f6_leap_month_range(tmp_path):
+    """F6：2028年2月 → RANGE 含 02-29。"""
+    from furina.cognition.temporal import resolve_temporal
+    r = resolve_temporal("2028年2月完成专项审计", basis_epoch=_basis(2026, 8, 27),
+                         tz_name=SH)
+    assert r.payload["kind"] == "RANGE" and r.payload["precision"] == "month"
+    assert (r.payload["start"], r.payload["end"]) == ("2028-02-01", "2028-02-29")
+
+
+def test_d4_f7_invalid_month_never_clamped():
+    """F7：2026年13月 → uncertain，绝不允许 clamp 到 12 月。"""
+    from furina.cognition.temporal import resolve_temporal
+    r = resolve_temporal("2026年13月我要搬家", basis_epoch=_basis(2026, 8, 27),
+                         tz_name=SH)
+    assert r.payload is None and r.uncertain is True

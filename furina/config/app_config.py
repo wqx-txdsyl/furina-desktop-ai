@@ -111,6 +111,9 @@ def load_config(env_path: Optional[Path] = None) -> AppConfig:
         zhipu_api_key=os.environ.get("ZHIPU_API_KEY", ""),
         agnes_api_key=os.environ.get("AGNES_API_KEY", ""),
         debug=os.environ.get("FURINA_DEBUG", "").lower() in {"1", "true", "yes"},
+        # Phase 15 D4/R1：显式用户时区（IANA 名，如 FURINA_TIMEZONE=Asia/Shanghai）。
+        # 空 = 未配置 → 时间语义 fail-closed；不猜测、不做固定偏移兜底。
+        timezone=os.environ.get("FURINA_TIMEZONE", ""),
         assets_dir=root / "data" / "assets",
         data_dir=root / "data",
     )
