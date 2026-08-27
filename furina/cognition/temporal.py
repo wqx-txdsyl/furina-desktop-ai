@@ -34,8 +34,15 @@ _WEEKDAY_CN = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
                "日": 0, "天": 0}
 
 _RELATIVE_DAYS = (("大后天", 3), ("后天", 2), ("明天", 1), ("今天", 0))
+_RELATIVE_DAYS_NAMES = tuple(w for w, _o in _RELATIVE_DAYS)
 _VAGUE_TOKENS = ("过几天", "有空的时候", "有空", "晚点", "以后", "月底前后",
                  "这阵子", "改天", "最近")
+# R3：近似量词（出现在含时间锚的语句中 → 拒绝精确化，uncertain）
+_APPROX_TOKENS = ("左右", "大概", "可能", "也许", "差不多", "前后")
+_ALT_RE = re.compile(r"或者|或是|还是")
+# R2：周末别名（优先于整周判定；逐一锁定四个别名）
+_WEEKEND_ALIASES = (("下个周末", True), ("下周末", True),
+                    ("这个周末", False), ("本周末", False))
 _RECUR_RE = re.compile(r"每(?:个)?(?:周|星期|礼拜)([一二三四五六日天])")
 _ABS_FULL_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 _ABS_NOYEAR_RE = re.compile(r"(?<!\d)(\d{1,2})月(\d{1,2})[日号](?!\d)")
@@ -117,17 +124,50 @@ def resolve_temporal(text: str, *, basis_epoch: float,
         # 时区不可用 → fail-closed：宁可不确定也不落错误日期（brief §9）
         return TemporalOutcome(uncertain=True, notes=("tz_unavailable",))
 
-    vague = detect_vague(t)
-
     def out(payload: Optional[Dict[str, Any]], *, unc: bool = False,
             matched: str = "", notes: Tuple[str, ...] = ()) -> TemporalOutcome:
         return TemporalOutcome(payload=payload, uncertain=unc, matched=matched,
                                notes=notes)
 
+    # ---- R3 守卫：近似量词 / 或者-连接 / 多个相对日并存 —— 一律拒绝精确化 ----
+    approx_hit = next((a for a in _APPROX_TOKENS if a in t), "")
+    alt_conn = bool(_ALT_RE.search(t))
+    has_anchor = (
+        any(w in t for w in _RELATIVE_DAYS_NAMES)
+        or "周末" in t or "本周" in t or "这周" in t or "下周" in t
+        or "本月" in t or "下个月" in t or "下月" in t
+        or bool(_ABS_FULL_RE.search(t)) or bool(_ABS_NOYEAR_RE.search(t))
+        or bool(re.search(r"(?:\d{1,2}|[一二三四五六七八九十]{1,3})月", t))
+    )
+    n_relative = sum(1 for w in _RELATIVE_DAYS_NAMES if w in t)
+    if (approx_hit or alt_conn or n_relative >= 2) and \
+            (has_anchor or detect_vague(t) or approx_hit):
+        reason = ("approximate_expression",) if approx_hit else \
+                 ("alternative_temporal_branches",)
+        return out(None, unc=True, matched=approx_hit, notes=reason)
+
+    vague = detect_vague(t)
+
     # 0) annual month-day（生日专用语义：每年度重复，优先于任何通用绝对日期规则）
+    #    R4-A：月份/日期确定性校验（Feb 29 以闰年基准视为合法），非法 → uncertain。
     mb = re.search(r"生日(?:是|在)?\s*(\d{1,2})月(\d{1,2})[日号]", t)
     if mb:
-        md = f"{int(mb.group(1)):02d}-{int(mb.group(2)):02d}"
+        mm, dd = int(mb.group(1)), int(mb.group(2))
+        if not 1 <= mm <= 12:
+            return out(None, unc=True, matched=mb.group(0),
+                       notes=("invalid_month",))
+        leap_year = local.year if local.year % 4 == 0 and (
+            local.year % 100 != 0 or local.year % 400 == 0) else 2024
+        try:
+            feb_leap_end = local.replace(year=leap_year, month=2, day=29)
+            max_day = 29 if (mm == 2 and feb_leap_end.day == 29) else (
+                [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mm - 1])
+        except ValueError:
+            max_day = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mm - 1]
+        if not 1 <= dd <= max_day:
+            return out(None, unc=True, matched=mb.group(0),
+                       notes=("invalid_day",))
+        md = f"{mm:02d}-{dd:02d}"
         return out(_payload("ANNUAL", md=md, matched=mb.group(0),
                             basis_epoch=basis_epoch, tz_name=tz_name))
 
@@ -179,28 +219,31 @@ def resolve_temporal(text: str, *, basis_epoch: float,
             return out(_payload("POINT", start=_iso(target), matched=word,
                                 basis_epoch=basis_epoch, tz_name=tz_name))
 
-    # 5) week spans（本周/下周：周一~周日含端点）
-    this_monday = local.date() - timedelta(days=local.weekday())
-    if "本周" in t or "这周" in t:
+    # 5) weekend spans（R2：周末别名优先于整周判定；四个别名逐一锁定）
+    if "周末" in t:
+        this_monday = local.date() - timedelta(days=local.weekday())
+        sat = this_monday + timedelta(days=5)
+        nxt_sat = sat + timedelta(days=7)
+        hit = next((w for w, _n in _WEEKEND_ALIASES if w in t), "")
+        is_next = hit in ("下个周末", "下周末")
+        s = nxt_sat if is_next else sat
+        return out(_payload("RANGE", start=_iso(s), end=_iso(s + timedelta(days=1)),
+                            matched=(hit or "周末"), basis_epoch=basis_epoch,
+                            tz_name=tz_name))
+
+    # 6) week spans（本周/下周：周一~周日含端点；“…周末”已在上方分支消费）
+    if ("本周" in t or "这周" in t) and "周末" not in t:
+        this_monday = local.date() - timedelta(days=local.weekday())
         s = this_monday
         return out(_payload("RANGE", start=_iso(s), end=_iso(s + timedelta(days=6)),
                             matched="本周" if "本周" in t else "这周",
                             basis_epoch=basis_epoch, tz_name=tz_name))
-    if "下周" in t:
+    if "下周" in t and "周末" not in t:
+        this_monday = local.date() - timedelta(days=local.weekday())
         s = this_monday + timedelta(days=7)
         return out(_payload("RANGE", start=_iso(s), end=_iso(s + timedelta(days=6)),
                             matched="下周", basis_epoch=basis_epoch,
                             tz_name=tz_name))
-
-    # 6) weekend spans（这个周末|本周末 = 本周六~周日；下个周末|下周末同理）
-    if "周末" in t:
-        sat = this_monday + timedelta(days=5)
-        nxt_sat = sat + timedelta(days=7)
-        nxt = any(w in t for w in ("下个周末", "下周末"))
-        s = nxt_sat if nxt else sat
-        return out(_payload("RANGE", start=_iso(s), end=_iso(s + timedelta(days=1)),
-                            matched=("下周末" if nxt else "本周末"),
-                            basis_epoch=basis_epoch, tz_name=tz_name))
 
     # 7) month spans（本月 / 下个月|下月；月末前等模糊归 vague 处理）
     if "下个月" in t or "下月" in t:
@@ -217,17 +260,21 @@ def resolve_temporal(text: str, *, basis_epoch: float,
                             matched="本月", basis_epoch=basis_epoch, tz_name=tz_name))
 
     # 8) month-only with explicit year word（今年X月 / 明年X月）
+    #    R4-B：用户声明的月份不 clamp —— 非法月份（13月/0月）→ uncertain（不修复）。
     m = _MONTH_ONLY_RE.search(t)
     if m and (m.group(1) or ""):
         y = local.year + (1 if m.group(1) == "明年" else 0)
-        mo = min(12, max(1, int(m.group(2))))
+        mo = int(m.group(2))
+        if not 1 <= mo <= 12:
+            return out(None, unc=True, matched=m.group(0),
+                       notes=("invalid_month",))
         first = local.replace(year=y, month=mo, day=1).date()
         last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
         return out(_payload("RANGE", start=_iso(first), end=_iso(last),
                             matched=m.group(0), basis_epoch=basis_epoch,
                             tz_name=tz_name, precision="month"))
 
-    # 10) 模糊收口：有模糊词但无任何精确规则 → uncertain，不造日期（PART 8）
+    # 10) 模糊收口：有模糊词但无任何精确规则 → uncertain，不造日期（PART 8/R3）
     if vague:
         return out(None, unc=True, matched=vague, notes=("vague_expression",))
     return out(None)

@@ -66,12 +66,16 @@ def _sched_with_cog(tmp_path):
     return sched, hub, me
 
 
-def _real_furina(tmp_path):
-    """真实 Furina + 真实 Scheduler（与 launch() 相同的装配），用于真实生产路径测试。"""
+def _real_furina(tmp_path, timezone: str = ""):
+    """真实 Furina + 真实 Scheduler（与 launch() 相同的装配），用于真实生产路径测试。
+
+    Phase 15 D4/R1（加性参数）：``timezone`` 注入显式用户时区权威
+    （AppConfig.timezone；默认空=维持旧行为 fail-closed）。"""
     from furina.app import Furina
     from furina.config import AppConfig, LLMProfile
     cfg = AppConfig(root_dir=tmp_path, zhipu_api_key="", agnes_api_key="",
-                    llm=LLMProfile(api_key=""), data_dir=tmp_path)
+                    llm=LLMProfile(api_key=""), data_dir=tmp_path,
+                    timezone=timezone)
     f = Furina(cfg)
     sched = Scheduler(f.bus, f.state, f.behavior, f.director, f.memory, f.world, f.wa,
                       life_brain=f.life_brain, dialogue_brain=f.dialogue_brain,

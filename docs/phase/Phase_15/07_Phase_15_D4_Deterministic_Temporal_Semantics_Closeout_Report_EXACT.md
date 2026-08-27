@@ -125,6 +125,34 @@ local SHA == remote SHA 于 push 后校验（分支 feature/phase15-d4-temporal-
 未 merge 进 integration 分支；未开始 D2/D3/D5/Phase16
 ```
 
+## 12. External Reviewer Residual Closure（Review = NEEDS_NARROW_PATCH → 已闭合）
+
+针对 9727d6b 的六项残余全部闭合（同分支追加 commit，未动 D2/D3/D5/Phase16）：
+
+| ID | 内容 | 实现 / 证据 |
+|---|---|---|
+| R1 | 生产用户本地时区权威 | `AppConfig.timezone`（IANA 名，空=未配置）→ `Furina._resolve_user_tz` 校验 → `Furina._user_tz`（None=fail-closed）→ `apply_user_message(tz_name=…)`。hub/interpreter 移除一切生产默认日历猜测：tz 缺失 ⇒ 整句时间解析跳过（无 UTC 冒充、无 Asia/Shanghai 冒充）。R1-T1 用真实 `submit_user_message` + 注入午夜附近固定时钟 + 配置 America/New_York → 行内 tz==配置值、start==NY 本地“明天”08-28；R1-T2 空 tz → 行存在但零日期零 uncertain 标记 |
+| R2 | 周末优先级 | resolver 重排：周末别名块前置于整周块，且周块加 `"周末" not in t` 排他；四别名逐一锁定端点（本周末/这个周末→周六~周日当周；下周末/下个周末→次周），plain 本周/下周语义不变 |
+| R3 | 近似/或者 fail-closed | 守卫三规则：近似量词(左右/大概/可能/也许/差不多/前后)∧有锚、或者|或是|还是连接∧有锚、≥2 个相对日并存 → uncertain=True 且 payload=None；“九月可能…”经月份锚触发；精确保留样例全部通过（明天写报告/下个月出差改型句/2026年9月3日提交） |
+| R4 | 非法日历 | ANNUAL md 闰年安全校验（2月29合法/2月30拒）、MONTH-only 去 clamp（13月/0月→uncertain），不修复用户日期；R3b 锁定 |
+| R5 | 精确 T→U 溯源测试 | T9 强化为逐环身份链：C4 row.source_event_id → USER_PLAN_DECLARED(by id) → declaration.turn_id → 该 turn_id 下**唯一** canonical USER_MESSAGE 且 payload.text 含原句；另断言 declaration.payload 内嵌 temporal.start |
+| R6 | 真 overdue 测试 | T14 重写：历史 basis(2020-06-01) 声明 “我今天要完成发布清单” → 行内 POINT start=2020-06-01 → 重启 + 多批 process_pending 后仍 active（时钟流逝不产生 ACTIVE→COMPLETED）|
+
+静态复审（新增）：DEFAULT_USER_TZ 仅存于 temporal.py 自身（函数签名默认值与 `_zone`
+库层兜底），hub/app 等生产调用面零引用；resolve_temporal 生产调用唯一=
+interpreter(传入 App 链路的 tz)；apply_user_message 生产调用唯一=App.submit_user_message；
+读侧 temporal_payload 损坏即 {} fail-closed；无 read-time 重解释、无 auto-complete。
+
+**Gates**：
+```text
+Gate A  tests/cognition/test_phase15_d4_temporal.py   22 passed（T17 + 新增 R 系列）
+Gate B  全部既有 D4 测试                                同套件内含（原 17 例不变全绿）
+Gate C  Phase14 R10/R10-FC                              20 passed
+Gate D  tests/cognition 全目录                          213 passed
+Gate E  FULL SUITE ×2                                1278 passed / 0 failed（185s, 167s）
+```
+（1273 = 前值 + 本补丁新增 5 个测试。）
+
 ## 11. Final Line
 
 ```text

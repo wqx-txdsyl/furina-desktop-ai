@@ -47,9 +47,27 @@ RECENT_ACTIVITY_FRESHNESS_SECONDS = 120.0
 class Furina:
     """聚合根：持有所有子系统。"""
 
+    @staticmethod
+    def _resolve_user_tz(raw: str) -> "str | None":
+        """R1：配置 → 可用 IANA 时区名；空/非法 → None（fail-closed）。"""
+        name = (raw or "").strip()
+        if not name:
+            return None
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(name)                      # 仅验证可解析
+            return name
+        except Exception as e:
+            log.warning("D4/R1: 配置的时区 %r 无法解析(%s) → 时间语义 fail-closed", raw, e)
+            return None
+
     def __init__(self, cfg: AppConfig) -> None:
         self.cfg = cfg
         self.bus = EventBus()
+
+        # Phase 15 D4（R1）：唯一的用户本地时区权威。来自显式配置（IANA 名）；
+        # 未配置 / 非法 → None，时间语义 fail-closed 跳过（绝不猜测默认日历）。
+        self._user_tz: str | None = self._resolve_user_tz(cfg.timezone)
 
         # 记忆
         self.mem_store = MemoryStore(cfg.db_path)
@@ -677,7 +695,8 @@ class Furina:
                                                turn_id=turn_id,
                                                source_event_id=umsg_id,
                                                require_source_event=True,
-                                               basis_ts=ingress_ts)
+                                               basis_ts=ingress_ts,
+                                               tz_name=self._user_tz)
                     except Exception:
                         pass
                 else:

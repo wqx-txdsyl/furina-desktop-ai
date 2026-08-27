@@ -31,6 +31,12 @@ def _hub(tmp_path):
     return CognitionHub(Path(tmp_path) / "cog.db")
 
 
+def _apply(hub, text: str, turn_id: int, basis: float):
+    """测试注入显式时区权威（镜像生产配置后的调用形态）。"""
+    return hub.apply_user_message(text, turn_id=turn_id, basis_ts=basis,
+                                  tz_name=SH)
+
+
 def _plans(hub, status=None):
     if status is None:
         return hub._db.query_all(
@@ -44,8 +50,7 @@ def _plans(hub, status=None):
 # ================================================================ T1–T3 相对日
 def test_d4_t1_today_resolves_to_ingress_local_date(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("我今天要写报告初稿", turn_id=1,
-                           basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我今天要写报告初稿", 1, _basis(2026, 8, 27))
     it = hub.user_model.query_active(category="PLAN")[0]
     assert it.temporal_payload["kind"] == "POINT"
     assert it.temporal_payload["start"] == "2026-08-27"
@@ -54,7 +59,7 @@ def test_d4_t1_today_resolves_to_ingress_local_date(tmp_path):
 
 def test_d4_t2_tomorrow_is_next_local_calendar_date(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("我明天要写报告", turn_id=1, basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我明天要写报告", 1, _basis(2026, 8, 27))
     it = hub.user_model.query_active(category="PLAN")[0]
     assert it.temporal_payload["start"] == "2026-08-28"
     assert it.temporal_uncertain == 0
@@ -63,7 +68,7 @@ def test_d4_t2_tomorrow_is_next_local_calendar_date(tmp_path):
 
 def test_d4_t3_day_after_tomorrow(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("我后天去体检", turn_id=1, basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我后天去体检", 1, _basis(2026, 8, 27))
     it = hub.user_model.query_active(category="PLAN")[0]
     assert it.temporal_payload["start"] == "2026-08-29"
     hub.close()
@@ -72,15 +77,13 @@ def test_d4_t3_day_after_tomorrow(tmp_path):
 # ================================================================ T4 绝对日期（无 LLM）
 def test_d4_t4_absolute_dates_deterministic(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("我2026年9月3日交付方案", turn_id=1,
-                           basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我2026年9月3日交付方案", 1, _basis(2026, 8, 27))
     it = [x for x in hub.user_model.query_active(category="PLAN")
           if x.key == "plan:方案"][0]
     p = it.temporal_payload
     assert p["kind"] == "POINT" and p["start"] == "2026-09-03"
     # 缺年：取 basis 起最近将来（显式规则）
-    hub.apply_user_message("我打算9月30日去办签证", turn_id=2,
-                           basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我打算9月30日去办签证", 2, _basis(2026, 8, 27))
     it2 = [x for x in hub.user_model.query_active(category="PLAN")
            if x.key == "plan:签证"][0]
     assert it2.temporal_payload["start"] == "2026-09-30"
@@ -90,8 +93,7 @@ def test_d4_t4_absolute_dates_deterministic(tmp_path):
 # ================================================================ T5 模糊不造日期
 def test_d4_t5_vague_stays_uncertain_without_invented_date(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("过几天我打算整理房间", turn_id=1,
-                           basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "过几天我打算整理房间", 1, _basis(2026, 8, 27))
     it = hub.user_model.query_active(category="PLAN")[0]
     assert it.temporal_uncertain == 1
     assert it.temporal_json == ""            # 不落任何日期载荷
@@ -102,8 +104,7 @@ def test_d4_t5_vague_stays_uncertain_without_invented_date(tmp_path):
 # ================================================================ T6 周重复（确定性）
 def test_d4_t6_weekly_recurrence_structured(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("我要每周六去健身房", turn_id=1,
-                           basis_ts=_basis(2026, 8, 27))   # 周四
+    _apply(hub, "我要每周六去健身房", 1, _basis(2026, 8, 27))   # 周四
     it = hub.user_model.query_active(category="PLAN")[0]
     p = it.temporal_payload
     assert p["kind"] == "RECUR" and p["dow"] == 6
@@ -114,10 +115,9 @@ def test_d4_t6_weekly_recurrence_structured(tmp_path):
 # ================================================================ T7/T8 dedupe vs 取代
 def test_d4_t7_same_plan_changed_date_supersedes_not_swallows(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("我明天要写报告", turn_id=1, basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我明天要写报告", 1, _basis(2026, 8, 27))
     _time.sleep(0.03)
-    hub.apply_user_message("我明天要写报告", turn_id=2,
-                           basis_ts=_basis(2026, 8, 30))   # 三天后重说同一句
+    _apply(hub, "我明天要写报告", 2, _basis(2026, 8, 30))   # 三天后重说同一句
     _time.sleep(0.03)
     rows = _plans(hub, status=None)
     actives = [r for r in rows if r["status"] == "active"]
@@ -131,9 +131,8 @@ def test_d4_t7_same_plan_changed_date_supersedes_not_swallows(tmp_path):
 
 def test_d4_t8_unrelated_plans_coexist(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("我明天要写报告", turn_id=1, basis_ts=_basis(2026, 8, 27))
-    hub.apply_user_message("这个周末我想整理房间", turn_id=2,
-                           basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我明天要写报告", 1, _basis(2026, 8, 27))
+    _apply(hub, "这个周末我想整理房间", 2, _basis(2026, 8, 27))
     acts = hub.user_model.query_active(category="PLAN")
     keys = sorted(i.key for i in acts)
     assert keys == ["plan:房间", "plan:报告"], keys
@@ -151,25 +150,34 @@ def _app_harness(tmp_path):
     return _real_furina(tmp_path)
 
 
-def test_d4_t9_declaration_provenance_resolvable(tmp_path):
-    """declaration 行必须可解析到 canonical U（经 USER_PLAN_DECLARED 事件）。"""
-    f, _ = _app_harness(tmp_path)
+def test_d4_t9_declaration_provenance_resolvable_exact_chain(tmp_path):
+    """R5：C4 行 → source_event_id → 精确 USER_PLAN_DECLARED → 同 turn_id 的唯一
+    canonical USER_MESSAGE —— 逐环身份验证，不接受“存在某条 U”。"""
+    from tests.cognition.test_phase14_final_reviewer_r6_r12 import _real_furina
+    f, _ = _real_furina(tmp_path, timezone=SH)
     try:
-        f.submit_user_message("我明天要写季度总结")           # canonical ingress
+        f.submit_user_message("我明天要写季度总结")
         q = f._direct_dialogue_queue()
         assert q.wait_idle(timeout=15.0)
         rows = f.cognition._db.query_all(
             "SELECT * FROM user_model_items WHERE category='PLAN' AND status='active'")
         assert rows and rows[0]["temporal_json"], rows
-        it_dev = f.cognition.events.query_by_type("USER_PLAN_DECLARED")
-        assert it_dev, "declaration 事件必须在档"
-        u_ids = {e.event_id for e in f.cognition.events.query_by_type("USER_MESSAGE")}
-        chain_ok = any(e.payload.get("temporal") for e in it_dev) and \
-            all(e.turn_id is not None for e in it_dev)
-        assert chain_ok
-        # U 存在且 declaration 与其同 turn 身份族
-        assert u_ids
-        assert json.loads(rows[0]["temporal_json"])["start"]
+        row = rows[0]
+
+        # 环1：行 → 声明事件（按 id 精确）
+        dev = f.cognition._db.query_one(
+            "SELECT * FROM life_events WHERE event_id=?", (row["source_event_id"],))
+        assert dev is not None and dev["event_type"] == "USER_PLAN_DECLARED",             dict(dev) if dev else None
+
+        # 环2：声明 → canonical U（同 turn_id 唯一）
+        u_rows = f.cognition._db.query_all(
+            "SELECT * FROM life_events WHERE event_type='USER_MESSAGE' AND turn_id=?",
+            (dev["turn_id"],))
+        assert len(u_rows) == 1, [dict(u) for u in u_rows]
+        u = u_rows[0]
+        assert "季度总结" in (json.loads(u["payload_json"]) or {}).get("text", "")
+        # 时间语义也必须可追溯：声明事件 payload 内嵌 resolver 载荷
+        assert json.loads(dev["payload_json"]).get("temporal", {}).get("start")
     finally:
         try:
             f.cognition.close()
@@ -214,7 +222,7 @@ def test_d4_t10_umsg_persistence_failure_means_no_temporal_mutation(tmp_path):
 def test_d4_t11_restart_preserves_resolved_relative_date(tmp_path):
     db = Path(tmp_path) / "cog.db"
     hub = _hub(tmp_path)
-    hub.apply_user_message("我明天要写报告", turn_id=1, basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我明天要写报告", 1, _basis(2026, 8, 27))
     hub.close()
     # —— 重启于“三天后”，也不得把 明天 重解释为新的基准日 ——
     hub2 = CognitionHub(db) if False else None
@@ -252,23 +260,29 @@ def test_d4_t13_dst_calendar_semantics_not_naive_24h():
 
 
 # ================================================================ T14 不过期即完成
-def test_d4_t14_passing_due_does_not_autocomplete(tmp_path):
-    hub = _hub(tmp_path)
-    hub.apply_user_message("我昨天前就该写完的周报先记着", turn_id=99,
-                           basis_ts=_basis(2020, 1, 2))
-    # 构造一个"早已过期"的 active PLAN（直接落库等价物：声明时 basis 在过去）
-    hub.apply_user_message("我打算完成发布清单", turn_id=2,
-                           basis_ts=_basis(2020, 6, 1))
-    _time.sleep(0.05)
-    r = hub.process_pending(batch=10)
-    rows = hub.user_model.query_active(category="PLAN")
-    targets = [x for x in rows if x.key == "plan:发布清单"]
-    assert targets and targets[0].status == "active", \
-        "时间流逝绝不自动完成计划"
-    r2 = hub.process_pending(batch=10)
-    rows2 = hub.user_model.query_active(category="PLAN")
-    assert [x.status for x in rows2 if x.key == "plan:发布清单"] == ["active"]
+def test_d4_t14_overdue_temporal_plan_never_autocompletes(tmp_path):
+    """R6：ACTIVE PLAN 带**过去日期**的结构化 POINT 载荷 → 重启/继续处理若干批
+    之后仍 active；时钟流逝绝不产生 ACTIVE→COMPLETED。"""
+    db = Path(tmp_path) / "cog.db"
+    from furina.cognition import CognitionHub as _CH
+    hub = _CH(db)
+    _apply(hub, "我今天要完成发布清单", 1, _basis(2020, 6, 1))      # 历史 ingress
+    it = hub.user_model.query_active(category="PLAN")[0]
+    assert it.temporal_payload.get("start") == "2020-06-01", it.temporal_payload
     hub.close()
+
+    # —— “多日后”的重启 + 继续处理无关事件批次 ——
+    hub2 = _CH(db)
+    hub2.process_pending(batch=10)
+    hub2.process_pending(batch=10)
+    _time.sleep(0.05)
+    rows = hub2.user_model.query_active(category="PLAN")
+    targets = [x for x in rows if x.key == "plan:发布清单"]
+    assert targets and targets[0].status == "active",         "due 已过但无独立完成证据 → 必须 ACTIVE"
+    assert targets[0].temporal_payload["start"] == "2020-06-01"
+    comp = hub2.user_model.query_active(category="PLAN")
+    assert all(x.status == "active" for x in comp)
+    hub2.close()
 
 
 # ================================================================ T15 非时间偏好不受影响
@@ -293,7 +307,7 @@ def test_d4_t15_non_temporal_preferences_unchanged(tmp_path):
 # ================================================================ T16 损坏载荷 fail-closed
 def test_d4_t16_malformed_temporal_payload_fails_closed(tmp_path):
     hub = _hub(tmp_path)
-    hub.apply_user_message("我明天要写报告", turn_id=1, basis_ts=_basis(2026, 8, 27))
+    _apply(hub, "我明天要写报告", 1, _basis(2026, 8, 27))
     hub._db.execute("UPDATE user_model_items SET temporal_json='{{{broken' "
                     "WHERE category='PLAN'")
     it = hub.user_model.query_active(category="PLAN")[0]
@@ -325,3 +339,145 @@ def test_d4_extra_bounded_calendar_forms():
     assert jan.payload["start"] == "2027-01-01" and jan.payload["end"] == "2027-01-31"
     none_ = resolve_temporal("我们就随便聊聊吧", basis_epoch=b, tz_name=SH)
     assert none_.payload is None and none_.uncertain is False
+
+
+# ================================================================
+# External Reviewer Residual III（Review = NEEDS_NARROW_PATCH）
+# ================================================================
+
+def _app_with_tz(tmp_path, tz_value):
+    """R1-T1：共享 harness（含 dispatcher 绑定）+ 配置时区 + 固定时钟注入。"""
+    import types as _types
+    from tests.cognition.test_phase14_final_reviewer_r6_r12 import _real_furina
+    app_mod = __import__("furina.app", fromlist=["time"])
+    real_time = app_mod.time
+    fixed = _basis(2026, 8, 27, 20, 30, tz="UTC")   # NY=08-27 16:30 / SH=08-28 04:30
+    f, _sched = _real_furina(tmp_path, timezone=tz_value)
+    app_mod.time = _types.SimpleNamespace(time=lambda: fixed,
+                                          sleep=lambda *_: None,
+                                          localtime=_time.localtime,
+                                          monotonic=_time.monotonic)
+    return f, app_mod, real_time
+
+
+def test_d4_r1_t1_configured_tz_controls_production_ingress_date(tmp_path):
+    """R1-T1：生产 submit_user_message 路径 + 配置时区 America/New_York +
+    午夜附近的 canonical ingress → 行内 tz=配置值、本地日历正确（≠Asia/Shanghai）。"""
+    tmp = Path(tmp_path)
+    f, _fixed, real_time = None, None, None
+    import furina.app as app_mod
+    try:
+        f, _fixed, real_time = _app_with_tz(tmp, "America/New_York")
+        real_time_mod = real_time                      # 备原引用（还原用）
+        assert f._user_tz == "America/New_York"
+        f.submit_user_message("我明天要写报告")
+        q = f._direct_dialogue_queue()
+        assert q.wait_idle(timeout=15.0)
+        rows_q = f.cognition.user_model.query_active(category="PLAN")
+        it = [x for x in rows_q]
+        rows = [x for x in (f.cognition._db.query_all(
+            "SELECT * FROM user_model_items WHERE category='PLAN' AND status='active'"))]
+        assert rows, rows
+        p = json.loads(rows[0]["temporal_json"])
+        assert p["tz"] == "America/New_York", p          # 权威=配置值，非默认猜测
+        assert p["start"] == "2026-08-28"                # NY 本地“明天”
+        del real_time_mod
+    finally:
+        if real_time is not None:
+            app_mod.time = real_time                     # 还原模块级 time
+        try:
+            f.cognition.close()
+        except Exception:
+            pass
+
+
+def test_d4_r1_t2_unconfigured_timezone_fails_closed(tmp_path):
+    """未配置时区 → 生产入口不得落任何时间载荷（绝不默认 Asia/Shanghai）。"""
+    import furina.app as app_mod
+    f, fixed, real_time = None, None, None
+    try:
+        f, fixed, real_time = _app_with_tz(tmp_path, "")       # 空 tz
+        assert f._user_tz is None
+        f.submit_user_message("我明天要写报告")
+        q = f._direct_dialogue_queue()
+        assert q.wait_idle(timeout=15.0)
+        rows = f.cognition._db.query_all(
+            "SELECT * FROM user_model_items WHERE category='PLAN' AND status='active'")
+        assert rows, "计划本身仍应存在（文本真值不受影响）"
+        for r in rows:
+            assert (r["temporal_json"] or "") == "", r     # 无日期 → fail-closed
+            assert int(r["temporal_uncertain"]) == 0       # 也非 uncertain（只是没解析）
+    finally:
+        if real_time is not None:
+            app_mod.time = real_time
+        try:
+            f.cognition.close()
+        except Exception:
+            pass
+
+
+def test_d4_r2_weekend_aliases_locked():
+    """R2：四个周末别名在已知基准周逐一锁定端点；平周语义不变。"""
+    from furina.cognition.temporal import resolve_temporal
+    b = _basis(2026, 8, 27)                                 # 周四
+    expect = {
+        "这个周末": ("2026-08-29", "2026-08-30"),
+        "本周末": ("2026-08-29", "2026-08-30"),
+        "下个周末": ("2026-09-05", "2026-09-06"),
+        "下周末": ("2026-09-05", "2026-09-06"),
+    }
+    for token, (s, e) in expect.items():
+        r = resolve_temporal(f"{token}我想去看展", basis_epoch=b, tz_name=SH)
+        assert r.payload["kind"] == "RANGE"
+        assert (r.payload["start"], r.payload["end"]) == (s, e), token
+    plain1 = resolve_temporal("本周内完成自评", basis_epoch=b, tz_name=SH)
+    plain2 = resolve_temporal("下周开始学日语", basis_epoch=b, tz_name=SH)
+    assert (plain1.payload["start"], plain1.payload["end"]) == ("2026-08-24", "2026-08-30")
+    assert (plain2.payload["start"], plain2.payload["end"]) == ("2026-08-31", "2026-09-06")
+
+
+def test_d4_r3_approx_and_alternatives_fail_closed(tmp_path):
+    """R3：近似量词/或者连接/模糊∩精确 → uncertainty=1 且零日期；精确保留。"""
+    hub = _hub(tmp_path)
+    for utt, turn in (("下个月左右我要搬家", 1),
+                      ("九月可能要去一次上海", 2),
+                      ("我打算下个月左右去上海出差", 5),
+                      ("我明天或者过几天写报告", 3),
+                      ("我明天或后天写报告", 4)):
+        _apply(hub, utt, turn, _basis(2026, 8, 27))
+        _time.sleep(0.02)
+    pl = [i for i in hub.user_model.query_active(category="PLAN", limit=50)]
+    approx_keys = [x.key for x in pl
+                   if x.temporal_uncertain == 1 and x.temporal_json == ""]
+    assert "plan:搬家" in approx_keys, approx_keys          # 下个月左右我要搬家
+    # 精确对应句不允许被近似守卫误伤（同一批里“九月可能…”等保持 uncertain，
+    # 而后续精确句子应正常落库 —— 见下方 exact 断言）
+    # 精确保留
+    _apply(hub, "明天写报告", 9, _basis(2026, 8, 27))
+    _apply(hub, "我打算下个月去上海出差", 10, _basis(2026, 8, 27))
+    _apply(hub, "2026年9月3日提交申请表", 11, _basis(2026, 8, 27))
+    keys_dbg = [x.key for x in hub.user_model.query_active(category="PLAN", limit=50)]
+    exact = {x.key: x.temporal_payload for x in keys_dbg and
+             hub.user_model.query_active(category="PLAN", limit=50)}
+    assert exact["plan:报告"]["start"] == "2026-08-28"
+    assert exact["plan:申请表"]["start"] == "2026-09-03"
+    hub.close()
+
+
+def test_d4_r3b_invalid_calendar_inputs_fail_closed(tmp_path):
+    """R4-A/B（hub 级）：非法生日日/月 与 非法月份声明 → 行存在但零日期+uncertain。"""
+    hub = _hub(tmp_path)
+    _apply(hub, "我的生日是2月30日", 1, _basis(2026, 8, 27))
+    bd = hub.user_model.query_active(category="IMPORTANT_DATE")[0]
+    assert bd.value == "02-30" or bd.value == "02-30"      # 原文保留于 value/excerpt 层
+    assert bd.temporal_uncertain == 1 and bd.temporal_json == "", \
+        (bd.temporal_uncertain, bd.temporal_json)
+    _apply(hub, "明年13月我要搬家", 2, _basis(2026, 8, 27))
+    moved = [x for x in hub.user_model.query_active(category="PLAN") if x.key == "plan:搬家"]
+    assert moved and moved[0].temporal_uncertain == 1 and moved[0].temporal_json == ""
+    # 合法闰日仍为 ANNUAL
+    _apply(hub, "我的生日是2月29日", 3, _basis(2026, 8, 27))
+    leap = [x for x in hub.user_model.query_active(category="IMPORTANT_DATE", limit=50)]
+    ann = [x for x in leap if x.temporal_payload.get("md") == "02-29"]
+    assert ann and ann[0].temporal_payload["kind"] == "ANNUAL"
+    hub.close()

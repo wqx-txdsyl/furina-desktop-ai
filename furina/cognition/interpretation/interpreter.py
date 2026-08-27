@@ -127,7 +127,7 @@ class InterpretationEngine:
 
         Phase 15 D4：PLAN/GOAL/IMPORTANT_DATE 候选附带结构化时间载荷（resolver 只在
         canonical ingress 用 basis+tz 解析一次；candidate != truth，owner 决定落地）。
-        ``basis_epoch`` 缺省时**不解析**（保持无时间语义；禁止用当前进程时间猜测）。
+        ``basis_epoch`` 或 ``tz_name`` 任一缺失时**完全不解析**（无进程墙钟/无默认日历猜测；生产未配置用户时区 → 时间语义 fail-closed 跳过）。
         """
         t = (text or "").strip()
         if not t:
@@ -161,12 +161,12 @@ class InterpretationEngine:
                                 "DIRECT_STATEMENT", "PERSISTENT", "C4", cand["excerpt"]))
 
         # 3b) D4：仅对显式时间敏感类别做确定性时间解析（basis 必须由调用方注入）
-        if basis_epoch is not None and out:
+        if basis_epoch is not None and tz_name and out:
             from ..temporal import resolve_temporal
             for c in out:
                 if c.kind in ("PLAN", "GOAL", "IMPORTANT_DATE"):
                     res = resolve_temporal(t, basis_epoch=float(basis_epoch),
-                                           tz_name=tz_name or "Asia/Shanghai")
+                                           tz_name=tz_name)
                     if res.payload is not None:
                         c.temporal = res.payload
                     elif res.uncertain:

@@ -30,7 +30,7 @@ log = get_logger("cognition.hub")
 # Phase 14J：deterministic conservative user-model extraction（禁止模糊一句 → 永久人格标签）
 # Phase 15.1：**entity-specific identity** —— 不同偏好主体/计划各自独立 ACTIVE（不同 key），
 # 同主体修正才 supersede（不再用全局 'preference' / 'plan_today' 唯一身份）。
-_PLAN_RE = re.compile(r"(今天|明天|后天|大后天|下周|这周|本周|周末|等会|一会儿|待会|马上|月底|打算|准备|计划|要).{0,24}(完成|做|写|测|整理|学|练|去|弄|处理|搞定|交)")
+_PLAN_RE = re.compile(r"(今天|明天|后天|大后天|下周|这周|本周|周末|下个月|下月|等会|一会儿|待会|马上|月底|打算|准备|计划|要).{0,24}(完成|做|写|测|整理|学|练|去|弄|处理|搞定|交|办|出差|提交|搬)")
 _PREF_RE = re.compile(r"(?:我(?:真的|特别|很|超)?喜欢|最爱|超爱)(.{2,40}?)(?:。|！|!|$)")
 _DISLIKE_RE = re.compile(r"(?:我?(?:不太|很不|讨厌|不喜欢|烦|嫌))(?:别人|你|人|一直|总|总是|老|老是)?(.{2,40}?)(?:。|！|!|$)")
 # 指令式沟通偏好：不要/不许/请别/别再/少（裸"别"排除"别人"里的"别"）
@@ -42,7 +42,7 @@ _BIRTHDAY_RE = re.compile(r"(?:我的)?生日(?:是|在)?\s*(\d{1,2})月(\d{1,2}
 # 计划目标提取："我今天准备完成桌宠测试" → "桌宠测试"；"今天要测试" → "测试"
 # 连续标记（今天+准备+要…）全部消费后再取目标名词
 _PLAN_TARGET_RE = re.compile(
-    r"(?:我)?(?:(?:今天|明天|后天|大后天|下周|这周|本周|周末|等会|一会儿|待会|马上|月底|打算|准备|计划|要)\s*){1,3}"
+    r"(?:我)?(?:(?:今天|明天|后天|大后天|下周|这周|本周|周末|下个月|下月|等会|一会儿|待会|马上|月底|打算|准备|计划|要)\s*){1,3}"
     r"(?:要|还|再)?\s*(?:完成|交付|处理|搞定|整理|做|写|测|学|练|去|弄|交|办)?\s*(.{2,40}?)(?:。|！|!|$)")
 
 # D4 防御性剥离：目标名词前不得残留日期/重复词（"我打算9月3日交方案"→ 方案）
@@ -52,6 +52,12 @@ _TARGET_STRIP_RES = (
     re.compile(r"^每(?:个)?(?:周|星期|礼拜)[一二三四五六日天]"),
     re.compile(r"^(?:这个|本|下个?)?(?:周末|周|星期)"),
     re.compile(r"^(?:本月|下个月?|今年|明年)"),
+    re.compile(r"^(?:大后天|后天|明天|今天)"),
+    re.compile(r"^过几天"),
+    re.compile(r"^(?:或者|或是|还是|或)"),
+    re.compile(r"^(?:一次|两趟|一趟|两次)"),
+    re.compile(r"^(?:提交|申报)"),
+    re.compile(r"^左右"),
 )
 
 
@@ -113,7 +119,8 @@ class UserModelExtractor:
         # 无常规 marker 词时，以日期表达式本身充当计划标记（仍是显式确定性形态）。
         date_lead = re.match(r"(?:我)?(?:\d{4}年)?\d{1,2}月\d{1,2}[日号]", t or "")
         if (m and any(k in t for k in ("准备", "打算", "要", "今天", "明天", "后天",
-                                       "大后天", "下周", "这周", "本周", "周末", "月底"))) \
+                                       "大后天", "下周", "这周", "本周", "周末",
+                                       "下个月", "下月", "出差", "提交", "搬", "月底"))) \
                 or (date_lead and any(v in t for v in ("完成", "做", "写", "测",
                                                        "整理", "学", "练", "去",
                                                        "弄", "处理", "搞定", "交"))):
@@ -516,7 +523,8 @@ class CognitionHub:
         Phase 15 D4：``basis_ts`` = canonical ingress 时间戳（owner 在记录 canonical U 的
         同一同步段内取值，与其 created_at 等价）；时间语义由 resolver 用 (basis_ts, tz)
         解析一次并随 candidate/dev-event/行持久化 —— 重启后绝不重解释。basis_ts=None 时
-        完全不做时间解析（无进程墙钟猜测）。``tz_name`` 缺省用 temporal.DEFAULT_USER_TZ。
+        完全不做时间解析（无进程墙钟猜测）。``tz_name`` 为空（生产未配置用户时区）时同样
+        整体不解析 —— 不得以任何默认日历冒充用户本地时间。
         """
         if require_source_event:
             ok = False
@@ -536,10 +544,9 @@ class CognitionHub:
         applied: Dict[str, Any] = {"declarations": [], "superseded": [],
                                    "plans_completed": [], "events": []}
         try:
-            from .temporal import DEFAULT_USER_TZ
             for cand in self.interpretation.interpret_text(
                     text, basis_epoch=basis_ts,
-                    tz_name=tz_name or DEFAULT_USER_TZ):
+                    tz_name=(tz_name or "").strip() or None):
                 if cand.kind in ("PLAN_COMPLETED", "PREFERENCE_CHANGED"):
                     r = self._apply_c4_candidate(cand, utterance=text,
                                                  source_event_id=source_event_id or "",

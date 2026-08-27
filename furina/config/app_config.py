@@ -56,6 +56,9 @@ class AppConfig:
     # 素材 / 数据目录
     assets_dir: Path = field(default_factory=Path)
     data_dir: Path = field(default_factory=Path)
+    # Phase 15 D4：用户本地时区（IANA 名）。空 = 未配置 → 时间语义 fail-closed
+    # （不解析相对日期，绝不静默猜测某个日历）—— 唯一的显式时区权威来源。
+    timezone: str = ""
 
     @property
     def models_dir(self) -> Path:
