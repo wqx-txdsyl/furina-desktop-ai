@@ -149,17 +149,50 @@ class CanonHistoryStore:
     # D1 reviewer residual：精确幕支撑/覆盖还必须验证 evidence→source **持有链** ——
     # evidence_id 必须被一个合格权威且 USED 的 Canon source 登记，否则视为孤立证据，
     # 不产生覆盖、不构成精确支撑（fail-closed）。
+    #
+    # D1 reviewer residual II：tier 秩 ≠ 事实权威类型。持有链还要求来源在
+    # **事实性角色**上合格 —— CURATED_MODEL / DERIVED_FROM_EVIDENCE 的 Tier0 派生
+    # 模型文档（如 SRC-002/003）不是独立事实证据，不得为任何 factual evidence 作保。
 
     #: 当前冻结层级下可承载 Canon truth 的权威层（Tier 0 游戏文本/doc 种子、
     #: Tier 1 官方页面）。Tier 2 镜像/Tier 3 禁止源一律不合格。
     _ELIGIBLE_TRUTH_TIERS = (0, 1)
 
+    #: 可为**事实性** evidence 作保的原始材质显式白名单（来自现存 registry 的事实
+    #: 角色登记：Tier0 游戏文本/curated 种子、Tier1 官方公告页）。显式允许清单，
+    #: 不做语义猜测；新事实材质（例如未来启用的官方档案页）须评审后扩表。
+    _FACTUAL_ORIGINAL_MATERIALS = frozenset({
+        "OFFICIAL_GAME_TEXT",
+        "OFFICIAL_ANNOUNCEMENT_PAGE",
+    })
+
+    def _source_can_back_factual_evidence(self, source) -> bool:
+        """单一策略点：source 能否为事实性 Canon evidence 作保（Residual II）。
+
+        三条件合取，缺一不可：
+          status == USED
+          且 canon_tier ∈ _ELIGIBLE_TRUTH_TIERS
+          且 original_material ∈ _FACTUAL_ORIGINAL_MATERIALS
+        """
+        if not isinstance(source, dict):
+            return False
+        try:
+            tier = int(source.get("canon_tier", -1))
+        except (TypeError, ValueError):
+            return False
+        return (
+            tier in self._ELIGIBLE_TRUTH_TIERS
+            and source.get("status") == "USED"
+            and str(source.get("original_material") or "")
+            in self._FACTUAL_ORIGINAL_MATERIALS
+        )
+
     def _evidence_source_backed(self, evidence_id: str) -> bool:
         """evidence_id 是否具有合格权威 USED 来源持有链（唯一判定入口）。
 
-        合格 = source registry 中存在登记了该 evidence_id 的来源，且其
-        status=USED 且 canon_tier ∈ (0,1)。NOT_USED / FORBIDDEN / Tier2+ /
-        community locator / 无主单元全部不合格。
+        合格 = 存在登记了该 evidence_id 的来源，且该来源通过
+        ``_source_can_back_factual_evidence``。NOT_USED / FORBIDDEN /
+        Tier2+ / community locator / 无主单元 / 派生模型材质全部不合格。
         """
         if not evidence_id:
             return False
@@ -167,11 +200,7 @@ class CanonHistoryStore:
             ev_ids = s.get("evidence_ids") or []
             if evidence_id not in ev_ids:
                 continue
-            try:
-                tier = int(s.get("canon_tier", -1))
-            except (TypeError, ValueError):
-                continue
-            if tier in self._ELIGIBLE_TRUTH_TIERS and s.get("status") == "USED":
+            if self._source_can_back_factual_evidence(s):
                 return True
         return False
 

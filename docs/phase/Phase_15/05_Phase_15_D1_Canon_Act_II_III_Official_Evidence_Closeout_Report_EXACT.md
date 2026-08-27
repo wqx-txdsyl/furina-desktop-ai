@@ -225,6 +225,49 @@ closeout §3、source map、SRC-011/012 notes 三处改为 —— 官方页面/A
 **Git**：同一任务分支 feature/phase15-d1-canon-act2-act3-evidence 追加本 residual commit，
 push 后 local SHA == remote SHA。
 
+## 10c. External Reviewer Residual Closure II（Review_2 = NEEDS_NARROW_PATCH → 已闭合）
+
+verdict：`PHASE15_D1_REVIEW_2 = NEEDS_NARROW_PATCH`（针对 685f7de）。
+
+**Blocker**：`_evidence_source_backed()` 仅要求 `status=USED + canon_tier∈(0,1)`，
+而 registry 中 SRC-002/SRC-003 是 `source_type=CURATED_MODEL /
+original_material=DERIVED_FROM_EVIDENCE / Tier0 / USED` 的**派生模型文档** ——
+被此类来源独占持有的伪造精确 MAIN_STORY 单元可以 false-green 覆盖。
+tier 秩 ≠ 事实权威类型。
+
+**Patch**（仍为唯一生产文件 `furina/cognition/stores/canon_history.py`，保持单一策略点）：
+- 新增 `_source_can_back_factual_evidence(source)`：三条件合取 ——
+  `status == USED` ∧ `canon_tier ∈ (0,1)` ∧ `original_material ∈
+  {OFFICIAL_GAME_TEXT, OFFICIAL_ANNOUNCEMENT_PAGE}`（显式事实材质白名单，来自现存
+  registry 的真实事实角色登记；新材质须评审后扩表）；
+- `_evidence_source_backed()` 改经由该策略点判定；两个语义路径（coverage/support）
+  自动继承收紧；
+- CURATED_MODEL 独立事实性 = 明确否定；Tier2 mirror（即使材质名为 GAME_TEXT）仍被
+  tier 门拒绝；未误伤 SRC-001/004/005/006/011/012；无第二真值仓；life_history 零改动。
+
+**Counterexamples（新增 F1–F8，8 个 reviewer-locked 测试）**：
+
+| ID | 场景 | 结果 |
+|---|---|---|
+| F1 | DERIVED Tier0 独占 exact II 单元 | coverage[II]=False、missing 含 II |
+| F2 | episode 引用派生持有证据 | 仍在 episodes_without_exact_act_main_story_evidence；PARTIAL |
+| F3 | SRC-001 持有链（FUR-006→Act I 端到端） | 合格、支撑成立 |
+| F4 | SRC-004/005/006 官方游戏文本源逐一验证 | 全部合格（且负向：未持单元时不误绿其它幕） |
+| F5/F6 | 生产锚点 SRC-011→FUR-057、SRC-012→FUR-058 | 保持合格 |
+| F7 | 生产指标快照 | COMPLETE + missing=[] + INNER 唯一缺口不变 |
+| F8(补充) | COMMUNITY_MIRROR 即使材质=GAME_TEXT（Tier2 USED） | 三条件缺一不可，仍不合格 |
+
+R7/R8 对应门：本 D1 套件 24 用例全绿；Phase14 R7/R7-FC 四件套全绿。
+
+**Gates**：
+```text
+Gate A(new)      tests/cognition/test_phase15_d1_canon_evidence.py   24 passed
+Gate B/C         Phase14 R7/R7-FC 四件套                              78 passed
+Gate D           canon/persona/manifest 定向                          198 passed
+Gate E FULL ×2   全仓库                                            1256 passed / 0 failed（171s, 172s）
+```
+（1248 = 前值 + 本补丁新增 8 个测试。）
+
 ## 11. Final Line
 
 ```text

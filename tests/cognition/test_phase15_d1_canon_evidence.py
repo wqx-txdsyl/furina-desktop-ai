@@ -218,9 +218,10 @@ def _unit(eid, act="II"):
             "quest": "Chapter IV", "act": act, "scene": f"幕级条目 {eid}"}
 
 
-def _src(sid, *, tier=0, status="USED", owned=(), stype="CURATED_EVIDENCE"):
+def _src(sid, *, tier=0, status="USED", owned=(), stype="CURATED_EVIDENCE",
+         material="OFFICIAL_GAME_TEXT"):
     return {"source_id": sid, "source_type": stype,
-            "access_source": f"fixture {sid}", "original_material": "TEST",
+            "access_source": f"fixture {sid}", "original_material": material,
             "canon_tier": tier, "version": None, "quest": None, "act": None,
             "scene": None, "furina_present": None, "relevance": "test",
             "evidence_ids": list(owned), "notes": "", "access_locator": "",
@@ -319,3 +320,115 @@ def test_d1_r6_inner_world_revelation_still_only_gap_and_demote_fails_closed():
     assert "II" in md["missing_main_story_acts"]
 
 
+
+
+# ================================================================
+# External Reviewer Residual II（Review_2 = NEEDS_NARROW_PATCH）：
+# 事实性来源资格 —— tier 秩 ≠ 事实权威类型（CURATED_MODEL/DERIVED 不合格）
+# ================================================================
+
+def _prod_sources():
+    return json.loads(_SOURCES.read_text(encoding="utf-8"))["sources"]
+
+
+def _prod_units():
+    return json.loads(_REGISTRY.read_text(encoding="utf-8"))["evidence_units"]
+
+
+def test_d1_f1_derived_tier0_cannot_back_factual_evidence():
+    """F1：exact II 证据仅被 CURATED_MODEL/DERIVED_FROM_EVIDENCE/Tier0/USED 持有 →
+    不得产生覆盖（tier 秩不构成事实权威）。"""
+    m = _rs_store(
+        [_unit("FUR-T902")],
+        [_src("S-MODEL", tier=0, status="USED", owned=["FUR-T902"],
+              stype="CURATED_MODEL", material="DERIVED_FROM_EVIDENCE")],
+    ).metrics()
+    assert m["main_story_act_coverage"]["II"] is False
+    assert "II" in m["missing_main_story_acts"]
+
+
+def test_d1_f2_derived_owned_exact_evidence_leaves_episode_gap():
+    """F2：episode 引用派生源持有的精确证据 → 留在语义缺口清单，非 COMPLETE。"""
+    m = _rs_store(
+        [_unit("FUR-T902")],
+        [_src("S-MODEL", tier=0, status="USED", owned=["FUR-T902"],
+              stype="CURATED_MODEL", material="DERIVED_FROM_EVIDENCE")],
+        episodes=[{"episode_id": "FIX_EP_F2", "quest": "Chapter IV",
+                   "act": "II", "evidence_ids": ["FUR-T902"],
+                   "source_ids": ["S-MODEL"], "timeline_order": 1}],
+    ).metrics()
+    gaps = [g["episode"] for g in m["episodes_without_exact_act_main_story_evidence"]]
+    assert "FIX_EP_F2" in gaps, gaps
+    st = m["mandatory_life_stage_source_status"]
+    assert st != "SOURCE_COMPLETE" and st.startswith("PARTIAL"), st
+
+
+def test_d1_f3_src001_curated_seed_remains_eligible():
+    """F3：SRC-001（CURATED_EVIDENCE / OFFICIAL_GAME_TEXT / Tier0 / USED）持有链仍合格。"""
+    store = _store()
+    s001 = next(s for s in _prod_sources() if s["source_id"] == "SRC-001")
+    assert store._source_can_back_factual_evidence(s001) is True
+    # 用 SRC-001 持有的真实单元做端到端支撑验证：FUR-006 是 Act I MAIN_STORY
+    m_ep = {"episode_id": "FIX_EP_I", "quest": "Chapter IV", "act": "I",
+            "evidence_ids": ["FUR-006"], "source_ids": ["SRC-001"], "timeline_order": 1}
+    m = _rs_store([u for u in _prod_units() if u["evidence_id"] == "FUR-006"],
+                  [s001], episodes=[m_ep]).metrics()
+    assert not any(g["episode"] == "FIX_EP_I"
+                   for g in m["episodes_without_exact_act_main_story_evidence"])
+    assert m["main_story_act_coverage"]["I"] is True
+
+
+def test_d1_f4_official_game_text_sources_remain_eligible():
+    """F4：SRC-004/005/006（OFFICIAL_GAME_TEXT 原生来源）持有精确证据时仍合格。"""
+    for sid in ("SRC-004", "SRC-005", "SRC-006"):
+        owner = next(s for s in _prod_sources() if s["source_id"] == sid)
+        store = _store()
+        assert store._source_can_back_factual_evidence(owner) is True, sid
+        unit = dict(_unit("FUR-T903"), act="III")
+        u3 = dict(unit, evidence_id=unit["evidence_id"])  # keep shape stable
+        m = _rs_store([unit], [dict(owner, evidence_ids=["FUR-T903"])]).metrics()
+        assert m["main_story_act_coverage"]["II"] is False, \
+            f"{sid} 未持 II 单元时不得误绿"
+        m2 = _rs_store([dict(unit)], [dict(owner, evidence_ids=["FUR-T903"])]).metrics()
+        assert m2["main_story_act_coverage"]["II"] is False
+        # III 版本正向验证
+        unit_iii = {"evidence_id": "FUR-T903", "source_type": "MAIN_STORY",
+                    "quest": "Chapter IV", "act": "III", "scene": "s"}
+        m3 = _rs_store([unit_iii],
+                       [dict(owner, evidence_ids=["FUR-T903"])]).metrics()
+        assert m3["main_story_act_coverage"]["III"] is True, sid
+
+
+def test_d1_f5_src011_fur057_still_backed():
+    """F5：生产锚点 SRC-011→FUR-057 保持合格。"""
+    store = _store()
+    s011 = next(s for s in _prod_sources() if s["source_id"] == "SRC-011")
+    assert store._source_can_back_factual_evidence(s011) is True
+    assert store._evidence_source_backed("FUR-057") is True
+
+
+def test_d1_f6_src012_fur058_still_backed():
+    """F6：生产锚点 SRC-012→FUR-058 保持合格。"""
+    store = _store()
+    s012 = next(s for s in _prod_sources() if s["source_id"] == "SRC-012")
+    assert store._source_can_back_factual_evidence(s012) is True
+    assert store._evidence_source_backed("FUR-058") is True
+
+
+def test_d1_f7_production_metrics_unchanged_and_inner_unique():
+    """F7：生产指标保持 COMPLETE + missing=[]；INNER_WORLD_REVELATION 仍是唯一缺口。"""
+    m = _store().metrics()
+    assert m["main_story_act_coverage_status"] == "COMPLETE"
+    assert m["missing_main_story_acts"] == []
+    gaps = [g["episode"] for g in m["episodes_without_exact_act_main_story_evidence"]]
+    assert gaps == ["INNER_WORLD_REVELATION"], gaps
+
+
+def test_d1_f8_community_mirror_with_game_text_material_still_rejected():
+    """补充边界：OFFICIAL_GAME_TEXT 材质的 COMMUNITY_MIRROR（Tier2）依旧不合格 ——
+    材质白名单不能单独放行，三条件缺一不可。"""
+    mirror = {"source_id": "S-CM", "source_type": "COMMUNITY_MIRROR",
+              "original_material": "OFFICIAL_GAME_TEXT", "canon_tier": 2,
+              "status": "USED"}
+    store = _store()
+    assert store._source_can_back_factual_evidence(mirror) is False
