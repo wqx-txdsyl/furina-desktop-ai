@@ -41,12 +41,19 @@ class InterpretationCandidate:
     reason: str
     created_at: float = field(default_factory=time.time)
     process_version: str = PROCESS_VERSION
+    # Phase 15 D4：结构化确定性时间载荷（resolver 在 canonical ingress 一次性解析；
+    # None = 本句无时间语义；{"kind":"UNCERTAIN"} 类结果走 temporal_uncertain 标记，
+    # 此处仍为 None —— 模糊词不落任何日期）。
+    temporal: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {f: getattr(self, f) for f in (
+        d = {f: getattr(self, f) for f in (
             "interpretation_id", "source_event_ids", "kind", "subject", "predicate", "value",
             "confidence", "evidence_type", "temporal_scope", "candidate_target", "reason",
             "created_at", "process_version")}
+        if self.temporal is not None:
+            d["temporal"] = self.temporal
+        return d
 
 
 # ================================================================ deterministic extractors
@@ -113,8 +120,15 @@ class InterpretationEngine:
         self._extractor = UserModelExtractor()
 
     # -------------------------------------------------- text → candidates（deterministic）
-    def interpret_text(self, text: str, source_event_ids: Optional[List[str]] = None) -> List[InterpretationCandidate]:
-        """用户一句话 → 确定性候选。模糊/transient → 空或低置信，绝不幻觉 lifelong。"""
+    def interpret_text(self, text: str, source_event_ids: Optional[List[str]] = None,
+                       basis_epoch: Optional[float] = None,
+                       tz_name: Optional[str] = None) -> List[InterpretationCandidate]:
+        """用户一句话 → 确定性候选。模糊/transient → 空或低置信，绝不幻觉 lifelong。
+
+        Phase 15 D4：PLAN/GOAL/IMPORTANT_DATE 候选附带结构化时间载荷（resolver 只在
+        canonical ingress 用 basis+tz 解析一次；candidate != truth，owner 决定落地）。
+        ``basis_epoch`` 缺省时**不解析**（保持无时间语义；禁止用当前进程时间猜测）。
+        """
         t = (text or "").strip()
         if not t:
             return []
@@ -146,6 +160,21 @@ class InterpretationEngine:
                                 str(cand["value"]), float(cand["confidence"]),
                                 "DIRECT_STATEMENT", "PERSISTENT", "C4", cand["excerpt"]))
 
+        # 3b) D4：仅对显式时间敏感类别做确定性时间解析（basis 必须由调用方注入）
+        if basis_epoch is not None and out:
+            from ..temporal import resolve_temporal
+            for c in out:
+                if c.kind in ("PLAN", "GOAL", "IMPORTANT_DATE"):
+                    res = resolve_temporal(t, basis_epoch=float(basis_epoch),
+                                           tz_name=tz_name or "Asia/Shanghai")
+                    if res.payload is not None:
+                        c.temporal = res.payload
+                    elif res.uncertain:
+                        # 模糊表达 → 保持无日期 + uncertain 标记（owner 落库时置位）
+                        c.temporal = {"v": 1, "kind": "UNCERTAIN",
+                                      "matched": res.matched}
+                    break          # 一句话只取首个时间敏感候选的时间语义
+
         # 4) transient（"这首歌不错"）→ **不**形成 lifelong PREFERENCE
         if any(h in t for h in _TRANSIENT_HINTS) and not out:
             log.debug("interpretation: transient reaction（不形成 lifelong C4）: %s", t)
@@ -161,9 +190,14 @@ class InterpretationEngine:
         if et == "USER_MESSAGE":
             return self.interpret_text(str(payload.get("text", "")), ev_ids)
         if et == "USER_PLAN_DECLARED":
-            return [self._mk(ev_ids, "PLAN", "user", str(payload.get("key", "plan")),
-                             str(payload.get("value", "")), float(payload.get("confidence", 0.8)),
-                             "DIRECT_STATEMENT", "DATED", "C4", "明确用户计划声明")]
+            c = self._mk(ev_ids, "PLAN", "user", str(payload.get("key", "plan")),
+                         str(payload.get("value", "")), float(payload.get("confidence", 0.8)),
+                         "DIRECT_STATEMENT", "DATED", "C4", "明确用户计划声明")
+            # D4 重启不变量：declaration 事件内嵌**已解析**的时间载荷，重放绝不重解析。
+            tp = payload.get("temporal")
+            if isinstance(tp, dict) and tp:
+                c.temporal = tp
+            return [c]
         if et == "USER_PREFERENCE_DECLARED":
             return [self._mk(ev_ids, str(payload.get("category", "PREFERENCE")), "user",
                              str(payload.get("key", "preference")), str(payload.get("value", "")),

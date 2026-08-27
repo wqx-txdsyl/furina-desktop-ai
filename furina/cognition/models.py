@@ -87,6 +87,10 @@ class UserModelItem:
     # supersede/complete 的 canonical C6 trigger event id + 原因（触发 utterance 摘录）
     transition_event_id: str = ""
     transition_reason: str = ""
+    # Phase 15 D4：结构化确定性时间语义（JSON 字符串；空=无时间语义）。
+    # 解析仅在 canonical ingress 一次完成，重启后绝不重解释。Uncertainty 走
+    # temporal_uncertain 列，不塞进本 JSON。
+    temporal_json: str = ""
 
     @property
     def value(self) -> Any:
@@ -94,6 +98,17 @@ class UserModelItem:
             return json.loads(self.value_json)
         except Exception:
             return None
+
+    @property
+    def temporal_payload(self) -> Dict[str, Any]:
+        """解析 temporal_json → dict；损坏/为空返回 {}（fail-closed，不臆造）。"""
+        if not self.temporal_json:
+            return {}
+        try:
+            data = json.loads(self.temporal_json)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
     @classmethod
     def from_row(cls, row) -> "UserModelItem":
@@ -113,6 +128,8 @@ class UserModelItem:
             if "transition_event_id" in keys else "",
             transition_reason=row["transition_reason"] or ""
             if "transition_reason" in keys else "",
+            temporal_json=(row["temporal_json"] or "")
+            if "temporal_json" in keys else "",
         )
 
 

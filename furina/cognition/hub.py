@@ -30,23 +30,40 @@ log = get_logger("cognition.hub")
 # Phase 14J：deterministic conservative user-model extraction（禁止模糊一句 → 永久人格标签）
 # Phase 15.1：**entity-specific identity** —— 不同偏好主体/计划各自独立 ACTIVE（不同 key），
 # 同主体修正才 supersede（不再用全局 'preference' / 'plan_today' 唯一身份）。
-_PLAN_RE = re.compile(r"(今天|明天|后天|下周|这周|等会|一会儿|待会|马上|月底|打算|准备|计划|要).{0,24}(完成|做|写|测|整理|学|练|去|弄|处理|搞定|交)")
+_PLAN_RE = re.compile(r"(今天|明天|后天|大后天|下周|这周|本周|周末|等会|一会儿|待会|马上|月底|打算|准备|计划|要).{0,24}(完成|做|写|测|整理|学|练|去|弄|处理|搞定|交)")
 _PREF_RE = re.compile(r"(?:我(?:真的|特别|很|超)?喜欢|最爱|超爱)(.{2,40}?)(?:。|！|!|$)")
 _DISLIKE_RE = re.compile(r"(?:我?(?:不太|很不|讨厌|不喜欢|烦|嫌))(?:别人|你|人|一直|总|总是|老|老是)?(.{2,40}?)(?:。|！|!|$)")
 # 指令式沟通偏好：不要/不许/请别/别再/少（裸"别"排除"别人"里的"别"）
 _CPREF_RE = re.compile(r"(?:不要|不许|请别|别再|少|(?<!人)别)(?:一直|总是|老是|动不动|天天|再)?(?:跟我|给我|对我|跟|给)?(.{2,40}?)(?:。|！|!|$)")
 _FACT_RE = re.compile(r"(?:我是|我是个|我是位|我叫)(.{1,30}?)(?:。|！|!|$)")
 _LOW_CONF_MARKERS = ("也许", "可能", "大概", "或许", "有时候", "偶尔", "感觉")
+# Phase 15 D4：显式重要日期（窄模式：仅生日；年度重复为该语义自带，非臆造）
+_BIRTHDAY_RE = re.compile(r"(?:我的)?生日(?:是|在)?\s*(\d{1,2})月(\d{1,2})[日号]")
 # 计划目标提取："我今天准备完成桌宠测试" → "桌宠测试"；"今天要测试" → "测试"
 # 连续标记（今天+准备+要…）全部消费后再取目标名词
 _PLAN_TARGET_RE = re.compile(
-    r"(?:我)?(?:(?:今天|明天|后天|下周|这周|等会|一会儿|待会|马上|月底|打算|准备|计划|要)\s*){1,3}"
-    r"(?:要|还|再)?\s*(?:完成|做|写|测|整理|学|练|去|弄|处理|搞定|交)?\s*(.{2,40}?)(?:。|！|!|$)")
+    r"(?:我)?(?:(?:今天|明天|后天|大后天|下周|这周|本周|周末|等会|一会儿|待会|马上|月底|打算|准备|计划|要)\s*){1,3}"
+    r"(?:要|还|再)?\s*(?:完成|交付|处理|搞定|整理|做|写|测|学|练|去|弄|交|办)?\s*(.{2,40}?)(?:。|！|!|$)")
+
+# D4 防御性剥离：目标名词前不得残留日期/重复词（"我打算9月3日交方案"→ 方案）
+_TARGET_STRIP_RES = (
+    re.compile(r"^\d{4}年\d{1,2}月\d{1,2}[日号]"),
+    re.compile(r"^\d{1,2}月\d{1,2}[日号]"),
+    re.compile(r"^每(?:个)?(?:周|星期|礼拜)[一二三四五六日天]"),
+    re.compile(r"^(?:这个|本|下个?)?(?:周末|周|星期)"),
+    re.compile(r"^(?:本月|下个月?|今年|明年)"),
+)
 
 
 def _plan_target(text: str) -> str:
-    """从计划声明提取稳定实体（目标名词）；无 → 空（保守，不硬造）。"""
-    m = _PLAN_TARGET_RE.search(text or "")
+    """从计划声明提取稳定实体（目标名词）；无 → 空（保守，不硬造）。
+
+    D4：日期开头型计划句以注入虚拟 marker 的方式复用同一目标提取器
+    （只影响 key 推导；value/excerpt 保持原话）。
+    """
+    src = text or ""
+    src = re.sub(r"^((?:我)?(?:\d{4}年)?\d{1,2}月\d{1,2}[日号])\s*", r" 打算 ", src)
+    m = _PLAN_TARGET_RE.search(src)
     if not m:
         return ""
     target = m.group(1).strip()
@@ -54,6 +71,28 @@ def _plan_target(text: str) -> str:
     for w in ("完成", "做完", "写好", "测完", "整理好"):
         if target.startswith(w) and len(target) > len(w) + 1:
             target = target[len(w):]
+    # D4：剥离前导日期/重复表达（key 保持与具体日期无关 → 同实体异日期可被
+    # 生命周期正确 supersede，而不是散落成互不相干的 plan 行）
+        changed = True
+        while changed and target:
+            changed = False
+            for rx in _TARGET_STRIP_RES:
+                m2 = rx.match(target)
+                if m2:
+                    target = target[m2.end():].strip()
+                    changed = True
+                    break
+            for w in ("交付", "我想", "我要", "我得", "我会", "想", "要", "得", "会",
+                      "完成", "做完", "写好", "测完", "整理好"):
+                if target.startswith(w) and len(target) > len(w) + 1:
+                    target = target[len(w):]
+                    changed = True
+            # 日期被剥掉后残留的引导动作词（"9月3日交方案" → 交方案 → 方案）
+            for w in ("处理", "搞定", "整理", "完成", "学习", "练习", "交付", "交", "办", "写",
+                      "做", "测", "学", "练", "去", "弄"):
+                if target.startswith(w) and len(target) > len(w) + 1:
+                    target = target[len(w):]
+                    changed = True
     return target[:30]
 
 
@@ -70,10 +109,24 @@ class UserModelExtractor:
         low_conf = 0.45 if any(m in t for m in _LOW_CONF_MARKERS) else None
 
         m = _PLAN_RE.search(t)
-        if m and any(k in t for k in ("准备", "打算", "要", "今天", "明天", "后天", "下周", "月底")):
+        # D4：日期开头型计划（"2026年9月3日交付方案" / "9月3日交方案"）——
+        # 无常规 marker 词时，以日期表达式本身充当计划标记（仍是显式确定性形态）。
+        date_lead = re.match(r"(?:我)?(?:\d{4}年)?\d{1,2}月\d{1,2}[日号]", t or "")
+        if (m and any(k in t for k in ("准备", "打算", "要", "今天", "明天", "后天",
+                                       "大后天", "下周", "这周", "本周", "周末", "月底"))) \
+                or (date_lead and any(v in t for v in ("完成", "做", "写", "测",
+                                                       "整理", "学", "练", "去",
+                                                       "弄", "处理", "搞定", "交"))):
             target = _plan_target(t) or "待定"
             return {"category": "PLAN", "key": f"plan:{target}",
                     "value": t[:80], "confidence": low_conf or 0.85,
+                    "excerpt": t[:120]}
+        # D4：IMPORTANT_DATE 窄生产者（仅显式生日；年度重复为语义自带）
+        mb = _BIRTHDAY_RE.search(t)
+        if mb:
+            mm, dd = int(mb.group(1)), int(mb.group(2))
+            return {"category": "IMPORTANT_DATE", "key": "important_date:生日",
+                    "value": f"{mm:02d}-{dd:02d}", "confidence": 0.9,
                     "excerpt": t[:120]}
         # DISLIKE 先于 CPREF（"我不喜欢…" 是 dislike 陈述）
         m = _DISLIKE_RE.search(t)
@@ -316,20 +369,40 @@ class CognitionHub:
                             out["superseded"].append(it.item_id)
             elif cand.kind in ("PLAN", "PREFERENCE", "DISLIKE", "COMMUNICATION_PREFERENCE",
                                "FACT", "HABIT", "INTEREST", "GOAL", "IMPORTANT_DATE"):
-                # deterministic dedupe：同 category+key 且值相同的 ACTIVE item 已存在
-                # （例如 direct-path 已处理）→ 保留原 provenance，不重复 upsert/supersede。
+                # deterministic dedupe：同 category+key 且值相同且时间语义相同的 ACTIVE
+                # item 已存在 → 保留原 provenance，不重复 upsert/supersede。
+                # D4（执行令 PART 10）：值同但时间语义不同 ≠ 同一事实 —— 不得静默吞掉；
+                # 放行走 upsert_item 的既有 lifecycle supersede（新声明取代旧版）。
                 key = cand.predicate or "fact"
                 existing = self.user_model.query_active(limit=100, category=cand.kind)
                 same = next((i for i in existing
                              if i.key == key and str(i.value) == str(cand.value)), None)
                 if same is not None:
-                    out["items"].append(same.item_id)
-                    return out
+                    new_tp = cand.temporal if isinstance(cand.temporal, dict) else None
+                    if new_tp is None:
+                        out["items"].append(same.item_id)
+                        return out
+                    old_tp = same.temporal_payload
+                    if old_tp == new_tp:
+                        out["items"].append(same.item_id)
+                        return out
+                    log.info("D4 dedupe bypass: %s temporal corrected (%r→%r)",
+                             same.item_id,
+                             (old_tp.get("start") or old_tp.get("md")
+                              or old_tp.get("kind")) if isinstance(old_tp, dict) else "-",
+                             (new_tp.get("start") or new_tp.get("md")
+                              or new_tp.get("kind")))
+                import json as _json
+                t_payload = cand.temporal if isinstance(cand.temporal, dict) else None
+                uncertain = int(bool(t_payload and t_payload.get("kind") == "UNCERTAIN"))
+                t_json = (_json.dumps(t_payload, ensure_ascii=False, sort_keys=True)
+                          if (t_payload and t_payload.get("kind") != "UNCERTAIN") else "")
                 it = self.user_model.upsert_item(
                     category=cand.kind, key=key, value=cand.value,
                     confidence=cand.confidence,
                     source_event_id=(cand.source_event_ids or [""])[0],
-                    source_text_excerpt=(cand.reason or "")[:500])
+                    source_text_excerpt=(cand.reason or "")[:500],
+                    temporal_uncertain=uncertain, temporal_json=t_json)
                 out["items"].append(it.item_id)
         except Exception as e:
             log.warning("apply c4 candidate failed: %s", e)
@@ -419,7 +492,9 @@ class CognitionHub:
     def apply_user_message(self, text: str, *, channel: str = "DIRECT_USER_TURN",
                            turn_id: Optional[int] = None,
                            source_event_id: Optional[str] = None,
-                           require_source_event: bool = False) -> Dict[str, Any]:
+                           require_source_event: bool = False,
+                           basis_ts: Optional[float] = None,
+                           tz_name: Optional[str] = None) -> Dict[str, Any]:
         """owner：用户直接消息 → C4 演化（evidence-first，current explicit turn wins）。
 
         - declaration（我喜欢X/我今天准备做X/以后别总是X）→ declaration event 先落地 →
@@ -437,6 +512,11 @@ class CognitionHub:
         必须解析到一条**真实存在的 canonical USER_MESSAGE**，否则整个本回合 C4 durable
         应用 fail-closed 跳过（无 supersede / 无 plan complete / 无 orphan transition /
         无 declaration upsert），只记可观察 warning。孤立单测外壳（默认 False）不受影响。
+
+        Phase 15 D4：``basis_ts`` = canonical ingress 时间戳（owner 在记录 canonical U 的
+        同一同步段内取值，与其 created_at 等价）；时间语义由 resolver 用 (basis_ts, tz)
+        解析一次并随 candidate/dev-event/行持久化 —— 重启后绝不重解释。basis_ts=None 时
+        完全不做时间解析（无进程墙钟猜测）。``tz_name`` 缺省用 temporal.DEFAULT_USER_TZ。
         """
         if require_source_event:
             ok = False
@@ -456,7 +536,10 @@ class CognitionHub:
         applied: Dict[str, Any] = {"declarations": [], "superseded": [],
                                    "plans_completed": [], "events": []}
         try:
-            for cand in self.interpretation.interpret_text(text):
+            from .temporal import DEFAULT_USER_TZ
+            for cand in self.interpretation.interpret_text(
+                    text, basis_epoch=basis_ts,
+                    tz_name=tz_name or DEFAULT_USER_TZ):
                 if cand.kind in ("PLAN_COMPLETED", "PREFERENCE_CHANGED"):
                     r = self._apply_c4_candidate(cand, utterance=text,
                                                  source_event_id=source_event_id or "",
@@ -467,19 +550,29 @@ class CognitionHub:
                                    "FACT", "HABIT", "INTEREST", "GOAL", "IMPORTANT_DATE"):
                     ev_type = ("USER_PLAN_DECLARED" if cand.kind == "PLAN"
                                else "USER_PREFERENCE_DECLARED")
+                    # D4：确定性时间载荷随 declaration 事件持久化（重放不重解析）
+                    t_payload = cand.temporal if isinstance(cand.temporal, dict) else None
                     dev = self.record_event(ev_type, source="dialogue", channel=channel,
                                             turn_id=turn_id,
                                             payload={"key": cand.predicate, "value": cand.value,
                                                      "excerpt": cand.reason,
-                                                     "confidence": cand.confidence},
+                                                     "confidence": cand.confidence,
+                                                     **({"temporal": t_payload} if t_payload else {})},
                                             importance=0.5, consolidate=False)
+                    uncertain = int(bool(t_payload and t_payload.get("kind") == "UNCERTAIN"))
+                    import json as _json
+                    t_json = (_json.dumps(t_payload, ensure_ascii=False, sort_keys=True)
+                              if (t_payload and t_payload.get("kind") != "UNCERTAIN") else "")
                     it = self.user_model.upsert_item(
                         category=cand.kind, key=cand.predicate or "fact",
                         value=cand.value, confidence=cand.confidence,
                         source_event_id=dev.event_id,
-                        source_text_excerpt=(cand.reason or "")[:500])
+                        source_text_excerpt=(cand.reason or "")[:500],
+                        temporal_uncertain=uncertain, temporal_json=t_json)
                     applied["declarations"].append(it.item_id)
                     applied["events"].append(dev.event_id)
+            # D4：uncertain 只标旗不落日期的候选也可能在同一句里以 uncertain 修饰
+            # PLAN 上文 —— 已在 upsert 分支处理；此处无额外动作。
         except Exception as e:
             log.warning("apply_user_message failed: %s", e)
         return applied

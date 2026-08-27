@@ -638,6 +638,9 @@ class Furina:
         #    使 C4 transition 事件能精确绑定触发它的 USER_MESSAGE 事件（event identity，
         #    而非文本相等）。
         q = self._direct_dialogue_queue()
+        # D4：canonical ingress 时间基准 —— 在记录 canonical USER_MESSAGE 的同一同步段
+        # 取一次，owner 语义效果与 resolver 共用它（等价于 U.created_at ±毫秒）。
+        ingress_ts = time.time()
         turn_id = q.reserve_turn(user_text=text)
         bridge = getattr(self, "_event_bridge", None)
         umsg_id = ""
@@ -673,7 +676,8 @@ class Furina:
                         cog.apply_user_message(text, channel="DIRECT_USER_TURN",
                                                turn_id=turn_id,
                                                source_event_id=umsg_id,
-                                               require_source_event=True)
+                                               require_source_event=True,
+                                               basis_ts=ingress_ts)
                     except Exception:
                         pass
                 else:

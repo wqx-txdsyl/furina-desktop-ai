@@ -34,11 +34,14 @@ class UserModelStore:
     # -------------------------------------------------- write
     def upsert_item(self, *, category: str, key: str, value: Any, confidence: float,
                     source_event_id: str = "", source_text_excerpt: str = "",
-                    valid_to: float = 0.0, temporal_uncertain: int = 0) -> UserModelItem:
+                    valid_to: float = 0.0, temporal_uncertain: int = 0,
+                    temporal_json: str = "") -> UserModelItem:
         """新增/更新 item。同 category+key 的旧 active item → superseded（不 overwrite 历史）。
 
         返回新 item。confidence 由调用方（deterministic extraction）给定，本层不猜。
         Phase 15D：temporal_uncertain=1 表示日期无法确定（绝不编日期）。
+        Phase 15 D4：temporal_json 为确定性解析载荷（resolver 在 canonical ingress
+        一次性解析；本层只持久化，不重解释、不生成时间）。
         """
         cat = category if category in CATEGORIES else "FACT"
         value_json = self._to_json(value)
@@ -53,20 +56,22 @@ class UserModelStore:
                 (now, now, source_event_id or "", (source_text_excerpt or "")[:200],
                  old.item_id))
         item_id = f"umi_{int(now*1000)}_{uuid.uuid4().hex[:6]}"
+        t_json = (temporal_json or "")[:1000]
         row = (item_id, cat, key, value_json, float(confidence), source_event_id,
                (source_text_excerpt or "")[:500], now, now, now, float(valid_to), "active",
-               int(temporal_uncertain or 0), now)
+               int(temporal_uncertain or 0), now, t_json)
         self._db.execute(
             "INSERT INTO user_model_items(item_id,category,key,value_json,confidence,"
             "source_event_id,source_text_excerpt,created_at,updated_at,valid_from,valid_to,status,"
-            "temporal_uncertain,declared_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            "temporal_uncertain,declared_at,temporal_json) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
         return UserModelItem(
             item_id=item_id, category=cat, key=key, value_json=value_json,
             confidence=float(confidence), source_event_id=source_event_id,
             source_text_excerpt=(source_text_excerpt or "")[:500],
             created_at=now, updated_at=now, valid_from=now, valid_to=float(valid_to),
-            status="active", temporal_uncertain=int(temporal_uncertain or 0), declared_at=now)
+            status="active", temporal_uncertain=int(temporal_uncertain or 0),
+            declared_at=now, temporal_json=t_json)
 
     # -------------------------------------------------- Phase 15D：PLAN 生命周期
     def set_plan_status(self, key: str, status: str, *, category: str = "PLAN",

@@ -181,6 +181,10 @@ _COGNITION_MIGRATIONS = [
      "transition_event_id"),
     ("ALTER TABLE user_model_items ADD COLUMN transition_reason TEXT NOT NULL DEFAULT ''",
      "transition_reason"),
+    # Phase 15 D4：确定性时间语义载荷（单 JSON 列；kind/tz/basis/起止/重复；
+    # uncertainty 走 temporal_uncertain 列。解析仅在 canonical ingress 一次完成）。
+    ("ALTER TABLE user_model_items ADD COLUMN temporal_json TEXT NOT NULL DEFAULT ''",
+     "temporal_json"),
 ]
 
 
