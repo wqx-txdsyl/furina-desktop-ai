@@ -66,24 +66,32 @@ class CognitiveContextAssembler:
 
         # Phase 15E：C3 回忆经 RetrievalRanker（authority/relevance/recency/importance/
         # strength/status/diversity），不 dump、不纯 cosine topK。
-        # D2：优先经 derived index 的 hybrid 候选（lexical∪vector → 权威解析），
-        # 再走既有 ranker；任何失败/无索引 → 回退原 retrieve 路径（fail-soft）。
+        # D2 + R6：hybrid 解析对象 与 权威 retrieve 候选 **合并去重**（mem_id）后交
+        # ranker —— derived 是增强而非独占闸门，绝不压制权威基线召回。
         from .retrieval.ranker import RetrievalRanker
         from .retrieval.hybrid import HybridRetriever
         ranker = RetrievalRanker()
         mems: List[Any] = []
         try:
+            pool: List[Any] = []
             if self._index is not None:
                 res = HybridRetriever(self._index, auto).candidates(
-                    query, limit=b["memories"])
-                pool = res["objects"] or None
-                if pool:
-                    mems = [m.content for m in ranker.rank_memories(
-                        pool, query=query, limit=b["memories"])]
-            if not mems:
+                    query, limit=b["memories"] * 2)
+                pool = list(res["objects"])
+            legacy = list(auto.retrieve(query=query, limit=b["memories"] * 4))
+            seen: set = set()
+            merged: List[Any] = []
+            for m in pool + legacy:
+                mid = getattr(m, "mem_id", None)
+                if mid in seen:
+                    continue
+                seen.add(mid)
+                merged.append(m)
+            if merged:
                 mems = [m.content for m in ranker.rank_memories(
-                    auto.retrieve(query=query, limit=b["memories"] * 4),
-                    query=query, limit=b["memories"])]
+                    merged, query=query, limit=b["memories"])]
+            if not mems:
+                mems = [m.content for m in auto.retrieve(query=query, limit=b["memories"])]
         except Exception:
             mems = []
             try:

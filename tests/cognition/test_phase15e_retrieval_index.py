@@ -41,10 +41,14 @@ def test_index_delete_does_not_touch_sources(tmp_path):
     after = {"events": hub.events.count(), "user_items": hub.user_model.count(),
              "memories": hub.autobiography.count(), "tasks": hub.agent_history.count()}
     assert before == after, "删除 derived index 不得触碰任何 source store"
-    # index 删除后 retrieval fallback 仍成功（cognition 不 broken）
+    # D2/R5（生命周期契约更新，closeout 披露）：删除后、任何 assemble 之前 lookup 为空
+    assert hub.lookup_index("陈奕迅") == []
+    # assemble 触发 lazy 重建（derived 可自动恢复；源数据仍不变）
     ctx = hub.assemble(query="陈奕迅")
     assert ctx is not None and ctx.user_model_items is not None
-    assert hub.lookup_index("陈奕迅") == []
+    assert hub.index.exists() and hub.lookup_index("陈奕迅")
+    assert {"events": hub.events.count(), "user_items": hub.user_model.count(),
+            "memories": hub.autobiography.count(), "tasks": hub.agent_history.count()} == before
     hub.close()
 
 

@@ -51,39 +51,47 @@ def test_d2_t1_lexical_retrieval_works(tmp_path):
     hub.close()
 
 
-def test_d2_t2_vector_stage_distinct_from_lexical():
-    from furina.cognition.retrieval.index import DerivedRetrievalIndex
-    from furina.cognition.retrieval.encoders import HashedLexicalVectorEncoder
-    idx = DerivedRetrievalIndex(encoder=HashedLexicalVectorEncoder(dim=64))
-    idx.build(memories=[type("M", (), {"mem_id": "m1", "content": "喜欢喝冷萃咖啡",
-                                       "timestamp": 0.0, "status": "active"}),
-                        type("M", (), {"mem_id": "m2", "content": "冷萃咖啡做法",
-                                       "timestamp": 0.0, "status": "active"})])
-    lex = idx.lexical_lookup("冷萃咖啡")
-    vec = idx.vector_lookup("冷萃咖啡")
-    assert lex and vec
-    assert {r["ref_id"] for r in lex} == {"m1", "m2"}
-    assert {r["ref_id"] for r in vec} == {"m1", "m2"}
-    assert all(r["vec"] is not None and r["vec"] > 0 for r in vec)
-    # 证明向量分数 ≠ bigram 计分（不同表示/算法）
-    assert vec[0]["vec"] != lex[0]["lex"]
-    # 语义型 paraphrase 对 bigram 计分为 0，但向量仍给非零信号
-    para = idx.vector_lookup("我很喜欢冰美式咖啡")
-    assert any(r["ref_id"] == "m1" for r in para) or True  # 弱断言：向量路径确实执行
-    # 显式证明 encode 被调用：provider 包装计数
-    calls = {"n": 0}
+def _semantic_provider():
+    """确定性“语义”provider：词面不相交但语义等价的短语 → 相似向量。"""
     from furina.cognition.retrieval.encoders import ProviderVectorEncoder
+    table = {
+        "冷萃咖啡": [1.0, 0.0, 0.0, 0.0],
+        "冰美式":   [0.98, 0.0, 0.0, 0.0],
+        "户外骑行": [0.0, 1.0, 0.0, 0.0],
+        "周报":     [0.0, 0.0, 1.0, 0.0],
+    }
 
-    def fake(texts):
-        calls["n"] += 1
-        return [[1.0] * 8 for _ in texts]
+    def enc(texts):
+        return [table.get(x, [0.0, 0.0, 0.0, 0.0]) for x in texts]
+    return ProviderVectorEncoder(enc, dim=4)
 
-    idx2 = DerivedRetrievalIndex(encoder=ProviderVectorEncoder(fake, dim=8))
-    idx2.build(memories=[type("M", (), {"mem_id": "a", "content": "x",
-                                        "timestamp": 0.0, "status": "active"})])
-    assert calls["n"] == 1, "build 必须调用 encoder"
-    idx2.vector_lookup("x")
-    assert calls["n"] >= 2, "查询路径必须再次调用 encoder"
+
+def test_d2_t2_semantic_paraphrase_requires_vector_signal():
+    """R1：真语义 paraphrase —— lexical 零命中（无共同 bigram），vector provider 命中，
+    hybrid 含 vector 路径。不允许任何 or True / isinstance 弱断言。"""
+    from furina.cognition.retrieval.index import DerivedRetrievalIndex
+    idx = DerivedRetrievalIndex(encoder=_semantic_provider())
+    idx.build(memories=[
+        type("M", (), {"mem_id": "m_coffee", "content": "冷萃咖啡",
+                       "timestamp": 0.0, "status": "active"}),
+        type("M", (), {"mem_id": "m_bike", "content": "户外骑行",
+                       "timestamp": 0.0, "status": "active"}),
+    ])
+    query = "冰美式"                       # 与 冷萃咖啡 无任何共同字符 bigram
+    lex = idx.lexical_lookup(query)
+    assert all(r["ref_id"] != "m_coffee" for r in lex),         "词法路径不得命中（paraphrase 无词面重叠）"
+    vec = idx.vector_lookup(query)
+    assert any(r["ref_id"] == "m_coffee" for r in vec),         "语义 provider 向量必须命中目标（且该命中来自向量路径）"
+    assert all(r["lex"] is None for r in vec), "vector 命中不得携带 lex 分数"
+    hy = idx.hybrid_lookup(query)
+    target = next(r for r in hy if r["ref_id"] == "m_coffee")
+    assert "vector" in target["paths"], "hybrid 目标必须带 vector 路径标记"
+    # 反向控制：纯词法索引（hashed 基线）对该 paraphrase 零命中
+    lex_only = DerivedRetrievalIndex()
+    lex_only.build(memories=[
+        type("M", (), {"mem_id": "m_coffee", "content": "冷萃咖啡",
+                       "timestamp": 0.0, "status": "active"})])
+    assert all(r["ref_id"] != "m_coffee" for r in lex_only.hybrid_lookup(query))
 
 
 def test_d2_t3_hybrid_union_dedupes(tmp_path):

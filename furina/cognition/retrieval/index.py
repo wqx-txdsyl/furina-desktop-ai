@@ -69,7 +69,9 @@ class DerivedRetrievalIndex:
         self._encoder = encoder or HashedLexicalVectorEncoder()
         self._items: List[Dict[str, Any]] = []       # [{store, ref_id, text, keywords, vec, ts, status}]
         self._loaded = False
-        self._vector_invalid = False                 # 版本/维度不符 → 向量路径关闭（lex 可用）
+        self._vector_invalid = False                 # 版本/后端/维度不符 → 向量路径关闭（lex 可用）
+        self._vector_invalid_reason = ""
+        self._vector_unavailable = False             # build 时编码失败/持久化标记 → 无可用向量
         self._corrupt = False                        # 加载损坏 → 视为缺失
         self._truncated = 0
         self._last_vector_error = ""
@@ -81,6 +83,8 @@ class DerivedRetrievalIndex:
         self._items = []
         self._truncated = 0
         self._vector_invalid = False
+        self._vector_invalid_reason = ""
+        self._vector_unavailable = False
         self._last_vector_error = ""
         raw: List[Dict[str, Any]] = []
         for ep in (canon_episodes or []):
@@ -120,14 +124,25 @@ class DerivedRetrievalIndex:
         if len(raw) > MAX_INDEXED_ITEMS:
             self._truncated = len(raw) - MAX_INDEXED_ITEMS
             raw = raw[:MAX_INDEXED_ITEMS]
-        # 向量编码（失败 → 该批全部退化为无向量条目，lex 仍可用；可观察）
+        # 向量编码（R4/R7：build 即校验/归一化 —— 畸形向量置 None 不落库；
+        # 全部畸形 → vector_unavailable=True，诚实退化到 lexical）
         try:
             vecs = self._encoder.encode([d["text"] for d in raw])
+            unusable = 0
             for d, v in zip(raw, vecs):
-                d["vec"] = list(v)
+                dv = self._norm_vector(v)
+                if dv is None:
+                    d["vec"] = None
+                    unusable += 1
+                else:
+                    d["vec"] = [float(x) for x in dv]
+            if raw and unusable == len(raw):
+                self._vector_unavailable = True
+                self._last_vector_error = "no usable vectors encoded"
         except Exception as e:
             self._last_vector_error = f"{type(e).__name__}: {e}"
-            log.warning("D2 vector encode failed（lexical 继续）: %s", e)
+            self._vector_unavailable = True            # R7：诚实标记无可用向量（可持久化）
+            log.warning("D2 vector encode failed（lexical 继续，vector 关闭）: %s", e)
             for d in raw:
                 d["vec"] = None
         self._items = raw
@@ -138,6 +153,8 @@ class DerivedRetrievalIndex:
                     "marker": INDEX_MARKER, "version": INDEX_VERSION,
                     "built_at": time.time(), "dim": self._dim(),
                     "backend": getattr(self._encoder, "kind", "UNKNOWN"),
+                    "vector_ok": (not self._vector_unavailable
+                                  and not self._vector_invalid),
                     "truncated": self._truncated,
                     "items": self._items,
                 }, ensure_ascii=False), encoding="utf-8")
@@ -158,6 +175,8 @@ class DerivedRetrievalIndex:
         self._items = []
         self._loaded = False
         self._vector_invalid = False
+        self._vector_invalid_reason = ""
+        self._vector_unavailable = False
         self._corrupt = False
         if self._path is not None:
             try:
@@ -176,13 +195,25 @@ class DerivedRetrievalIndex:
             self._items = items
             self._loaded = True
             self._corrupt = False
+            self._vector_unavailable = bool(not data.get("vector_ok", True))
+            # R3 兼容契约：version / backend / dim 任一不符 → 持久化向量不可用
+            # （lexical 文本/引用投影仍可用；向量绝不混用）。原因暴露在 status。
+            ver = str(data.get("version", ""))
+            backend = str(data.get("backend", ""))
             dim = int(data.get("dim", 0) or 0)
-            if dim and self._dim() and dim != self._dim():
-                # 维度/版本不符 → 向量路径关闭（fail-soft），lexical 继续；
-                # 重建即可恢复（T11）。
+            rt_kind = str(getattr(self._encoder, "kind", "UNKNOWN"))
+            if ver and ver != INDEX_VERSION:
                 self._vector_invalid = True
-                log.warning("D2 index dimension mismatch %s != %s → vector off",
-                            dim, self._dim())
+                self._vector_invalid_reason = f"version_mismatch:{ver}!={INDEX_VERSION}"
+                log.warning("D2 index version mismatch %s != %s → vector off", ver, INDEX_VERSION)
+            elif backend and backend != rt_kind:
+                self._vector_invalid = True
+                self._vector_invalid_reason = f"backend_mismatch:{backend}!={rt_kind}"
+                log.warning("D2 index backend mismatch %s != %s → vector off", backend, rt_kind)
+            elif dim and self._dim() and dim != self._dim():
+                self._vector_invalid = True
+                self._vector_invalid_reason = f"dimension_mismatch:{dim}!={self._dim()}"
+                log.warning("D2 index dimension mismatch %s != %s → vector off", dim, self._dim())
         except Exception as e:
             log.warning("index load failed（视为缺失 → fallback）: %s", e)
             self._items = []
@@ -200,13 +231,19 @@ class DerivedRetrievalIndex:
 
     def status(self) -> Dict[str, Any]:
         self._ensure_loaded()
+        usable_vecs = sum(1 for it in self._items if it.get("vec") is not None)
         return {"derived": True, "rebuildable": True, "non_authoritative": True,
                 "not_an_eighth_truth_store": True,
                 "exists": self.exists(), "item_count": self.count(),
                 "version": INDEX_VERSION, "backend": getattr(self._encoder, "kind", "UNKNOWN"),
                 "dim": self._dim(), "truncated": self._truncated,
-                "vector_enabled": bool(self.count()) and not self._vector_invalid,
-                "vector_invalid": self._vector_invalid, "corrupt": self._corrupt,
+                "vector_enabled": bool(usable_vecs) and not self._vector_invalid
+                and not self._vector_unavailable,
+                "vector_usable_count": usable_vecs,
+                "vector_invalid": self._vector_invalid,
+                "vector_invalid_reason": self._vector_invalid_reason,
+                "vector_unavailable": self._vector_unavailable,
+                "corrupt": self._corrupt,
                 "last_vector_error": self._last_vector_error}
 
     # -------------------------------------------------- lexical path（DETERMINISTIC LEXICAL）
@@ -227,31 +264,32 @@ class DerivedRetrievalIndex:
                  "vec": None}
                 for h, it in scored[:top_k]]
 
-    # -------------------------------------------------- vector path（cosine，encoder 生成）
+    # -------------------------------------------------- vector path（TRUE COSINE；检索层归一化）
     def vector_lookup(self, query: str, top_k: int = VECTOR_TOP_K) -> List[Dict[str, Any]]:
-        """cosine 相似度候选（向量由注入 encoder 生成；HASHED_LEXICAL_VECTOR 或
-        provider 语义向量；两者都**不是** truth）。失败 → []（fail-soft，可观察）。"""
+        """cosine 相似度候选（R4：检索边界统一 L2 归一 —— 不依赖 provider 是否已归一；
+        结果恒在 [-1,1]；数量/维度/有限值校验，畸形输入 fail-soft 到空，lexical 继续）。"""
         self._ensure_loaded()
-        if self._vector_invalid or not self._items:
+        if self._vector_invalid or self._vector_unavailable or not self._items:
             return []
         try:
-            qv = np.asarray(self._encoder.encode([query])[0], dtype=np.float32)
+            qv = self._norm_vector(self._encoder.encode([query])[0])
         except Exception as e:
             self._last_vector_error = f"{type(e).__name__}: {e}"
             log.warning("D2 query encode failed（vector off）: %s", e)
+            return []
+        if qv is None:
+            self._last_vector_error = "malformed query vector"
             return []
         scored = []
         for it in self._items:
             v = it.get("vec")
             if v is None:
                 continue
-            try:
-                arr = np.asarray(v, dtype=np.float32)
-                if arr.shape[0] != qv.shape[0]:
-                    continue                       # 坏向量条目跳过
-                sim = float(np.dot(qv, arr))
-            except Exception:
-                continue
+            dv = self._norm_vector(v)
+            if dv is None:
+                continue                                # 畸形条目跳过（不产生误导状态）
+            sim = float(np.dot(qv, dv))
+            sim = max(-1.0, min(1.0, sim))              # 数值容差夹紧
             if VECTOR_MIN_SIM and sim < VECTOR_MIN_SIM:
                 continue
             scored.append((sim, it))
@@ -259,6 +297,22 @@ class DerivedRetrievalIndex:
         return [{"store": it["store"], "ref_id": it["ref_id"], "lex": None,
                  "vec": float(s)}
                 for s, it in scored[:top_k]]
+
+    @staticmethod
+    def _norm_vector(raw) -> "Optional[np.ndarray]":
+        """规范化 + 校验（一维、有限值、非零 L2 归一）；畸形返回 None。"""
+        try:
+            arr = np.asarray(raw, dtype=np.float32)
+            if arr.ndim != 1 or arr.size == 0:
+                return None
+            if not np.all(np.isfinite(arr)):
+                return None
+            norm = float(np.linalg.norm(arr))
+            if norm <= 1e-12:
+                return None
+            return arr / norm
+        except Exception:
+            return None
 
     # -------------------------------------------------- hybrid union（dedupe by store+ref_id）
     def hybrid_lookup(self, query: str, top_k: int = HYBRID_UNION_CAP) -> List[Dict[str, Any]]:

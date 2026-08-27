@@ -189,6 +189,7 @@ class CognitionHub:
         # Phase 15E：Derived Semantic Vector Index（DERIVED/REBUILDABLE/NON-AUTHORITATIVE）
         from .retrieval import SemanticVectorIndex, default_index_path
         self.index = SemanticVectorIndex(index_path=default_index_path(self._db._path))
+        self._index_fingerprint = ""
         self.assembler = CognitiveContextAssembler(
             canon_identity=self.canon_identity,
             canon_history=self.canon_history,
@@ -639,9 +640,48 @@ class CognitionHub:
     def assemble(self, *, query: str = "", topic: str = "",
                  current_facts: Optional[Dict[str, Any]] = None,
                  trust: float = 0.5) -> CognitiveContext:
-        """owner ingress：构造有界 immutable cognitive context。"""
+        """owner ingress：构造有界 immutable cognitive context。
+
+        R5：首次/内容变更时自动确保 derived index 就绪（lazy；指纹未变则零成本跳过，
+        绝不在 60fps 循环重建）。"""
+        self.ensure_index_current()
         return self.assembler.assemble(query=query, topic=topic,
                                        current_facts=current_facts, trust=trust)
+
+    # -------------------------------------------------- R5：lazy derived-index lifecycle
+    def _source_fingerprint(self) -> str:
+        """廉价确定性源指纹（计数 + 最近时间戳；无 embedding 成本）。"""
+        import hashlib as _hl
+        try:
+            c3n = self.autobiography.count() if self.autobiography else 0
+            c4n = self.user_model.count(status="all")
+            t3 = 0.0
+            recent = self.autobiography.recent(1) if self.autobiography else []
+            if recent:
+                t3 = float(getattr(recent[0], "timestamp", 0) or 0)
+            t4 = 0.0
+            rows = self._db.query_all("SELECT MAX(updated_at) AS t FROM user_model_items")
+            if rows and rows[0]["t"]:
+                t4 = float(rows[0]["t"])
+            t7 = 0.0
+            tasks = self.agent_history.query_recent(limit=1)
+            if tasks:
+                t7 = float(getattr(tasks[0], "created_at", 0) or 0)
+        except Exception:
+            return ""
+        fp = f"{c3n}:{c4n}:{t3}:{t4}:{t7}"
+        return _hl.blake2b(fp.encode("utf-8"), digest_size=16).hexdigest()
+
+    def ensure_index_current(self) -> bool:
+        """derived index 懒就绪：指纹变化或缺失 → build；未变化 → 跳过（不重建）。"""
+        fp = self._source_fingerprint()
+        if not fp:
+            return False
+        if self._index_fingerprint == fp and self.index.exists():
+            return True
+        self.build_index()
+        self._index_fingerprint = fp
+        return True
 
     # -------------------------------------------------- Phase 15E：Derived Index 管理
     def build_index(self) -> int:

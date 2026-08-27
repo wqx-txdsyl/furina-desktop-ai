@@ -143,6 +143,37 @@ local SHA == remote SHA 于 push 后校验（feature/phase15-d2-hybrid-retrieval
 未 merge 进 integration；未开始 D3/D5/Phase16
 ```
 
+## 13. External Reviewer Residual Closure（Review = NEEDS_NARROW_PATCH → 已闭合）
+
+针对 2b29cb6 的七项残余闭合（同分支追加 commit）。**措辞修正**：此前“零弱化断言”
+表述不准确（原 T2 含 `or True` 无条件断言，本轮已移除）；version-mismatch 仅测维度
+的表述已由 R3/R4/R5/R6 全覆盖；hashing 稳定性、cosine 语义、生产生命周期、
+vector 真状态分别由 R2/R7/R9/R12 钉死。
+
+| ID | 内容 | 实现 / 证据 |
+|---|---|---|
+| R1 | 删除 false-green T2 | `or True` / `isinstance(list)` 弱断言移除；重写为真语义 paraphrase：doc「冷萃咖啡」vs query「冰美式」（零共同 bigram）→ lexical 零命中、ProviderVectorEncoder 向量命中、hybrid 目标 paths 含 "vector"、纯词法索引反向零命中 |
+| R2 | 跨进程稳定哈希 | `HashedLexicalVectorEncoder` 弃用内置 `hash()`（进程盐化），改用 blake2b 稳定摘要且 seed 参与；移除无用伪随机字段。R2 子进程（PYTHONHASHSEED=1 vs 999）逐字节一致 |
+| R3 | 持久化索引跨进程直载 | R3：进程 A build 持久化 → 进程 B 以不同 PYTHONHASHSEED 直载（**不 rebuild**）→ vector_lookup 结果逐位一致 |
+| R4/R5/R6 | 兼容契约 | load 校验 version / backend / dim 三元组：任一不符 → `vector_invalid=True` + 精确 reason + 持久化向量禁用（lexical 可用，重建即恢复）；不再仅查 dim |
+| R7/R8 | 真 cosine 契约 | 检索层统一 L2 归一（`_norm_vector`：一维/有限值/非零校验）；provider 非单位向量 `[10,0]·[2,0]→1.0`（非点积 20）、正交→0；畸形向量 build 即滤（全废→`vector_unavailable=True`）→ fail-soft 到 lexical |
+| R5/R9/R10 | 生产索引生命周期 | `ensure_index_current()`：廉价源指纹（计数+最近时间戳，blake2b）→ 首次 assemble 自动构建、指纹未变零重建（R10 计数证明）；app→hub.assemble 生产路径即触发（R9） |
+| R6/R11 | 不压制权威召回 | C3 桶改为「hybrid 解析对象 ∪ 权威 retrieve 候选」按 mem_id 去重后交 ranker（derived=增强非独占闸门）；R11：索引建成后新增权威记忆在弱候选非空时仍进入上下文 |
+| R7/R12 | build 失败真状态 | build 编码异常 → `vector_unavailable=True` + `vector_ok:False` 持久化；重启 load 保持 vector_enabled=False 且可观察（R12） |
+
+**Gates**：
+```text
+Gate A  test_phase15_d2_hybrid_retrieval.py + test_phase15_d2_residual.py   32 passed
+Gate B/C/D  检索/context + Phase14 provenance + D4 temporal                   108 passed
+Gate E  tests/cognition 全目录                                                254 passed
+Gate F  FULL SUITE ×2                                                      1319 passed / 0 failed（307s, 313s）
+```
+既有 phase15e 删除用例按 R5 契约更新（删除后 lookup 为空 → assemble 懒重建 → 恢复，
+source 计数全程不变）；其余 T1-T20 与全部回归锁原样保持。
+
+静态复审：`hash(` 仅存于 docstring（生产零内置哈希）；`np.dot` 单一调用点且双端已
+归一化；测试文件无 `or True`；PYTHONHASHSEED 无生产依赖；无新 source-store writer；
+无 Chroma/新重依赖。
 ## 12. Final Line
 
 ```text
