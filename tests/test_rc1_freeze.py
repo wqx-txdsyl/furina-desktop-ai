@@ -209,7 +209,12 @@ def test_relationship_single_writer():
 
 
 def test_relationship_event_applied_once():
-    """一次用户正向事件 → 关系引擎恰好 apply 一次（无重复）。"""
+    """一次用户正向事件 → 关系引擎恰好 apply 一次（无重复）。
+
+    Phase 15 D5 anti-spam 后，同一窗口内第二次 apply 的边际确定性递减（×0.5），
+    因此两次增量不再相等；改为断言精确单次 delta（首次=完整、第二次=×0.5）——
+    若事件被重复路由，首次增量会是 2×，此断言比"相等"更严格地锁定恰好一次。
+    """
     store = MemoryStore(_tmp_db())
     me = MemoryEngine(EventBus(), store)
     rel = RelationshipEngine(me.relationship)
@@ -220,7 +225,8 @@ def test_relationship_event_applied_once():
     # 参考：重复 apply 两次会更大；这里验证一次事件 → 精确一次增量
     rel.apply(EV_POSITIVE_TOUCH)
     r2 = me.relationship.comfort
-    assert (r1 - r0) == pytest.approx(r2 - r1), "每次 apply 应产生一致的增量"
+    assert (r1 - r0) == pytest.approx(6.0 * 0.7), "首次 = 完整单次 delta（恰好一次，无重复）"
+    assert (r2 - r1) == pytest.approx(6.0 * 0.7 * 0.5), "第二次边际递减（D5 anti-spam，确定性）"
     assert r1 > r0, "正向事件 comfort 应上升"
 
 

@@ -16,8 +16,9 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from furina.memory.memory_types import RelationshipState
 
@@ -34,6 +35,32 @@ EV_IGNORE = "ignore"                          # 用户忽略
 EV_CANCEL = "cancel"                          # 用户取消请求
 EV_FAILED_HELP = "failed_help"                # 帮忙失败
 EV_NEGATIVE_RESPONSE = "negative_response"
+
+# D5 — 事件族（anti-spam 饱和的单位；**不同族绝不共享饱和计数**）。
+# positive_touch（pet-like）独立成族：猛摸不会错误压制 successful_help / 社交正向。
+# help 族成功/失败共享饱和（同属"帮忙互动"）；负向事件统一为 negative 族。
+EVENT_FAMILIES: Dict[str, str] = {
+    EV_POSITIVE_RESPONSE: "positive_social",
+    EV_USER_INITIATED: "positive_social",
+    EV_ACCEPTED_INVITATION: "positive_social",
+    EV_LONG_POSITIVE_SESSION: "positive_social",
+    EV_POSITIVE_TOUCH: "positive_touch",
+    EV_SUCCESSFUL_HELP: "help",
+    EV_FAILED_HELP: "help",
+    EV_REJECT: "negative",
+    EV_IGNORE: "negative",
+    EV_CANCEL: "negative",
+    EV_NEGATIVE_RESPONSE: "negative",
+}
+
+# D5 参数：短窗口（秒）+ 窗口内每次同族事件的递减底数（均可注入；确定性）
+DEFAULT_ANTISPAM_WINDOW_SECONDS = 120.0
+DEFAULT_DIMINISH_BASE = 0.5
+
+
+def event_family(event: str) -> str:
+    """事件 → 饱和族。未知事件按自身 event 名成独立族（其 delta 为空 → 天然 no-op）。"""
+    return EVENT_FAMILIES.get(event, event)
 
 # canonical raw 单位（C-R2 §3）。任何生产消费者（Dialogue/Embodiment/Motivation/Persona appraisal）
 # 必须只经由 relationship_factors() 拿归一化 0..1；**禁止**在别处重复实现单位转换。
@@ -92,8 +119,18 @@ class RelationshipEngine:
     LONG_TERM = ("familiarity", "trust", "comfort")
     # 短期维度：变化快、恢复快
     SHORT_TERM = ("annoyance", "interaction_tolerance", "social_confidence")
-    def __init__(self, state: Optional[RelationshipState] = None) -> None:
+
+    def __init__(self, state: Optional[RelationshipState] = None, *,
+                 window_seconds: float = DEFAULT_ANTISPAM_WINDOW_SECONDS,
+                 diminish_base: float = DEFAULT_DIMINISH_BASE,
+                 time_fn: Optional[Any] = None) -> None:
         self.state = state or RelationshipState()
+        # D5 anti-spam（有界 operational 状态，纯内存；无 schema、无持久化）：
+        # window=0 → 关闭饱和（恢复旧线性行为，仅用于测试/诊断对照）。
+        self._window = float(max(0.0, window_seconds))
+        self._base = float(max(0.0, min(1.0, diminish_base)))
+        self._time_fn = time_fn or time.monotonic
+        self._family_hits: Dict[str, List[float]] = {}   # family → 窗口内事件时间戳
 
     # -------------------------------------------------- 归一化 consumer 契约（C-R2 唯一实现）
     @property
@@ -135,18 +172,44 @@ class RelationshipEngine:
             d = {"annoyance": 5.0, "interaction_tolerance": -4.0, "social_confidence": -3.5}
         return d
 
+    # -------------------------------------------------- D5 anti-spam：事件族饱和（deterministic/bounded/time-aware）
+    def _now(self) -> float:
+        try:
+            return float(self._time_fn())
+        except Exception:
+            return 0.0
+
+    def _family_multiplier(self, family: str) -> float:
+        """窗口内同族已发生次数 k → 本次影响乘数 base**k（首次=1.0，完全不受削弱）。
+
+        rolling window：旧事件随时间逐出 → 窗口过去后该类事件**逐步**恢复正常影响。
+        每次调用都会把本次事件的时间戳记入该族窗口（记录发生在计算乘数之后）。
+        """
+        if self._window <= 0:
+            return 1.0
+        now = self._now()
+        hits = self._family_hits.setdefault(family, [])
+        hits[:] = [ts for ts in hits if now - ts < self._window]
+        k = len(hits)
+        hits.append(now)
+        return self._base ** k
+
     def apply(self, event: str, strength: float = 1.0, reason: str = "") -> Dict[str, float]:
-        """应用一个关系事件（渐进）。返回实际 delta。"""
+        """应用一个关系事件（渐进）。返回实际 delta（含 anti-spam 乘数；strength 参与实际落地）。"""
         delta = self._event_delta(event)
+        if not delta:
+            return {}                                   # 未知事件安全 no-op（不污染饱和账本）
+        # D5：短窗口内同族重复 → 本次影响确定性递减（首次=1.0；总影响有界 ≈ 1/(1-base) 倍单次）
+        mult = self._family_multiplier(event_family(event))
         # 长期维度慢速：familiarity/comfort 可较快积累，trust 格外慢（不能一次刷满）
         for k, v in delta.items():
             if k == "trust":
                 v *= 0.5      # trust 格外慢速（需要长期稳定正向）
             elif k in self.LONG_TERM:
                 v *= 0.7
-            self._bump(k, v * strength)
+            self._bump(k, v * strength * mult)
         self.state.last_interaction_ts = self.state.last_interaction_ts
-        return {k: round(v, 3) for k, v in delta.items()}
+        return {k: round(v * mult, 3) for k, v in delta.items()}
 
     def _bump(self, key: str, delta: float) -> None:
         """按字段 unit 夹紧（C-R2 §4）：rate 字段 0..1；0-100 字段 0..100；计数 ≥0；时间戳原样。"""
