@@ -26,15 +26,20 @@ Document path:
 Phase 16 — Work Sovereignty & Verified Agent Execution
 ```
 
-目标（一句话）：让 Furina 在**用户意愿之外**、由 Furina 自身主权接单（WorkContract），
-通过**通用 backend 协议 + 首个 Hermes 适配器**执行任务，并对执行结果做**独立校验**
-后，才以 `COMPLETED_VERIFIED` 写入 C7 —— 全链路禁止 backend 自证完成、禁止越权记忆、
-禁止抢占用户可见语音。
+目标（一句话）：在**用户授权边界内**建立 Furina 自己拥有的 WorkContract、执行状态、
+技术路由、审批、验证与真值提交链；通过**通用 backend 协议 + 首个 Hermes 适配器**
+执行已授权任务，并且只有独立校验通过后，才以 `COMPLETED_VERIFIED` 写入 C7。
+全链路禁止 backend 自证完成、禁止越权记忆、禁止抢占用户可见表达。
+
+Phase 16 建立“工作主权的工程底座”，但不假装已经拥有 Phase 17 的角色意愿：本阶段
+只执行用户已提出且已授权、通过机制校验的 WorkContract；Furina 是否主观愿意接单、
+拒绝或协商，仍由 Phase 17 决策。
 
 本阶段不做（归属后续阶段，见 §16）：
 
 - 意愿/拒绝决策器（willingness decision engine）→ Phase 17 Character Agency
-- backend 选择策略（哪家 backend 由 Furina 主动选定）→ Phase 17
+- 角色主观 backend 偏好/选择策略 → Phase 17；能力、健康、用户指定与 contract 约束下的
+  **确定性技术路由**属于 Phase 16
 - 渲染/身体/TTS/ASR/桌面宠物体 → Phase 20 Embodiment（严格排除，见 §15）
 
 ## 2. Frozen Baseline & Branch Protocol
@@ -61,8 +66,8 @@ task branch → implementation → tests → external reviewer PASS
 → 下一个 task 从新的 accepted integration SHA 切出
 ```
 
-- Phase 15 未宣告 PASS（仅 READY_FOR_FINAL_REVIEW）不影响本计划落盘；但**正式 D1 实施
-  以外部 reviewer 签发 PHASE_15_FINAL_GATE = PASS 为前提**。
+- Phase 15 已由外部 reviewer 签发 `PHASE_15_FINAL_GATE = PASS`，且 final-gate 文档已
+  `--ff-only` 集成到上述 SHA；Phase 16 实施前置条件已满足，Phase 15 保持 CLOSED/FROZEN。
 
 ## 3. 输入来源（Sources）—— 权威 / 非权威
 
@@ -184,8 +189,8 @@ furina/agent/planner_v2.py     Planner V2 + deterministic fallback
 | 16E | Backend Event Normalization | backend 事件/状态归一词汇表（对齐 hermes 词表） | 16B | 4 |
 | 16C | Hermes Capability Probe + Runs Adapter | 首个 adapter（probe/submit/SSE/stop/approval 转发） | 16B, 16D, 16E | 5 |
 | 16F | Independent Verification + Repair | 独立校验 + bounded repair loop | 16E, 16C（证据通道） | 6 |
-| 16G | C7/C6 Integration | verified → C7 COMPLETED_VERIFIED；C6 provenance；C3 默认关 | 16F, 16E | 7 |
-| 16H | Cancellation/Crash/Restart/Idempotency | UNKNOWN 恢复、contract_id 幂等、TOOL 背压 | 16G（幂等键落 C7） | 8 |
+| 16H | Cancellation/Crash/Restart/Idempotency | durable ledger、UNKNOWN 恢复、contract_id 幂等、TOOL 背压 | 16F, 16E, 16C | 7 |
+| 16G | C7/C6 Integration | verified → C7 COMPLETED_VERIFIED；exactly-once；C6 provenance；C3 默认关 | 16F, 16H | 8 |
 | 16I | Integrated Work Sovereignty Gate | G-S1 Single Mouth、G-S2 隔离哨兵、整体 Gate | 16A–16H | 9 |
 
 依赖原则：只允许**正向依赖**（低序号被高序号依赖），禁止反向依赖导致返工。
@@ -193,7 +198,7 @@ furina/agent/planner_v2.py     Planner V2 + deterministic fallback
 锁定实施顺序（Delta 顺序）：
 
 ```text
-16A → 16B → 16D → 16E → 16C → 16F → 16G → 16H → 16I
+16A → 16B → 16D → 16E → 16C → 16F → 16H → 16G → 16I
 ```
 
 每步独立 brief + 外部 reviewer PASS 后才能从更新后的 integration SHA 切下一个 Delta。
@@ -229,15 +234,16 @@ UNKNOWN / BLOCKED_APPROVAL / VERIFYING / REPAIRING / BACKEND_DONE_UNVERIFIED
 ## 6. 技术路由 / Phase 17 意愿决策边界
 
 ```text
-Phase 16（本阶段，技术路由）：
+Phase 16（本阶段，确定性技术路由）：
   - 通用 ExecutionBackend 协议 + 注册表（安装态/健康态/能力探测）
   - Hermes 作为第一个 backend adapter（16C）
-  - WorkContract 数据契约 + 拒绝/接单的"时机"纪律（backend 句柄只在 contract signed 后创建）
+  - WorkContract 数据契约 + 机制接纳纪律（backend 句柄只在 contract authorized 后创建）
+  - 按用户明确指定、allowed_backends、能力、健康、权限与预算做确定性 backend 路由
   - 独立校验 / C7 写入 / 幂等 / 恢复（全部确定性与规则面）
 
 Phase 17（后续，Character Agency / Work Willingness 正式行为）：
   - willingness 判定（Furina 是否愿意接单 / 拒绝 / 罢工）
-  - backend 选择策略（依据 16B 的能力探测数据做 agency 级路由）
+  - 角色主观 backend 偏好（依据人格、关系、意愿做 agency 级取舍）
   - 关系气候 → 行为策略（Phase 15 closeout 已永久延后的 P17-D2）
 ```
 
@@ -246,8 +252,8 @@ Phase 17（后续，Character Agency / Work Willingness 正式行为）：
 1. **WorkContract 不包含 willingness decision**（见 §7 字段表）；
 2. Phase 16 的拒绝只发生在**机制层**（无审批通道 / 能力缺失 / contract 违约），
    不实现"Furina 主观不愿意"的决策器；
-3. Phase 16 提供 backend 能力探测数据（16B registry + 16C probe），**不做**"选谁"的
-   agency 判定；
+3. Phase 16 可以确定性地选出满足 contract 的可用 backend，但不得依据人格、情绪、
+   关系或“喜不喜欢”做选择；这些 agency 因素属于 Phase 17；
 4. Phase 16 新工作域（§4.5）不属于 C1-C7 cognition stores；其任何数据
    **不得成为 Persona / Memory / Relationship 的 truth**（C1/C4/C5 真值依旧只由
    既有 owner 产生；G-S2 哨兵延续）。
@@ -258,20 +264,26 @@ WorkContract 是 Phase 16 唯一原创核心（FURINA-NATIVE，外部六仓均�
 `_night_external_recon_raw.md` §1/§8）。**本阶段只定义数据契约，不写决策器**
 （"16 内只定义数据契约不写决策器"——night 提案笔误修正版）。
 
-锁定字段：
+锁定最小字段（允许 16A 在不改变语义的前提下细化类型与命名）：
 
 ```text
-canonical_user_request   用户原始请求原文（canonical U 链，含 source_event_id）
-commitment_scope         Furina 承诺范围声明（可完成/不承诺项）
-time_budget              时间预算
-allowed_backends         允许后端集合（从 16B registry 约束）
-verification_standard    验证标准占位（16F 实施后填实）
-grant_permanent          approval 永久授权显式开关（默认 false，见 16D）
-contract_id              稳定幂等键（16H 使用；与 C7 经 binding/provenance 关联，
-                        见 §4.5 —— 工作域 ledger + C6 事件链，**不新增 C7 列**）
+contract_id              稳定幂等键；不可由 backend 改写
+contract_version/hash    不可变版本与内容摘要；重试不允许静默改约
+canonical_user_request   用户原始请求原文（canonical U 链）
+objective                可验证目标
+commitment_scope         明确包含项 / 排除项
+workspace_scope          允许读取/写入的显式工作区边界
+allowed_capabilities     允许使用的能力集合
+allowed_backends         用户允许的 backend 集合；技术路由不得越过
+time/cost/attempt_budget 时间、成本、尝试次数硬预算
+artifact_expectations    预期产物与归属
+verification_standard    可执行验收标准；16F 消费，不由 backend 宣告满足
+approval_policy_ref      指向 16D 授权策略/授权记录；不是全局布尔开关
+source_event_id          canonical 用户请求证据
 ```
 
-不含（禁止出现）：willingness 评分、拒绝理由生成、backend 偏好、情绪/亲密度。
+不含（禁止出现）：willingness 评分、拒绝理由生成、角色主观 backend 偏好、情绪/亲密度、
+无范围的 `grant_permanent` 布尔开关。
 
 ## 8. 16B / 16C — 通用 Backend 协议 + Hermes 首适配器
 
@@ -279,7 +291,7 @@ contract_id              稳定幂等键（16H 使用；与 C7 经 binding/prove
 
 ```text
 注册表面（静态能力/安装态）   —— 借鉴 CoPet AgentAdapter trait 范式：
-    is_installed / install / uninstall / health（注意：installed != healthy）
+    descriptor / is_installed / health（注意：installed != healthy）
 运行协议面（run 面）          —— 最小协议面：
     probe() / submit(contract) / events() / stop(id)
 ```
@@ -287,35 +299,41 @@ contract_id              稳定幂等键（16H 使用；与 C7 经 binding/prove
 - Native backend = Phase 14 本地 Agent 工具栈的适配器封装（§4.4），复用
   `AgentRuntime.execute` 语义；
 - MCP backend → **DEFER**（16B v2），本轮不实施；
+- 外部 backend 的 install / uninstall 属于部署管理；Phase 16 只读发现现状，不执行安装、
+  卸载或自动升级；
 - 注册表与运行协议必须分文件/分模块，禁止把"已安装"当"可用健康"。
 
 ### 16C Hermes Capability Probe + Runs Adapter（首个 adapter）
 
-- Probe：以 `/v1/capabilities` 的 features 布尔面为源 + 客户端 TTL 缓存 + null 降级；
+- Probe：读取 `/v1/capabilities` 的 features 布尔面 + 客户端 TTL 缓存 + null 降级；
+  capability advertisement 是必要条件而非安全证明，run/events/approval/stop/reconnect/auth
+  等关键能力还必须做无副作用主动握手；声明与行为不一致时 fail-closed；
   probe 结果必须记录 **approval 能力缺失时的拒绝策略**（无审批通道即不允许接危险级
   WorkContract，禁止静默 fallback——HD 反例）。
 - Runs：`submit → 202 + run_id → SSE(events) → stop/approval resolve`。
 - **approval.request 一等公民化**：挂起 run → 向 Furina 外层转发 → 保留 SSE 余流；
   **禁止**复刻 HD 的 `stopAndFallback` 抢话路径（§14 G-S1）。
-- approval choices：默认剔除 `always/permanent`（除非 `contract.grant_permanent=true`）。
+- approval choices：默认剔除 `always/permanent`；只有 16D 生成的、用户明确作出、范围明确、
+  可撤销且带 provenance 的持久授权记录才可透传，backend/adapter 不得自行生成。
 
 ### Hermes Interface Decision（reviewer patch 锁定，不允许 task brief 回退）
 
 ```text
 API Server primary       适配器主通道 = hermes HTTP API Server（POST /v1/runs + SSE）
                          只有 API Server 具备 run 生命周期 / approval 一等事件能力
-CLI probe/fallback       hermes CLI 仅用于能力探测（probe）与降级回退，不作为 run 通道
+CLI diagnostic-only     hermes CLI 仅用于安装/版本/健康诊断，不作为 WorkContract run 通道；
+                         API Runs 不可用时 Hermes backend = unavailable，不降级为文本子进程
 webhook trigger-only     webhook 仅作触发信号（trigger-only），不是执行/结果通道，
                          不承载 UNVERIFIED→VERIFIED 语义
 hermes proxy NOT_BACKEND 任何 "hermes proxy" 形态一律不算 backend：不进入 registry、
                          不接 WorkContract、不参与 probe 健康面
 Plugin/MCP restricted    Plugin / MCP 通道受限：MCP 细则 DEFER（16B v2）；
                          Phase 16 不得把 plugin/MCP 当一等执行通道
-capability probe         一切接口选择以 /v1/capabilities feature 布尔面为源头
+capability probe         /v1/capabilities 提供 advertised surface；关键能力还须主动握手
                          （run_submission / run_status / run_events_sse / run_stop /
-                         approval_response / …）；缺失能力 → 拒绝对应 contract 等级
-no always-approve        approval choices 默认剔除 always/permanent；仅当
-                         contract.grant_permanent=true 才可透传
+                         approval_response / auth / reconnect）；缺失或不一致 → fail-closed
+no always-approve        approval choices 默认剔除 always/permanent；只有用户明确产生、
+                         scoped/revocable/provenanced 的 AuthorizationGrant 才可透传
 output always UNVERIFIED backend 任何输出（含 completed）一律折算为
                          BACKEND_DONE_UNVERIFIED；VERIFIED 只由 16F 校验器产出
 Single Mouth             backend 用户可见文本 = 素材；经 Furina 嘴部仲裁输出（G-S1）
@@ -324,8 +342,8 @@ Single Mouth             backend 用户可见文本 = 素材；经 Furina 嘴部
 ## 9. 16D — Permission Boundary（双层）
 
 ```text
-外层 = Furina 主权：用户 → Furina 的 WorkContract 批准（16A）
-内层 = Hermes/backend 执行审批：工具调用粒度 once / session / deny（禁 always 自动上浮）
+外层 = Furina 主权：用户 → Furina 的 WorkContract 授权（16A）
+内层 = Hermes/backend 执行审批：工具调用粒度 once / session / deny
 ```
 
 - 内层审批**不可扩大**外层范围；权限被拒必须回灌为 contract 违约事件（不吞掉）；
@@ -335,6 +353,9 @@ Single Mouth             backend 用户可见文本 = 素材；经 Furina 嘴部
   timeout 语义在 16H 定义；
 - 现有 `PermissionManager`（L0–L3 同步判定）继续生效，16D 只在其上增加异步审批通道，
   **不替换**。
+- 持久授权若实现，必须是独立 `AuthorizationGrant`：由 canonical USER 事件产生，绑定
+  capability/tool pattern + workspace scope，具有 issued_at / revoked_at / provenance；
+  adapter 不得从自然语言结果、backend 建议或默认值生成。
 
 ## 10. 16E — Backend Event Normalization
 
@@ -373,8 +394,9 @@ TOOL 高频事件背压采纳 CLAWD 有界队列 + CRITICAL_EVENTS 思想（term
 ```text
 verified → C7：仅经 hub.persist_agent_result（唯一 owner）写入 COMPLETED_VERIFIED
               （复用 §4.1 既有枚举与 owner 路径，禁止新增旁路）
-C6：verifier 的 VERIFIED/FAILED 结论以 register_event_type + record_event 落客观事件
-    （如 AGENT_VERIFIED），payload 携带 contract_id / task_id 证据链
+C6：优先复用现有 AGENT_COMPLETED / AGENT_FAILED 并携带 verified、contract_id、task_id、
+    run_id 证据链；只有现有事件词汇无法无歧义表达时，才经显式注册新增类型，禁止同一
+    结论重复写两类 C6 事件
 C3：自动写入默认关闭 —— backend 完成 ≠ 成功记忆；成功记忆形成仍走 MemoryEngine
     权威路径（可选采样源，默认 OFF，需任务书显式开启）
 ```
@@ -437,7 +459,7 @@ Voice-Interaction（Phase 15 audit brief §12 LATER 清单），禁止在 Phase 
 
 ```text
 willingness / 拒绝 / 罢工决策器                     → Phase 17
-backend 选择策略（Furina agency 级路由）            → Phase 17
+backend 主观偏好（人格/关系/意愿驱动的 agency 路由）→ Phase 17
 关系气候 → 行为策略                                 → Phase 17（closeout 永久延后 P17-D2）
 MCP backend 细则                                    → 16B v2（本阶段 DEFER）
 subagent 编排                                       → 后续
@@ -485,8 +507,7 @@ MiniCPM 并入计分                                            → DERIVED fork
 1. hermes upstream 是否出现 split-runtime / artifact-verify 演进（跟踪，不影响本计划）
 2. approval.request 长任务挂起时长 / 超时语义（16H 任务书须定标）
 3. subagent（delegation）是否作为并行工作源（16G 可选采样，默认不纳入）
-4. hermes-desktop license 缺失是否补齐（本轮零代码复制，引用边界已受控）
-5. 后端事件类型注册表放哪（C6 register_event_type vs 16E 新层）——16E 任务书裁决
+4. 后端事件类型注册表放哪（C6 register_event_type vs 16E 新层）——16E 任务书裁决
 ```
 
 ## 20. 最终验收条件（Phase 16 Final Gate 候选清单）
@@ -495,7 +516,8 @@ MiniCPM 并入计分                                            → DERIVED fork
 G-1   sovereign refusal：用户请 Furina 做事但（机制层）拒绝 → backend 调用次数 == 0
 G-2   backend completed 不自动 VERIFIED：注入伪造 run.completed → C7 无 COMPLETED_VERIFIED
 G-3   hermes 记忆/人格不得改 C4/C1：G-S2 装配期断言 + C4 require_source_event 门
-G-4   内层审批不得扩大外层范围：hermes always → 适配器降级 once 或拒收
+G-4   内层审批不得扩大外层范围：无 scoped AuthorizationGrant 的 hermes always →
+      适配器降级 once 或拒收
 G-5   CANCELLING 可见状态保持至终态事件：屏蔽 cancelled 事件时状态不提前落终
 G-6   崩溃恢复：重启 → UNKNOWN → verify-on-recovery → VERIFIED/FAILED
 G-7   Single Mouth：run 流式期间 backend 文本不旁路用户对话
@@ -510,8 +532,8 @@ G-12  工作域数据不成为 Persona/Memory/Relationship truth（C1/C4/C5 真�
 
 ## 21. Next Document
 
-下一份文档：`02_Phase_16_<首个 Delta>_Task_Brief_EXACT.md`（Delta 顺序见 §5），
-必须单独、窄幅编写，禁止合并多个 Delta 成一个巨型任务。
+后续 canonical 文档编号固定为 02–19；每个 Delta 独立 task brief + closeout template，
+顺序见 §5，禁止合并多个 Delta 成一个巨型执行任务。
 
 ## 22. Revision（Reviewer Patch）
 
@@ -525,7 +547,7 @@ G-12  工作域数据不成为 Persona/Memory/Relationship truth（C1/C4/C5 真�
             UNKNOWN/BLOCKED_APPROVAL/VERIFYING/REPAIRING/BACKEND_DONE_UNVERIFIED
             禁写 C7；VERIFIED 仅经既有唯一 owner 晋升 COMPLETED_VERIFIED
 §6 边界铁律 4   新工作域不得成为 Persona/Memory/Relationship truth
-§8 16C      Hermes Interface Decision 锁定：API Server primary；CLI probe/fallback；
+§8 16C      Hermes Interface Decision 锁定：API Server primary；CLI diagnostic-only；
             webhook trigger-only；hermes proxy NOT_BACKEND；Plugin/MCP restricted；
             capability probe；no always-approve；output always UNVERIFIED；Single Mouth
 §10         16E 全部状态 = 工作域状态，除 16G 终态折算外不写 C7
@@ -539,3 +561,26 @@ G-12  工作域数据不成为 Persona/Memory/Relationship truth（C1/C4/C5 真�
 
 冻结异常标记（当前状态）：`FROZEN_CONTRACT_EXCEPTION_REQUIRED = NOT_REQUIRED`
 （基于 base.py:63 DDL 现状核验；若未来 Delta 反证，须回填为 REQUIRED 并 BLOCK 16G）。
+
+## 23. Primary Reviewer Canonical Revision
+
+外部 reviewer 在完整阅读草案后锁定以下 canonical 修正；其优先级高于 §22 的草案修订记录：
+
+```text
+1. Phase 15 已正式 PASS/FROZEN，删除过时的“仅 READY_FOR_FINAL_REVIEW”前置状态。
+2. Phase 16 只执行用户已授权 contract；Phase 17 才拥有角色主观 willingness/refusal。
+3. Phase 16 拥有 capability/health/user-constraint/budget 驱动的确定性技术路由；
+   Phase 17 只拥有角色主观 backend 偏好。
+4. WorkContract 使用结构化 approval_policy_ref；禁止无范围 grant_permanent 布尔开关。
+5. 持久 AuthorizationGrant 必须 user-originated、scoped、revocable、provenanced。
+6. 外部 backend install/uninstall/upgrade 不在 Phase 16；registry 只读发现安装态。
+7. Hermes CLI 仅 diagnostic，不作 WorkContract execution fallback；Runs API 不可用即
+   Hermes backend unavailable。
+8. /v1/capabilities 是 advertised surface，不是安全证明；关键能力须主动握手且
+   mismatch fail-closed。
+9. 实施顺序改为 16F → 16H → 16G：先建立 durable idempotency/recovery，再做
+   exactly-once C7/C6 真值提交。
+10. C6 优先复用既有 AGENT_COMPLETED/AGENT_FAILED；禁止为同一结论重复写事件。
+```
+
+Canonical document order and exact filenames are listed in `_INDEX_README.md`.
