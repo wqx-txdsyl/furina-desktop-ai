@@ -51,15 +51,22 @@ D5  Relationship Anti-Spam / Anti-Runaway Hardening (C5, MEDIUM)
 | task brief | `01_Phase_15_External_Reference_Code_Audit_Task_Brief_EXACT.md` | Phase 15 首个正式任务：外部参考代码审计（READ-ONLY） |
 | audit report | `02_Phase_15_External_Reference_Code_Audit_Report_EXACT.md` | 审计交付物（SHA 固定 + C1-C7 对照 + delta 判定）；其 T1-T5 分类已被 03 取代 |
 | master plan | `03_Phase_15_Cognitive_Life_Finalization_Master_Plan_and_External_Delta_Decision_EXACT.md` | 权威执行计划：reviewer 裁决 + delta 终版集合 + 分支/文档协议 + 最终验收条件 |
-| task brief (future) | `04_Phase_15_D1_Canon_Act_II_III_Official_Evidence_Task_Brief_EXACT.md` | D1 EXACT 任务书（待独立撰写，One bounded task at a time） |
-| implementation report (future) | `05_..Closeout`、`06/07_D4`、…、`14/15_Integrated_Final_Gate` | 编号预留见 03 §15；被否决任务保留编号并在本清单记录取消 |
+| task brief + closeout | `04/05` D1 Canon Act II/III Official Evidence | D1 完成（READY_FOR_REVIEW） |
+| task brief + closeout | `06/07` D4 Deterministic Temporal Semantics | D4 完成（READY_FOR_REVIEW） |
+| task brief + closeout | `08/09` D2 Hybrid Derived Retrieval | D2 完成（READY_FOR_REVIEW） |
+| task brief + closeout | `10/11` D3 Retrieval Exposure Cooldown | D3 完成（READY_FOR_REVIEW） |
+| task brief + closeout | `12/13` D5 Relationship Anti-Spam Hardening | D5 完成（READY_FOR_REVIEW） |
+| task brief + closeout | `14/15` Integrated Final Gate | 14 任务书 + 15 closeout（READY_FOR_FINAL_REVIEW） |
+| index | `_INDEX_README.md` | 04-15 剩余文档集规范顺序 |
+| static preflight | `_night_phase15_static_preflight.md`、`_night_preflight_D2..D5.md` | 只读静态 preflight 审计记录 |
 
 ## Status
 
 ```text
 Phase 14                = FINAL REVIEWER PASS / CODE FROZEN @ f8e84ec
 Phase 15 External Audit = REVIEWED (PASS_WITH_RECLASSIFICATION)
-Phase 15                = READY FOR BOUNDED FINALIZATION TASKS（等待 04 号 D1 任务书）
-下一份文档              = 04_Phase_15_D1_Canon_Act_II_III_Official_Evidence_Task_Brief_EXACT.md
-                          （须独立、狭窄地撰写；禁止 D1+D4+D2 合并为一个巨型编码任务）
+D1 / D4 / D2 / D3 / D5  = 各自独立 reviewer 通过，集成分支 @ 49ba511（ACCEPTED_INTEGRATION_SHA）
+Integrated Final Gate   = READY_FOR_FINAL_REVIEW（14/15 文档 + Gate A–H + FULL #1 完成；
+                          仅外部 reviewer 可签发 PHASE_15_FINAL_GATE = PASS）
+下一份文档              = 待外部 reviewer 签发 Gate 结果；Phase 16 未开始
 ```
