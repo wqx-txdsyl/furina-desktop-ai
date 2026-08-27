@@ -33,6 +33,11 @@ Reviewer Patch 3 关键收紧（本文件）：
 4. **ToolPermit 授权来源互斥**：免审批（二者皆空）/ approval / grant 三者互斥，
    approval_id 与 grant_id 同时非空 → 构造拒绝；消费侧同样复核。
 
+Reviewer Patch 4（本文件语义不变，收紧在 broker.py）：permit 消费要求授权来源与
+**真实操作**完全一致（approval 全身份维度 + grant.matches 覆盖真实 tool/路径）；
+canonical USER 事件生命周期改为 **nonce-only**（原始 lev_* 事件 id 不得绕过 nonce
+直接消费；event→context→nonce 原子绑定，一次事件只产生一次授权结果）。
+
 状态机与 owner 线程边界在 broker.py（owner 只在**构造时**绑定，backend 线程不得
 抢占）；permit 的签发在 PermitIssuer（决策面创建）、消费在 broker 单锁内原子完成。
 """
@@ -310,7 +315,8 @@ class VerifiedUserEvidence:
 
     - broker 不再公开铸造/返回本对象（public ``verify_user_evidence`` 已删除）；
     - 消费入口（``ApprovalBroker.create_grant`` / ``resolve(APPROVE_SESSION)``）
-      只接受本 broker 签发的 opaque nonce（``uev_*``）或原始 event id str；
+      只接受本 broker 签发的 opaque nonce（``uev_*``；**Patch 4：原始 event id
+      不再接受，必须先经 request_user_evidence 绑定事件上下文**）；
       **手工构造本对象一律拒绝**——它只是内部形态遗留，供测试/文档引用。
     """
 

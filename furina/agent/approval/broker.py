@@ -32,6 +32,21 @@ Reviewer Patch 3 关键收紧（本文件）：
    互斥、窗口、身份、approval/grant 状态），**最后单点提交** consumed 状态——
    任何失败不改变 approval/grant/permit 任何状态。
 
+Reviewer Patch 4 关键收紧（本文件，两个 blocker）：
+
+A. **permit 来源精确绑定**（``consume_permit``）：仅检查 approval/grant "存在且
+   有效"不足以免责——issuer 把不匹配操作绑定到合法 approval_id/grant_id 时，消费
+   侧按真实操作独立复核并拒绝、零状态变更。approval 来源要求 contract_id/hash、
+   run_id、tool、capability、operation_digest 全部相等，且由**真实 tool+args**
+   确定的 requested_scope 与审批放行 scope 相等；grant 来源要求 contract 绑定一致
+   且 ``grant.matches``（capability/tool_pattern/workspace/写目标入 write_roots）
+   对真实操作成立。
+B. **canonical USER 事件生命周期**：原始 ``lev_*`` event id **不再接受**（禁止
+   绕过 nonce 生命周期直接消费）；``request_user_evidence`` 建立
+   event→context→nonce 原子状态——同 event+同 context 未消费重复请求幂等（复用
+   nonce）、同 event+不同 context 拒绝、已消费/超窗/验证失败后事件锁定（不得再次
+   创建新 nonce 或新 grant，grant 撤销后同一旧 event 亦不得重建替代授权）。
+
 Reviewer Patch 2（保留）：操作摘要 ``operation_digest``（每 broker 随机密钥
 HMAC-SHA256 over 严格 canonical 原始 args，不保存原文）；grant 有效窗口
 ``issued_at <= now < expiry``；事件载荷递归 sanitize + 冻结。
@@ -52,6 +67,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
+from furina.agent.agent_runtime import AgentRuntime
 from furina.agent.permission import Permission
 from furina.agent.work_contract import APPROVAL_POLICY_KINDS, WorkspaceScope
 
@@ -72,6 +88,7 @@ from .models import (
     USER_EVENT_ID_PATTERN,
     USER_EVIDENCE_NONCE_PATTERN,
     audit_args_digest,
+    classify_step_paths,
     _canonical_json,
     _CONTRACT_HASH_PATTERN,
     redact_args,
@@ -265,6 +282,14 @@ class ApprovalBroker:
         self._known_gate_ids: Dict[str, bool] = {}
         #: opaque USER 证据 nonce → (user_event_id, 预验证时的 typed 上下文, created_at)。
         self._evidence_nonces: Dict[str, Tuple[str, EvidenceContext, float]] = {}
+        #: canonical USER decision event → (绑定上下文, 状态, 首次签发时刻)。Patch 4：
+        #: 每个事件只能绑定一个 EvidenceContext 与一次授权结果。状态：
+        #:   - ``"bound"``：已绑定上下文，nonce 已签发且未消费（同 event+同 context
+        #:     的重复请求保持幂等；同 event+不同 context 拒绝）；
+        #:   - ``"locked"``：已产生一次授权结果（grant 创建 / approve_session 生效）
+        #:     或 nonce 已消费 / 超窗 / 验证失败——**不得再次创建新 nonce 或新
+        #:     grant**（grant 撤销后同一旧 event 亦不得重建替代授权）。
+        self._user_event_bindings: Dict[str, Tuple[EvidenceContext, str, float]] = {}
         self._events: List[ApprovalEvent] = []
 
     # -------------------------------------------------- 时钟
@@ -315,12 +340,17 @@ class ApprovalBroker:
 
         - ``context`` 必须是 :class:`EvidenceContext`（严格不可变 typed context）：
           grant 侧绑定 contract_id/hash、capability、tool_pattern、workspace、
-          issued_at、expiry、scope_note、decision；approve_session 侧绑定完整
+          issued_at、expiry、scope_note；approve_session 侧绑定完整
           ApprovalRequest 身份；
         - nonce 生命周期（Patch 3）：**取出即销毁（一次性）** + 预验证后
           ``MAX_EVIDENCE_NONCE_TTL_SECONDS`` 内有效——消费时 stored context 与
           消费时刻派生的 expected context 必须**完全相等**，且仍会**重新查询可信
-          记录**；跨上下文/跨操作/重复/超窗重放一律拒绝。
+          记录**；跨上下文/跨操作/重复/超窗重放一律拒绝；
+        - **event→context→nonce 原子状态（Patch 4）**：每个 canonical USER
+          decision event 只能绑定一个 EvidenceContext 与一次授权结果——
+          同 event+同 context 的未消费重复请求保持幂等（返回既有 nonce）；
+          同 event+不同 context / 已消费 / 超窗 / 验证失败后一律拒绝（不得再次
+          创建新 nonce）。
         """
         self.require_owner("user_evidence 预验证")
         if not isinstance(user_event_id, str) or not USER_EVENT_ID_PATTERN.match(user_event_id):
@@ -331,10 +361,40 @@ class ApprovalBroker:
                 f"context 必须是 EvidenceContext（严格 typed 操作上下文，Patch 3），"
                 f"得到 {type(context).__name__}")
         self._verify_user_event(user_event_id, context.to_payload())
-        nonce = f"uev_{uuid.uuid4().hex[:12]}"
+        now = self._clock()
         with self._lock:
-            self._evidence_nonces[nonce] = (user_event_id, context, self._clock())
-        return nonce
+            binding = self._user_event_bindings.get(user_event_id)
+            if binding is None:
+                nonce = f"uev_{uuid.uuid4().hex[:12]}"
+                self._user_event_bindings[user_event_id] = (context, "bound", now)
+                self._evidence_nonces[nonce] = (user_event_id, context, now)
+                return nonce
+            stored_ctx, status, issued_at = binding
+            if status == "locked":
+                raise ApprovalStateError(
+                    f"USER 事件 {sanitize_text(user_event_id, max_len=120)} 已产生过一次"
+                    "授权结果/已锁定（消费、超窗或验证失败后不得再次创建新 nonce——"
+                    "每个 canonical event 只绑定一次授权，grant 撤销后亦不得重建）")
+            if stored_ctx != context:
+                raise ApprovalStateError(
+                    f"USER 事件 {sanitize_text(user_event_id, max_len=120)} 已绑定不同"
+                    "操作上下文（同 event + 不同 context 拒绝：每个 canonical event 只"
+                    "绑定一个 EvidenceContext）")
+            if now - issued_at > MAX_EVIDENCE_NONCE_TTL_SECONDS:
+                # 既有 nonce 已超窗（timeout）→ 事件锁定，不再签发
+                self._user_event_bindings[user_event_id] = (stored_ctx, "locked", issued_at)
+                raise ApprovalStateError(
+                    f"USER 事件 {sanitize_text(user_event_id, max_len=120)} 的 nonce 已"
+                    f"超窗（> {MAX_EVIDENCE_NONCE_TTL_SECONDS}s）——超时后不得再次创建"
+                    "新 nonce 或新 grant")
+            # 幂等：同 event+同 context 未消费 → 复用既有 nonce（不产生冲突状态）
+            for nonce, (ev_id, ctx, _created) in self._evidence_nonces.items():
+                if ev_id == user_event_id and ctx == context:
+                    return nonce
+            # 理论不可达（bound 状态必有未消费 nonce）；防御兜底
+            nonce = f"uev_{uuid.uuid4().hex[:12]}"
+            self._evidence_nonces[nonce] = (user_event_id, context, now)
+            return nonce
 
     def _verify_user_event(self, user_event_id: str, context_payload: Mapping[str, Any]) -> None:
         """**消费时刻**重新查询可信记录：验证器必须确认该 USER 事件真实存在 **且**
@@ -358,14 +418,18 @@ class ApprovalBroker:
     def _consume_user_evidence(self, what: str,
                                user_evidence: Union[str, Any, None],
                                *, expected: EvidenceContext) -> str:
-        """消费入口统一证据校验（Patch 3：typed exact-equality + 一次性 nonce）。
+        """消费入口统一证据校验（Patch 3 + Patch 4：nonce-only 生命周期）。
 
-        - None / 非 str（含手工构造的 VerifiedUserEvidence）→ 拒绝；
-        - ``uev_*`` nonce：**单锁内原子取出（取出即销毁，一次性）**；必须在
+        - **只接受本 broker 签发的 opaque nonce（``uev_*``）**：None / 非 str（含
+          手工构造的 VerifiedUserEvidence）→ 拒绝；**原始 ``lev_*`` event id 不再
+          接受**——禁止绕过 nonce 生命周期直接消费（Patch 4）；
+        - 单锁内**原子取出（取出即销毁，一次性）**；必须在
           ``MAX_EVIDENCE_NONCE_TTL_SECONDS`` 内；stored context 必须与 expected
           **完全相等**（禁止忽略 stored context——任何一维变化即拒绝）；随后
           **重新查询**可信记录绑定当前上下文；
-        - 原始 event id：消费时刻直接重新查询可信记录（绑定 expected payload）。
+        - **事件生命周期（Patch 4）**：每个 canonical event 只绑定一次授权结果——
+          消费成功即锁定事件；超窗 / 跨 context / 验证失败同样锁定（之后不得再次
+          创建新 nonce 或新 grant）。
         """
         if user_evidence is None:
             raise ApprovalStateError(
@@ -373,38 +437,58 @@ class ApprovalBroker:
                 "经可信入口在操作上下文下验证的存在性证明，不接受任何缺省/推断")
         if not isinstance(user_evidence, str):
             raise ApprovalStateError(
-                f"'{what}' 的 user_evidence 只接受本 broker 签发的 opaque nonce（uev_*）"
-                f"或原始事件 id str，得到 {type(user_evidence).__name__}——手工构造的"
-                "VerifiedUserEvidence 一律拒绝（不得公开自铸）")
-        if USER_EVIDENCE_NONCE_PATTERN.match(user_evidence):
-            now = self._clock()
-            with self._lock:
-                # 原子取出：此后该 nonce 不再可用（一次性；验证失败亦作废，fail-closed）
-                stored = self._evidence_nonces.pop(user_evidence, None)
+                f"'{what}' 的 user_evidence 只接受本 broker 签发的 opaque nonce"
+                f"（uev_*，Patch 4：原始事件 id 不得绕过 nonce 生命周期直接消费），"
+                f"得到 {type(user_evidence).__name__}——手工构造的 VerifiedUserEvidence "
+                "一律拒绝（不得公开自铸）")
+        if not USER_EVIDENCE_NONCE_PATTERN.match(user_evidence):
+            raise ApprovalStateError(
+                f"'{what}' 的 user_evidence 必须匹配本 broker 签发的 opaque nonce"
+                f"（uev_<hex>），得到 {user_evidence!r}——原始 lev_* 事件 id 已不再接受"
+                "（Patch 4：必须先经 request_user_evidence 绑定事件上下文并取得 nonce）")
+        now = self._clock()
+        with self._lock:
+            # 原子取出：此后该 nonce 不再可用（一次性；验证失败亦作废，fail-closed）
+            stored = self._evidence_nonces.pop(user_evidence, None)
             if stored is None:
                 raise ApprovalStateError(
                     f"'{what}' 的 user_evidence nonce 非本 broker 签发或已被消费"
                     "（跨 broker/伪造/重复使用，拒绝）")
             ev_id, stored_ctx, created_at = stored
+            binding = self._user_event_bindings.get(ev_id)
+            if binding is None or binding[1] == "locked":
+                raise ApprovalStateError(
+                    f"'{what}' 的 USER 事件已产生过一次授权结果或已锁定（一次 canonical "
+                    "event = 一次授权；同 event 不得再次消费）")
+            event_ctx, status, issued_at = binding
             if now < created_at or now - created_at > MAX_EVIDENCE_NONCE_TTL_SECONDS:
+                self._user_event_bindings[ev_id] = (event_ctx, "locked", issued_at)
                 raise ApprovalStateError(
                     f"'{what}' 的 user_evidence nonce 超出有界生命周期"
                     f"（{MAX_EVIDENCE_NONCE_TTL_SECONDS}s，now-created="
-                    f"{now - created_at:.1f}s）——超窗重放拒绝")
+                    f"{now - created_at:.1f}s）——超窗重放拒绝且事件锁定")
             if stored_ctx != expected:
+                self._user_event_bindings[ev_id] = (event_ctx, "locked", issued_at)
                 raise ApprovalStateError(
                     f"'{what}' 的 user_evidence nonce 与当前操作上下文不完全一致"
                     "（stored context ≠ 消费时刻派生的 expected context：capability/"
                     "expiry/workspace/scope_note/操作身份任一变化即拒绝——跨上下文"
-                    "重放封死）")
+                    "重放封死且事件锁定）")
+        # 锁外重查可信记录（绑定期上下文；失败同样锁定事件）
+        try:
             self._verify_user_event(ev_id, expected.to_payload())
-            return ev_id
-        if not USER_EVENT_ID_PATTERN.match(user_evidence):
-            raise ApprovalStateError(
-                f"'{what}' 的 user_evidence 必须匹配 lev_<ms>_<hex> 事件 id，得到 {user_evidence!r}")
-        # 原始 event id：消费时直接重新查询可信记录（绑定 expected 上下文）
-        self._verify_user_event(user_evidence, expected.to_payload())
-        return user_evidence
+        except ApprovalStateError:
+            with self._lock:
+                b = self._user_event_bindings.get(ev_id)
+                if b is not None and b[1] == "bound":
+                    self._user_event_bindings[ev_id] = (b[0], "locked", b[2])
+            raise
+        with self._lock:
+            b = self._user_event_bindings.get(ev_id)
+            if b is not None and b[1] == "bound":
+                # 消费成功 → 事件锁定：每个 event 只产生一次授权结果
+                self._user_event_bindings[ev_id] = (b[0], "locked", b[2])
+        return ev_id
 
     # -------------------------------------------------- 事件（redacted + 不可变）
     def _log_event(self, etype: str, *, approval_id: str = "", grant_id: str = "",
@@ -613,12 +697,13 @@ class ApprovalBroker:
         """决议（owner 线程）：exactly-once；重复 → DUPLICATE，冲突 → CONFLICT，
         迟于 timeout/cancel → LATE，未知 → UNKNOWN。
 
-        **APPROVE_SESSION 必须携带 canonical USER 证据**（本 broker opaque nonce 或
-        原始 event id），且绑定**完整 ApprovalRequest 身份**（Patch 3：typed
-        :class:`EvidenceContext`——approval_id/contract_id/contract_hash/run_id/
-        tool/capability/requested_scope/risk_level/policy_kind/operation_digest），
-        消费时刻经可信入口重新查询——缺失/验证失败/上下文不完全一致 →
-        ApprovalStateError（决议不生效）。
+        **APPROVE_SESSION 必须携带 canonical USER 证据**（**本 broker 签发的 opaque
+        nonce，Patch 4：原始 event id 不得绕过 nonce 生命周期直接消费**），且绑定
+        **完整 ApprovalRequest 身份**（Patch 3：typed :class:`EvidenceContext`——
+        approval_id/contract_id/contract_hash/run_id/tool/capability/
+        requested_scope/risk_level/policy_kind/operation_digest），消费时刻经可信
+        入口重新查询——缺失/验证失败/上下文不完全一致 → ApprovalStateError
+        （决议不生效）。
         """
         if not isinstance(decision, ApprovalDecisionKind):
             raise ApprovalStateError(f"decision 必须是 ApprovalDecisionKind，得到 {decision!r}")
@@ -817,11 +902,18 @@ class ApprovalBroker:
              本 broker 决策面注册的 issuer；
           2. 未消费且在有效窗口；tool/capability/operation digest 逐项一致；
           3. **授权来源互斥**：approval_id 与 grant_id 同时非空 → 拒绝；
-          4. approval 绑定：APPROVE_ONCE → 仍待消费（消费标记在提交点原子写入）、
-             APPROVE_SESSION → 仍处 APPROVED_SESSION（撤销/超时/拒绝一律失败）；
-             grant 绑定：未撤销且 ``issued_at <= now < expiry`` 且 grant 的
-             contract_id/contract_hash 与 permit 完全一致（Contract A 的 grant
-             不得放行 Contract B 的操作）；
+          4. **来源精确绑定（Patch 4）**：仅"存在且有效"不足以免责——issuer 把
+             不匹配操作绑定到合法 approval_id/grant_id 时，此处分维度独立复核并
+             拒绝：
+             - approval 来源必须与真实操作完全一致：contract_id/hash、run_id、
+               tool、capability、operation_digest 全部相等，且由**真实 tool+args**
+               确定的 requested_scope 与审批放行 scope 相等；状态仍为
+               APPROVE_ONCE（待消费）/ APPROVED_SESSION；
+             - grant 来源必须精确覆盖真实操作：contract_id/hash 与 permit 一致
+               （Contract A 的 grant 不得放行 Contract B 的操作），且
+               ``grant.matches``（capability 精确 / tool_pattern glob / workspace
+               范围 / **写目标必须落入 grant.write_roots**）对真实 tool+args
+               成立；
           5. 全部通过 → **唯一提交点**：approve_once 标记 + permit consumed 一次
              写入。任何失败 → ok=False 且**不改变** approval/grant/permit 任何
              状态，零 tool call。
@@ -837,6 +929,17 @@ class ApprovalBroker:
         except ApprovalStateError as exc:
             return PermitOutcome(False, f"操作参数不可 canonical（fail-closed）: {exc}",
                                  permit_id=permit.permit_id)
+        # Patch 4（来源精确绑定）：requested_scope / write_paths 由**真实 tool+args**
+        # 独立确定（与 gate 同一路径提取器），供 approval/grant 来源复核——禁止调用方
+        # 传 permit 自身字段完成自证。
+        try:
+            real_paths = tuple(AgentRuntime._step_paths(tool, dict(args)))
+        except Exception as exc:   # noqa: BLE001
+            return PermitOutcome(False, f"真实操作路径无法确定（fail-closed）: {type(exc).__name__}",
+                                 permit_id=permit.permit_id)
+        real_write_paths, _real_read_paths = classify_step_paths(tool, real_paths)
+        #: 与 ApprovalRequest.requested_scope 同归一化的真实 scope（strip/去空）。
+        real_scope = tuple(str(p).strip() for p in real_paths if str(p).strip())
         now = self._clock()
         with self._lock:
             rec = self._permits.get(permit.permit_id)
@@ -869,12 +972,31 @@ class ApprovalBroker:
                 return PermitOutcome(False, "permit 授权来源互斥违规（approval+grant 双来源）",
                                      permit_id=permit.permit_id)
             # ---- 来源校验（互斥：免审批=均空 / approval / grant）----
+            # Patch 4：授权来源必须与**真实操作**完全一致——仅"存在且有效"不足以免责：
+            # issuer 把不匹配操作绑定到合法 approval_id/grant_id 时，此处独立复核拒绝，
+            # 且（唯一提交点之前）approval/grant/permit 零状态变更。
             approval_rec: Optional[_RequestRecord] = None
             if permit.approval_id:
                 arec = self._requests.get(permit.approval_id)
                 if arec is None:
                     return PermitOutcome(False, "permit 绑定的审批请求不存在",
                                          permit_id=permit.permit_id)
+                ar = arec.request
+                if (ar.contract_id != permit.contract_id
+                        or ar.contract_hash != permit.contract_hash
+                        or ar.run_id != permit.run_id
+                        or ar.tool != permit.tool
+                        or ar.capability != permit.capability
+                        or ar.operation_digest != permit.operation_digest):
+                    return PermitOutcome(
+                        False, "permit 绑定的审批与真实操作身份不一致（contract_id/hash、"
+                        "run_id、tool、capability、operation_digest 任一不符即拒绝）",
+                        permit_id=permit.permit_id)
+                if ar.requested_scope != real_scope:
+                    return PermitOutcome(
+                        False, "permit 绑定的审批 requested_scope 与真实操作路径不一致"
+                        "（由真实 tool+args 确定的 scope ≠ 审批放行 scope，拒绝）",
+                        permit_id=permit.permit_id)
                 if arec.state == ApprovalState.APPROVED_ONCE:
                     if arec.consumed_at is not None:
                         return PermitOutcome(False, "approve_once 已被消费（恰好一次）",
@@ -897,6 +1019,12 @@ class ApprovalBroker:
                     return PermitOutcome(False, "grant 契约绑定与 permit 不一致"
                                          "（Contract A 的 grant 不得放行 Contract B 的操作）",
                                          permit_id=permit.permit_id)
+                if not g.matches(tool, capability, real_paths,
+                                 write_paths=real_write_paths):
+                    return PermitOutcome(
+                        False, "grant 不覆盖真实操作（capability 精确 / tool_pattern "
+                        "glob / workspace 范围 / 写目标必须落入 grant.write_roots——"
+                        "任一不符即拒绝）", permit_id=permit.permit_id)
             # ---- 唯一提交点：全部校验通过，一次性写入 consumed 状态 ----
             if approval_rec is not None:
                 approval_rec.consumed_at = now
@@ -953,9 +1081,12 @@ class ApprovalBroker:
         - ``user_evidence`` 必须与**完整 grant 上下文**（typed
           :class:`EvidenceContext`：decision/contract_id/hash/capability/
           tool_pattern/workspace/issued_at/expiry/scope_note）**完全相等**——
-          nonce 跨上下文/重复/超窗一律拒绝，消费时刻重查可信记录；手工构造
-          VerifiedUserEvidence / 跨 broker nonce / 无关真实事件 → 拒绝；未配置
-          验证器 fail-closed；
+          **只接受本 broker 签发的 opaque nonce（Patch 4：原始 event id 不再接受，
+          必须先经 request_user_evidence 绑定事件上下文）**；nonce 跨上下文/重复/
+          超窗一律拒绝，消费时刻重查可信记录；手工构造 VerifiedUserEvidence /
+          跨 broker nonce / 无关真实事件 → 拒绝；未配置验证器 fail-closed；
+          每个 canonical event 只产生一次授权结果（事件锁定，grant 撤销后同一旧
+          event 不得重建替代授权）；
         - 拒绝**未来签发**（``issued_at > now``）与**已过期新 grant**
           （``expiry <= now``）；有效窗口 ``issued_at <= now < expiry``。
         """
