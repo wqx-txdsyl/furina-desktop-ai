@@ -197,6 +197,7 @@ class CognitionHub:
             relationship=self.relationship or _NullRelationship(),
             events=self.events,
             agent_history=self.agent_history,
+            index=self.index,
         )
         self._session_id = session_id
         log.info("CognitionHub ready: schema_version=%s", self._db.schema_version)
@@ -663,9 +664,9 @@ class CognitionHub:
         return self.index.status()
 
     def lookup_index(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        """NON-AUTHORITATIVE 语义提示；缺失/不可用 → []（cognition 仍工作）。"""
+        """NON-AUTHORITATIVE hybrid 提示（lexical∪vector → refs）；缺失/不可用 → []。"""
         try:
-            return self.index.lookup(query, top_k=top_k)
+            return self.index.hybrid_lookup(query, top_k=top_k)
         except Exception:
             return []
 

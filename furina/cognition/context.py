@@ -34,7 +34,8 @@ class CognitiveContextAssembler:
                  relationship: RelationshipStore,
                  events: EventTimelineStore,
                  agent_history: AgentTaskHistoryStore,
-                 bounds: Optional[Dict[str, int]] = None) -> None:
+                 bounds: Optional[Dict[str, int]] = None,
+                 index: Optional[Any] = None) -> None:
         self._stores = {
             "canon_identity": canon_identity,
             "canon_history": canon_history,
@@ -46,6 +47,8 @@ class CognitiveContextAssembler:
         }
         self._bounds = dict(bounds or DEFAULT_BOUNDS)
         self._retriever = CanonLifeRetriever(canon_history)
+        # D2：DERIVED 检索索引（非权威提示；None = 保持旧路径）。
+        self._index = index
 
     def assemble(self, *, query: str = "", topic: str = "",
                  current_facts: Optional[Dict[str, Any]] = None,
@@ -63,12 +66,24 @@ class CognitiveContextAssembler:
 
         # Phase 15E：C3 回忆经 RetrievalRanker（authority/relevance/recency/importance/
         # strength/status/diversity），不 dump、不纯 cosine topK。
+        # D2：优先经 derived index 的 hybrid 候选（lexical∪vector → 权威解析），
+        # 再走既有 ranker；任何失败/无索引 → 回退原 retrieve 路径（fail-soft）。
         from .retrieval.ranker import RetrievalRanker
+        from .retrieval.hybrid import HybridRetriever
         ranker = RetrievalRanker()
+        mems: List[Any] = []
         try:
-            mems = [m.content for m in ranker.rank_memories(
-                auto.retrieve(query=query, limit=b["memories"] * 4),
-                query=query, limit=b["memories"])]
+            if self._index is not None:
+                res = HybridRetriever(self._index, auto).candidates(
+                    query, limit=b["memories"])
+                pool = res["objects"] or None
+                if pool:
+                    mems = [m.content for m in ranker.rank_memories(
+                        pool, query=query, limit=b["memories"])]
+            if not mems:
+                mems = [m.content for m in ranker.rank_memories(
+                    auto.retrieve(query=query, limit=b["memories"] * 4),
+                    query=query, limit=b["memories"])]
         except Exception:
             mems = []
             try:

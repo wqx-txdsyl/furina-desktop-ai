@@ -46,6 +46,12 @@ class AutobiographicalMemoryStore:
     def retrieve(self, *, query: str = "", limit: int = 3, context: Optional[str] = None):
         return self._engine.retrieve(query=query, limit=limit, context=context)
 
+    def get(self, mem_id: str):
+        """按主键权威解析（D2：derived ref 解析；缺失返回 None → 丢弃候选）。"""
+        if not mem_id:
+            return None
+        return self._engine.store.fetch(mem_id)
+
     def count(self, *, status=None) -> int:
         return self._engine.store.count(status=status)
 

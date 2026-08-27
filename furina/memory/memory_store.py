@@ -148,6 +148,15 @@ class MemoryStore:
     def recall_recent(self, n: int = 10) -> List[Memory]:
         return self.query(limit=n)
 
+    def fetch(self, mem_id: str) -> Optional[Memory]:
+        """按主键取单条（D2：derived ref → 权威解析；不存在返回 None）。"""
+        if not mem_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM memories WHERE mem_id=?", (mem_id,)).fetchone()
+        return self._to_memory(row) if row else None
+
     # -------------------------------------------------- relationship
     def save_relationship(self, rel: RelationshipState) -> None:
         with self._lock:
