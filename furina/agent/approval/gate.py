@@ -4,9 +4,11 @@ effective permission = WorkContract scope ∩ PermissionManager L0–L3 ∩ expl
 approval ∩ backend capability；**任何一层都不得放宽另一层**，判定顺序固定：
 
 1. WorkContract scope：契约必须匹配**可信组合根绑定的 expected contract_id /
-   content_hash**（Patch 2）——自签但范围更宽的新 WorkContract（content_hash 与
-   expected 不同）一律 DENY_CONTRACT_SCOPE；content_hash 只作完整性校验，不声明
-   为授权真实性（授权真实性来自 expected 绑定）。投影仍强制过
+   content_hash**——自签但范围更宽的新 WorkContract（content_hash 与 expected
+   不同）一律 DENY_CONTRACT_SCOPE；content_hash 只作完整性校验，不声明
+   为授权真实性（授权真实性来自 expected 绑定）。expected 绑定**来自 Gate 持有
+   的 :class:`PermitIssuer`**（Patch 3：issuer 内部绑定唯一 gate_id + expected
+   contract_id/hash，单一事实来源）。投影仍强制过
    ``WorkContract.from_dict``（exact-mapping + 摘要复核，从不重新签名）。tool→
    capability ∈ 契约 allowed_capabilities；全部路径 ∈ 契约 workspace，**写目标必须
    落入 write_roots（read_roots 不授予写权限）**——越契约的 "inner request" 在工具
@@ -15,24 +17,26 @@ approval ∩ backend capability；**任何一层都不得放宽另一层**，判
 3. PermissionManager L0–L3：``pm_decision.granted`` 必须为 True；**risk 以可信 PM
    结果为下界**（effective = max(调用方, PM.level)，不可降级；L2/L3 硬性必须审批；
    无风险信号 fail-closed）；
-4. explicit approval：session grant（严格窄于契约且写目标入 grant write_roots）或
-   审批决议（approve_once / approve_session）。
+4. explicit approval：session grant（**同契约绑定**且严格窄于契约且写目标入
+   grant write_roots）或审批决议（approve_once / approve_session）。
 
-**permit 生产/消费（Patch 2）**：本 Gate 持有可信组合根注入的 :class:`GateSeal`，
-可消费 permit **只能由本 Gate 在四层判定 ALLOW 后**经 ``broker.issue_permit(seal,
-…)`` 签发（broker 公开 issue 路径已删除/封门；无 approval/grant 来源的 permit
-同样绑定 gate_id + contract_id + content_hash + run_id + operation_digest）。
-真实工具边界必须 ``broker.consume_permit(permit, tool=…, capability=…, args=…)``
-——tool/capability/**原始 args** 均为**必填**，broker 内部用自身密钥重新计算
-operation digest 复核，禁止调用方传 permit 自身字段自证；消费在 broker 单锁内
-原子完成（approve_once 恰好一次、session 未撤销、grant 在窗未撤销、permit 未消费
-且在 TTL 内）——拒绝 / 超时 / 撤销 / 消费失败即零 tool call。
+**permit 生产/消费（Patch 3）**：公开 ``GateSeal`` / ``broker.issue_permit`` 已
+删除——签发能力只存在于 :class:`PermitIssuer`（由 ``broker.create_permit_issuer``
+在**决策面（owner 线程）**创建并注入本 Gate；producer 可见对象无任何签发能力，
+Python ``_private`` 属性不作为安全隔离声明）。可消费 permit **只能由本 Gate 在
+四层判定 ALLOW 后**经内部 issuer 签发（permit 恒绑定 issuer 的 gate_id + expected
+contract_id/content_hash；免审批路径同样如此）。真实工具边界必须
+``broker.consume_permit(permit, tool=…, capability=…, args=…)``——tool/capability/
+**原始 args** 均为**必填**，broker 内部用自身密钥重新计算 operation digest 复核，
+禁止调用方传 permit 自身字段自证；消费在 broker 单锁内**先完成全部校验、最后
+单点提交**（approve_once 恰好一次、session 未撤销、grant 在窗未撤销且契约绑定
+一致、permit 未消费且在 TTL 内）——拒绝 / 超时 / 撤销 / 消费失败即零 tool call
+且零状态变更。
 """
 from __future__ import annotations
 
 import enum
 import math
-import secrets
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Tuple, Union
 
@@ -40,14 +44,12 @@ from furina.agent.agent_runtime import AgentRuntime
 from furina.agent.permission import Permission, PermissionDecision
 from furina.agent.work_contract import WorkContract, WorkContractValidationError, WorkspaceScope
 
-from .broker import ApprovalBroker
+from .broker import ApprovalBroker, PermitIssuer
 from .models import (
-    MAX_PERMIT_TTL_SECONDS,
     ApprovalRequest,
     ApprovalState,
     ApprovalStateError,
     AuthorizationGrant,
-    GateSeal,
     PermitOutcome,
     ToolPermit,
     classify_step_paths,
@@ -90,45 +92,37 @@ class GateResult:
 
 
 class ApprovalGate:
-    """四层交集判定器（每契约一个实例；capability_snapshot / broker / GateSeal /
-    expected contract_id+content_hash 构造注入）。"""
+    """四层交集判定器（每契约一个实例；capability_snapshot / broker / PermitIssuer
+    构造注入——issuer 由 ``broker.create_permit_issuer``（owner 线程/决策面）创建，
+    内部绑定唯一 gate_id + expected contract_id/content_hash，本 Gate 的契约绑定与
+    gate_id 与之同源）。"""
 
     def __init__(self, *, capability_snapshot: Mapping[str, str], broker: ApprovalBroker,
-                 gate_seal: GateSeal,
-                 expected_contract_id: str, expected_content_hash: str,
+                 permit_issuer: PermitIssuer,
                  risk_threshold: Permission = Permission.L2_HIGH_RISK,
-                 wait_cap_seconds: float = 300.0,
-                 permit_ttl_seconds: float = 30.0) -> None:
+                 wait_cap_seconds: float = 300.0) -> None:
         if not isinstance(capability_snapshot, Mapping):
             raise TypeError("capability_snapshot 必须是 tool→capability Mapping")
         if not isinstance(broker, ApprovalBroker):
             raise TypeError("broker 必须是 ApprovalBroker")
-        if not isinstance(gate_seal, GateSeal):
-            raise TypeError("gate_seal 必须是 GateSeal（可信组合根注入）")
-        if not isinstance(expected_contract_id, str) or not expected_contract_id.strip():
-            raise TypeError("expected_contract_id 必须是非空 str（可信组合根绑定）")
-        if not isinstance(expected_content_hash, str) or len(expected_content_hash) != 64:
-            raise TypeError("expected_content_hash 必须是 64 位 hex（可信组合根绑定）")
+        if not isinstance(permit_issuer, PermitIssuer):
+            raise TypeError(
+                "permit_issuer 必须是 PermitIssuer（经 broker.create_permit_issuer 于"
+                "决策面/owner 线程创建；GateSeal 已删除，Patch 3）")
         if isinstance(risk_threshold, bool) or not isinstance(risk_threshold, Permission):
             raise TypeError("risk_threshold 必须是 Permission")
-        for name, v in (("wait_cap_seconds", wait_cap_seconds),
-                        ("permit_ttl_seconds", permit_ttl_seconds)):
-            if (isinstance(v, bool) or not isinstance(v, (int, float))
-                    or not math.isfinite(float(v)) or v <= 0):
-                raise ApprovalStateError(f"{name} 必须有限正数，得到 {v!r}")
-        if permit_ttl_seconds > MAX_PERMIT_TTL_SECONDS:
-            raise ApprovalStateError(
-                f"permit_ttl_seconds 必须在 (0, {MAX_PERMIT_TTL_SECONDS}] 内，得到 {permit_ttl_seconds!r}")
+        if (isinstance(wait_cap_seconds, bool) or not isinstance(wait_cap_seconds, (int, float))
+                or not math.isfinite(float(wait_cap_seconds)) or wait_cap_seconds <= 0):
+            raise ApprovalStateError(f"wait_cap_seconds 必须有限正数，得到 {wait_cap_seconds!r}")
         self._snapshot = dict(capability_snapshot)
         self._broker = broker
-        self._gate_seal = gate_seal
-        self._expected_contract_id = expected_contract_id.strip()
-        self._expected_content_hash = expected_content_hash
+        self._issuer = permit_issuer
+        self._expected_contract_id = permit_issuer.expected_contract_id
+        self._expected_content_hash = permit_issuer.expected_content_hash
         self._risk_threshold = risk_threshold
         self._wait_cap = float(wait_cap_seconds)
-        self._permit_ttl = float(permit_ttl_seconds)
-        #: 本 Gate 的决议者身份（permit 的"可信 Gate 决议"绑定）。
-        self._gate_id = f"gate_{secrets.token_hex(8)}"
+        #: 本 Gate 的决议者身份（与 permit issuer 内部绑定的 gate_id 同源）。
+        self._gate_id = permit_issuer.gate_id
 
     @property
     def gate_id(self) -> str:
@@ -232,34 +226,37 @@ class ApprovalGate:
         else:
             eff_risk = None           # 无任何风险信号 → 无法证明低风险 → fail-closed
 
-        # 4a. session grant（必须严格窄于契约，否则 fail-closed；写目标须入 grant write_roots）
+        # 4a. session grant（同契约绑定 + 必须严格窄于契约，否则 fail-closed；
+        #     写目标须入 grant write_roots）
         grant = self._broker.covering_grant(tool=tool, capability=cap, paths=paths,
-                                            write_paths=write_paths, now=now)
+                                            write_paths=write_paths, now=now,
+                                            contract_id=contract_id,
+                                            contract_hash=contract_hash)
         if grant is not None:
             if not self._grant_within_contract(grant, allowed_caps, ws):
                 return GateResult(
                     GateVerdict.DENY_GRANT_SCOPE,
                     f"grant '{grant.grant_id}' 比契约宽（capability/workspace 越界，fail-closed）")
             permit = self._mint_permit_checked(tool=tool, capability=cap, args=args,
-                                               run_id=run_id, contract_id=contract_id,
-                                               contract_hash=contract_hash,
-                                               grant_id=grant.grant_id)
+                                               run_id=run_id, grant_id=grant.grant_id)
             if permit is None:
                 return GateResult(GateVerdict.DENY_CONTRACT_SCOPE,
                                   "grant 放行失败（参数不可 canonical，fail-closed）")
             return GateResult(GateVerdict.ALLOW, "session grant 覆盖", grant=grant, permit=permit)
         if self._broker.matching_grants(tool=tool, capability=cap, paths=paths,
-                                        write_paths=write_paths):
+                                        write_paths=write_paths,
+                                        contract_id=contract_id, contract_hash=contract_hash):
             return GateResult(GateVerdict.DENY_GRANT_INACTIVE,
                               "匹配 grant 已过期/已撤销/未生效（issued_at <= now < expiry 不满足）"
                               "或写目标越出 grant write_roots")
+            # 注：跨契约 grant（同 tool/capability/workspace 不同契约）不在此列——
+            # 它们对本契约根本不构成授权（covering/matching 已按契约精确过滤）。
 
         # 4b. 是否需要审批（risk 下界 + L2/L3 硬性必须审批）
         required, why = self._approval_required(policy_kind, eff_risk)
         if required is False:
             permit = self._mint_permit_checked(tool=tool, capability=cap, args=args,
-                                               run_id=run_id, contract_id=contract_id,
-                                               contract_hash=contract_hash)
+                                               run_id=run_id)
             if permit is None:
                 return GateResult(GateVerdict.DENY_CONTRACT_SCOPE,
                                   "免审批放行失败（参数不可 canonical，fail-closed）")
@@ -287,8 +284,7 @@ class ApprovalGate:
                                   approval=req)
             self._broker.wait_for_resolution(req.approval_id,
                                              timeout=max(0.0, req.expires_at - now))
-        return self._verdict_for(req, tool=tool, capability=cap, args=args, run_id=run_id,
-                                 contract_id=contract_id, contract_hash=contract_hash)
+        return self._verdict_for(req, tool=tool, capability=cap, args=args, run_id=run_id)
 
     def _request_expiry(self, now: float, request_timeout_seconds: Optional[float]) -> float:
         window = self._wait_cap if request_timeout_seconds is None else float(request_timeout_seconds)
@@ -299,21 +295,20 @@ class ApprovalGate:
                 f"request_timeout_seconds 必须有限正数，得到 {request_timeout_seconds!r}")
         return now + window
 
-    # -------------------------------------------------- permit 生产（仅 Gate，持 seal）
+    # -------------------------------------------------- permit 生产（仅 Gate，经内部 issuer）
     def _mint_permit(self, *, tool: str, capability: str, args: Mapping[str, Any],
-                     run_id: str, contract_id: str, contract_hash: str,
-                     approval_id: str = "", grant_id: str = "") -> ToolPermit:
+                     run_id: str, approval_id: str = "", grant_id: str = "") -> ToolPermit:
         """签发工具边界许可（**仅** check_step 的 ALLOW 路径调用）。
 
-        经 ``broker.issue_permit(seal, …)`` —— 无 seal 的任意 producer 无法签发；
-        operation digest 由 broker 对原始 args 内部计算；permit 绑定 gate_id +
-        契约身份 + run_id；TTL 有界。参数不可 canonical → ApprovalStateError
+        经内部 :class:`PermitIssuer` 签发——issuer 内部绑定本 Gate 的 gate_id 与
+        expected contract_id/content_hash（调用方不可自报契约/gate 字段）；授权
+        来源互斥（approval/grant 不得同时）；operation digest 由 broker 对原始
+        args 内部计算；TTL 有界。参数不可 canonical → ApprovalStateError
         （调用方 fail-closed 折为 DENY_CONTRACT_SCOPE）。
         """
-        return self._broker.issue_permit(
-            self._gate_seal, gate_id=self._gate_id, tool=tool, capability=capability,
-            args=args, run_id=run_id, contract_id=contract_id, contract_hash=contract_hash,
-            approval_id=approval_id, grant_id=grant_id, ttl_seconds=self._permit_ttl)
+        return self._issuer.issue(
+            tool=tool, capability=capability, args=args, run_id=run_id,
+            approval_id=approval_id, grant_id=grant_id)
 
     def _mint_permit_checked(self, **kw: Any) -> Optional[ToolPermit]:
         """mint 的 fail-closed 包装：参数不可 canonical 等 → None（调用方折为类型化拒绝）。"""
@@ -332,17 +327,16 @@ class ApprovalGate:
 
     # -------------------------------------------------- 判定映射
     def _verdict_for(self, request: ApprovalRequest, *, tool: str, capability: str,
-                     args: Mapping[str, Any], run_id: str, contract_id: str,
-                     contract_hash: str) -> GateResult:
-        """终态映射；ALLOW 一律签发 permit（approve_once 的消费移至工具边界原子完成）。"""
+                     args: Mapping[str, Any], run_id: str) -> GateResult:
+        """终态映射；ALLOW 一律经内部 issuer 签发 permit（approve_once 的消费移至
+        工具边界原子完成）。"""
         st = self._broker.state_of(request.approval_id)
         if st == ApprovalState.APPROVED_ONCE:
             if self._broker.is_consumed(request.approval_id):
                 return GateResult(GateVerdict.DENY_ALREADY_CONSUMED,
                                   "approve_once 已被消费（exactly once）", approval=request)
             permit = self._mint_permit_checked(tool=tool, capability=capability, args=args,
-                                               run_id=run_id, contract_id=contract_id,
-                                               contract_hash=contract_hash,
+                                               run_id=run_id,
                                                approval_id=request.approval_id)
             if permit is None:
                 return GateResult(GateVerdict.DENY_CONTRACT_SCOPE,
@@ -352,8 +346,7 @@ class ApprovalGate:
                               approval=request, permit=permit)
         if st == ApprovalState.APPROVED_SESSION:
             permit = self._mint_permit_checked(tool=tool, capability=capability, args=args,
-                                               run_id=run_id, contract_id=contract_id,
-                                               contract_hash=contract_hash,
+                                               run_id=run_id,
                                                approval_id=request.approval_id)
             if permit is None:
                 return GateResult(GateVerdict.DENY_CONTRACT_SCOPE,

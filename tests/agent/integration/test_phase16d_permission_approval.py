@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Phase 16D — Permission & Approval Boundary 测试（含 Reviewer Patch 1/2 否证测试）。
+"""Phase 16D — Permission & Approval Boundary 测试（含 Reviewer Patch 1/2/3 否证测试）。
 
 任务书 §7 十二项最低锁定（1–12）+ 额外锁定（two-layer invariant / owner 守卫 /
 approve_session 多次放行 / wait_for_resolution 类型化）。
@@ -8,19 +8,23 @@ Reviewer Patch 1 否证（P1…P9）：risk 不可降级 / write_roots 强制 / 
 绑定 / 可信 USER 证据 / get-or-create 原子 / grant 时间窗 / 载荷不可变+防御复制 /
 permit 封闭撤销 TOCTOU / 16A hash 校验契约。
 
-Reviewer Patch 2 否证（P2A…P2E，锁定实测反例）：
-A. 任意 producer 不可签发 permit：broker 公开 issue_permit 已删除/封门（无 seal 或
-   非本 broker seal 一律 ApprovalStateError）；无 approval/grant 来源的 permit 也
-   绑定 gate_id+contract_id+content_hash+run_id；
-B. consume_permit 必填真实 tool/capability/原始 args，内部重算 operation digest；
-   缺身份 TypeError / 换 tool/args/capability 一律拒绝；
-C. audit digest 与 operation digest 分离：password/token 不同值 → operation digest
-   不同（audit 因脱敏碰撞）；default=repr 删除，非 JSON 类型 fail-closed；
-D. VerifiedUserEvidence 不得公开自铸：手工对象/跨 broker nonce/无关真实事件一律
-   拒绝；验证绑定 event_id 与 approval_id/contract_hash/tool/scope/decision；
-E. Gate 绑定可信组合根 expected contract_id/content_hash：自签扩权新 WorkContract
-   拒绝；content_hash 只作完整性校验，授权真实性来自 expected 绑定；
-   伪造 permit 全变体（短窗口伪造 / 已知 ID 篡改字段与时间窗 / 超长窗口）拒绝。
+Reviewer Patch 2 否证（P2A…P2E，锁定实测反例）：任意 producer 不可签发 permit；
+consume_permit 必填真实 tool/capability/原始 args；audit digest 与 operation
+digest 分离；VerifiedUserEvidence 不得公开自铸；Gate 绑定 expected contract。
+
+Reviewer Patch 3 否证（P3A…P3G，锁定 4 项 blocker 的实测反例）：
+A. producer 无法取得 issuer 并创建 source-less permit（broker 无 issue_permit /
+   GateSeal 已删除 / producer 线程 create_permit_issuer 拒绝 / 直接构造 issuer
+   拒绝 / 伪造 gate 或契约绑定的 permit 不可消费）；
+B. Contract A 的 grant 不可用于 Contract B（模型必填 contract 绑定 + covering/
+   matching 按契约精确过滤 + gate 层换约不覆盖）；
+C. capability/expiry/workspace 任一变化，旧 USER evidence 拒绝（typed
+   EvidenceContext exact-equality；verifier 绑定 contract_id+tool+capability）；
+D. nonce 跨 context / 重复使用 / 超窗按锁定生命周期拒绝（取出即销毁 + TTL）；
+E. approval+grant 双来源构造拒绝（模型层 + issuer 层）；
+F. 最后一步校验失败时 approve_once 仍未 consumed（consume 全校验后单点提交，
+   任何失败零状态变更）；
+G. 合法免审批、approve_once、approve_session、grant 路径保持通过。
 """
 from __future__ import annotations
 
@@ -39,9 +43,11 @@ from furina.agent.approval import (
     ApprovalState,
     ApprovalStateError,
     AuthorizationGrant,
-    GateSeal,
+    EvidenceContext,
     GateVerdict,
+    MAX_EVIDENCE_NONCE_TTL_SECONDS,
     PermitOutcome,
+    PermitIssuer,
     ResolutionStatus,
     ToolPermit,
     VerifiedUserEvidence,
@@ -69,14 +75,17 @@ _SNAPSHOT = {
 }
 
 #: 可信入口 USER 事件"台账"（模拟 C6 查询）：事件必须**真实存在**且**属于该操作
-#: 上下文**（contract_id + tool）才算数——格式合法 ≠ 真实性，真实但无关的事件也拒绝。
+#: 上下文**才算数——Patch 3：verifier 至少校验 contract_id + tool + capability
+#: （不得只检查 contract_id+tool）；格式合法 ≠ 真实性，真实但无关的事件也拒绝。
 _TRUSTED_USER_EVENTS: Dict[str, Dict[str, str]] = {
-    "lev_1756000000000_deadbeef": {"contract_id": "wc_16d_test", "tool": "fs.write_text"},
+    "lev_1756000000000_deadbeef": {"contract_id": "wc_16d_test",
+                                   "tool": "fs.write_text",
+                                   "capability": "cap.filesystem"},
 }
 
 
 def _trusted_verifier(user_event_id: str, context: Optional[Mapping] = None) -> bool:
-    """模拟可信入口验证器：查台账 + 校验操作上下文绑定。"""
+    """模拟可信入口验证器：查台账 + 校验操作上下文绑定（contract_id+tool+capability）。"""
     entry = _TRUSTED_USER_EVENTS.get(user_event_id)
     if entry is None:
         return False
@@ -99,14 +108,17 @@ def _make_broker(**kw) -> ApprovalBroker:
 
 
 def _make_pair(contract: Optional[WorkContract] = None, *, broker_kw: Optional[Dict] = None,
-               gate_kw: Optional[Dict] = None) -> Tuple[ApprovalBroker, ApprovalGate, WorkContract]:
-    """可信组合根：GateSeal + broker + 绑定该契约的 gate（含 permit_ttl 透传）。"""
+               gate_kw: Optional[Dict] = None,
+               issuer_kw: Optional[Dict] = None) -> Tuple[ApprovalBroker, ApprovalGate, WorkContract]:
+    """可信组合根（Patch 3）：broker → 决策面 create_permit_issuer（owner 线程，
+    内部绑定 gate_id + expected contract）→ 注入 Gate。"""
     c = contract if contract is not None else _contract()
-    seal = GateSeal()
-    broker = _make_broker(gate_seal=seal, **(broker_kw or {}))
-    gate = ApprovalGate(capability_snapshot=_SNAPSHOT, broker=broker, gate_seal=seal,
-                        expected_contract_id=c.contract_id,
-                        expected_content_hash=c.content_hash, **(gate_kw or {}))
+    broker = _make_broker(**(broker_kw or {}))
+    issuer = broker.create_permit_issuer(
+        expected_contract_id=c.contract_id, expected_content_hash=c.content_hash,
+        **(issuer_kw or {}))
+    gate = ApprovalGate(capability_snapshot=_SNAPSHOT, broker=broker,
+                        permit_issuer=issuer, **(gate_kw or {}))
     return broker, gate, c
 
 
@@ -398,22 +410,29 @@ def test_07_canonical_user_provenance_required_for_grant():
     ws = _grant_ws()
     for bad in ("llm_suggested", "backend_native", "inferred_intent", "adapter_default", ""):
         with pytest.raises(ApprovalStateError):
-            broker.create_grant(user_evidence=bad, capability="cap.filesystem",
+            broker.create_grant(user_evidence=bad, contract_id="wc_16d_test",
+                                contract_hash=_contract().content_hash,
+                                capability="cap.filesystem",
                                 tool_pattern="fs.write_text", workspace_scope=ws,
                                 expiry=broker.now() + 3600)
     g = _create_grant(broker)
     assert g.grant_id.startswith("gr_")
     assert g.user_event_id == "lev_1756000000000_deadbeef"
+    assert g.contract_id == "wc_16d_test", "Patch 3：grant 必须绑定契约身份"
     # 非 owner 线程（backend/executor 身份）不得创建授权：owner 构造期绑定后不可抢占
     non_owner = _make_broker(owner_thread_id=0xDEAD)
     with pytest.raises(ApprovalStateError):
         non_owner.create_grant(user_evidence="lev_1756000000000_deadbeef",
+                               contract_id="wc_16d_test",
+                               contract_hash=_contract().content_hash,
                                capability="cap.filesystem", tool_pattern="fs.write_text",
                                workspace_scope=ws, expiry=non_owner.now() + 3600)
     # 未绑定 owner（构造期即锁定）也不得创建授权
     unbound = ApprovalBroker(user_evidence_verifier=_trusted_verifier)
     with pytest.raises(ApprovalStateError):
         unbound.create_grant(user_evidence="lev_1756000000000_deadbeef",
+                             contract_id="wc_16d_test",
+                             contract_hash=_contract().content_hash,
                              capability="cap.filesystem", tool_pattern="fs.write_text",
                              workspace_scope=ws, expiry=unbound.now() + 3600)
 
@@ -457,11 +476,7 @@ def test_08_grant_scope_expiry_revocation_enforced():
 
     # (d) expiry：过期 grant 非激活 → DENY_GRANT_INACTIVE
     clock = FakeClock()
-    seal = GateSeal()
-    broker_d = _make_broker(clock=clock, gate_seal=seal)
-    gate_d = ApprovalGate(capability_snapshot=_SNAPSHOT, broker=broker_d, gate_seal=seal,
-                          expected_contract_id=c.contract_id,
-                          expected_content_hash=c.content_hash)
+    broker_d, gate_d, _ = _make_pair(c, broker_kw={"clock": clock})
     broker_d.create_grant(user_evidence="lev_1756000000000_deadbeef",
                           capability="cap.filesystem", tool_pattern="fs.write_text",
                           workspace_scope=ws, expiry=clock() + 10,
@@ -631,6 +646,8 @@ def test_owner_thread_mutation_guard():
     ws = _grant_ws()
     with pytest.raises(ApprovalStateError):
         broker.create_grant(user_evidence="lev_1756000000000_deadbeef",
+                            contract_id="wc_16d_test",
+                            contract_hash=_contract().content_hash,
                             capability="cap.filesystem", tool_pattern="fs.write_text",
                             workspace_scope=ws, expiry=broker.now() + 60)
     with pytest.raises(ApprovalStateError):
@@ -697,11 +714,7 @@ def test_patch1_risk_cannot_be_downgraded_by_caller():
                             wait_for_approval=False, **kw)
     assert r4.verdict == GateVerdict.APPROVAL_PENDING
     # 无任何风险信号（PM level 缺失 + 调用方未声明）→ fail-closed 拒绝，不建请求
-    seal = GateSeal()
-    broker_fresh = _make_broker(gate_seal=seal)
-    gate_fresh = ApprovalGate(capability_snapshot=_SNAPSHOT, broker=broker_fresh,
-                              gate_seal=seal, expected_contract_id=c.contract_id,
-                              expected_content_hash=c.content_hash)
+    broker_fresh, gate_fresh, _ = _make_pair(c)
     r5 = gate_fresh.check_step(pm_decision=PermissionDecision(True, "auto"),
                                wait_for_approval=False, **kw)
     assert r5.verdict == GateVerdict.DENY_APPROVAL and r5.approval is None
@@ -847,6 +860,8 @@ def test_patch4_verified_user_evidence_required():
     no_verifier = _make_broker(user_evidence_verifier=None)
     with pytest.raises(ApprovalStateError):
         no_verifier.create_grant(user_evidence="lev_1756000000000_deadbeef",
+                                 contract_id=c.contract_id,
+                                 contract_hash=c.content_hash,
                                  capability="cap.filesystem", tool_pattern="fs.write_text",
                                  workspace_scope=ws, expiry=no_verifier.now() + 3600)
     req = no_verifier.create_request(contract_id="wc_16d_test", run_id="run_1",
@@ -863,17 +878,25 @@ def test_patch4_verified_user_evidence_required():
     reject_all = _make_broker(user_evidence_verifier=lambda uid, ctx: False)
     with pytest.raises(ApprovalStateError):
         reject_all.create_grant(user_evidence="lev_1756000000000_deadbeef",
+                                contract_id=c.contract_id,
+                                contract_hash=c.content_hash,
                                 capability="cap.filesystem", tool_pattern="fs.write_text",
                                 workspace_scope=ws, expiry=reject_all.now() + 3600)
-    # (c) opaque nonce：request_user_evidence 返回内部句柄；消费时重查可信记录
-    broker, gate, _ = _make_pair(c)
-    nonce = broker.request_user_evidence(
-        "lev_1756000000000_deadbeef",
-        context={"decision": "grant", "contract_id": c.contract_id, "tool": "fs.write_text"})
+    # (c) opaque nonce（Patch 3：typed EvidenceContext exact-equality）：冻结时钟下
+    # 预验证上下文与消费时刻派生上下文完全一致才放行
+    clock = FakeClock()
+    broker, gate, _ = _make_pair(c, broker_kw={"clock": clock})
+    now = clock()
+    grant_ctx = EvidenceContext(
+        decision="grant", contract_id=c.contract_id, contract_hash=c.content_hash,
+        capability="cap.filesystem", tool_pattern="fs.write_text",
+        workspace_read_roots=ws.read_roots, workspace_write_roots=ws.write_roots,
+        issued_at=now, expiry=now + 3600)
+    nonce = broker.request_user_evidence("lev_1756000000000_deadbeef", context=grant_ctx)
     assert nonce.startswith("uev_")
     g = broker.create_grant(user_evidence=nonce, capability="cap.filesystem",
                             tool_pattern="fs.write_text", workspace_scope=ws,
-                            expiry=broker.now() + 3600,
+                            issued_at=now, expiry=now + 3600,
                             contract_id=c.contract_id, contract_hash=c.content_hash)
     assert g.user_event_id == "lev_1756000000000_deadbeef"
     # 手工构造 VerifiedUserEvidence（不得公开自铸）→ 一律拒绝
@@ -887,8 +910,7 @@ def test_patch4_verified_user_evidence_required():
     # 跨 broker：他处签发的 nonce（同 source 同形态）在本 broker 消费 → 拒绝
     other_broker = _make_broker()
     other_nonce = other_broker.request_user_evidence(
-        "lev_1756000000000_deadbeef",
-        context={"decision": "grant", "contract_id": c.contract_id, "tool": "fs.write_text"})
+        "lev_1756000000000_deadbeef", context=grant_ctx)
     with pytest.raises(ApprovalStateError):
         broker.create_grant(user_evidence=other_nonce, capability="cap.filesystem",
                             tool_pattern="fs.write_text", workspace_scope=ws,
@@ -981,6 +1003,8 @@ def test_patch6_grant_temporal_bounds():
     # now < issued_at → 未生效（不激活）
     assert broker.grant_state(g.grant_id, now=g.issued_at - 1)["active"] is False
     assert broker.covering_grant(tool="fs.write_text", capability="cap.filesystem",
+                                 contract_id=c.contract_id,
+                                 contract_hash=c.content_hash,
                                  paths=("C:/ws/work/o.md",), write_paths=("C:/ws/work/o.md",),
                                  now=g.issued_at - 1) is None
     # now >= expiry → 过期
@@ -1126,7 +1150,7 @@ def test_patch8_permit_closes_revocation_toctou():
     # (f) permit TTL：超窗消费失败
     clock = FakeClock()
     broker_f, gate_f, _ = _make_pair(c_or, broker_kw={"clock": clock},
-                                     gate_kw={"permit_ttl_seconds": 5})
+                                     issuer_kw={"permit_ttl_seconds": 5})
     rf = gate_f.check_step(**kw_d)
     assert rf.verdict == GateVerdict.ALLOW
     clock.advance(6)
@@ -1134,23 +1158,49 @@ def test_patch8_permit_closes_revocation_toctou():
                                        capability="cap.filesystem", args=args_r).ok
 
 
-# ================================================================ P2A. 任意 producer 不可签发 permit
-def test_patch8b_issue_permit_requires_gate_seal():
+# ================================================================ P2A/P3A. producer 无法取得 issuer 并签发 permit
+def test_patch8b_producer_cannot_mint_permits():
     c = _contract(policy_kind="approval_required_on_risk_level")
     broker, gate, _ = _make_pair(c)
     args_r = {"path": "C:/ws/docs/a.md"}
-    # 无 seal（broker 构造时未注入）→ 一律不可签发
-    no_seal = _make_broker()
-    with pytest.raises(ApprovalStateError):
-        no_seal.issue_permit(GateSeal(), gate_id="gate_" + "f" * 8, tool="fs.read_file",
-                             capability="cap.filesystem", args=args_r, run_id="r",
-                             contract_id=c.contract_id, contract_hash=c.content_hash)
-    # 错误 seal 对象（非本 broker 持有）→ 一律不可签发（对象身份校验）
-    with pytest.raises(ApprovalStateError):
-        broker.issue_permit(GateSeal(), gate_id="gate_" + "f" * 8, tool="fs.read_file",
-                            capability="cap.filesystem", args=args_r, run_id="r",
-                            contract_id=c.contract_id, contract_hash=c.content_hash)
-    # 公开 issue 路径只能经 Gate 的 ALLOW 判定出现（无 approval/grant 来源的 permit
+    # Patch 3 结构性拆分：broker 公开面无 issue_permit / gate_seal；GateSeal 已删除
+    assert not hasattr(broker, "issue_permit"), "broker 公开面不得携带 permit 签发能力"
+    assert not hasattr(broker, "gate_seal")
+    import furina.agent.approval as _ap
+    assert not hasattr(_ap, "GateSeal"), "公开 GateSeal 能力面已删除"
+    # gate 公开面只有消费侧（consume_permit/permit_state）与判定（check_step）
+    public = {n for n in dir(gate) if not n.startswith("_")}
+    assert not any("issue" in n or "mint" in n or "seal" in n for n in public)
+    # producer/runtime 线程（非 owner）不得创建 permit 签发器（decision 面专属）
+    box: Dict[str, Any] = {}
+
+    def producer() -> None:
+        try:
+            box["issuer"] = broker.create_permit_issuer(
+                expected_contract_id=c.contract_id,
+                expected_content_hash=c.content_hash)
+        except BaseException as exc:   # noqa: BLE001
+            box["exc"] = exc
+
+    t = threading.Thread(target=producer, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert isinstance(box.get("exc"), ApprovalStateError), "producer 线程不得取得 issuer"
+    assert "issuer" not in box
+    # 直接构造 PermitIssuer（无 broker 决策面入账能力）→ 拒绝
+    with pytest.raises((TypeError, ApprovalStateError)):
+        PermitIssuer(gate_id="gate_" + "f" * 8, expected_contract_id=c.contract_id,
+                     expected_content_hash=c.content_hash, ttl_seconds=30.0)
+    # 他 broker 决策面创建的合法 issuer 签出的 permit → 在本 broker 消费必拒
+    other_broker = _make_broker()
+    other_issuer = other_broker.create_permit_issuer(
+        expected_contract_id=c.contract_id, expected_content_hash=c.content_hash)
+    foreign = other_issuer.issue(tool="fs.read_file", capability="cap.filesystem",
+                                 args=args_r, run_id="run_ok")
+    assert not broker.consume_permit(foreign, tool="fs.read_file",
+                                     capability="cap.filesystem", args=args_r).ok
+    # 合法路径：permit 只能经 Gate 的 ALLOW 判定出现（无 approval/grant 来源的 permit
     # 同样绑定 gate_id + contract_id + content_hash + run_id）
     r = gate.check_step(tool="fs.read_file", args=args_r, contract=c,
                         pm_decision=PermissionDecision(True, "auto", Permission.L0_READ),
@@ -1235,3 +1285,350 @@ def test_patch9_gate_requires_bound_hash_verified_contract():
     r7 = harness.run_step(contract=_projection(policy_kind="approval_required_each_step"),
                           **dict(kw, run_id="run_p9b"))
     assert r7.verdict == GateVerdict.APPROVAL_PENDING
+
+
+# ================================================================ P3B. 伪造 contract/gate 绑定不可消费
+def test_patch3b_forged_gate_or_contract_binding_not_consumable():
+    c = _contract(policy_kind="approval_required_on_risk_level")
+    broker, gate, _ = _make_pair(c)
+    args_r = {"path": "C:/ws/docs/a.md"}
+    r = gate.check_step(tool="fs.read_file", args=args_r, contract=c,
+                        pm_decision=PermissionDecision(True, "auto", Permission.L0_READ),
+                        backend_capability_ids=("cap.filesystem",), run_id="run_p3b")
+    assert r.verdict == GateVerdict.ALLOW and r.permit is not None
+    # 篡改 gate 绑定（换成任意其它 gate_id）→ 消费必拒
+    tampered_gate = dataclasses.replace(r.permit, gate_id="gate_" + "a" * 8)
+    assert not broker.consume_permit(tampered_gate, tool="fs.read_file",
+                                     capability="cap.filesystem", args=args_r).ok
+    # 篡改契约绑定（同 broker 已知 permit 换 contract_id/hash）→ 消费必拒
+    other = _contract(contract_id="wc_16d_other")
+    tampered_contract = dataclasses.replace(r.permit, contract_id=other.contract_id,
+                                            contract_hash=other.content_hash)
+    assert not broker.consume_permit(tampered_contract, tool="fs.read_file",
+                                     capability="cap.filesystem", args=args_r).ok
+    # 原始 permit 仍可消费（篡改尝试不污染台账）
+    assert broker.consume_permit(r.permit, tool="fs.read_file",
+                                 capability="cap.filesystem", args=args_r).ok
+
+
+# ================================================================ P3C. Contract A 的 grant 不可用于 Contract B
+def test_patch3c_contract_a_grant_never_covers_contract_b():
+    # A 与 B：tool/capability/workspace 完全相同，仅契约身份不同（id 与 hash 均不同）
+    a = _contract(policy_kind="pre_approved_scoped", contract_id="wc_16d_test")
+    b = _contract(policy_kind="pre_approved_scoped", contract_id="wc_16d_other")
+    assert a.workspace_scope.read_roots == b.workspace_scope.read_roots
+    assert a.workspace_scope.write_roots == b.workspace_scope.write_roots
+    assert a.content_hash != b.content_hash
+    broker, gate_a, _ = _make_pair(a)
+    _, gate_b, _ = _make_pair(b)   # 独立 broker/gate（生产形态：每契约一个 gate）
+    grant = _create_grant(broker, a)   # 绑定 A（contract_id+contract_hash）
+    assert grant.contract_id == a.contract_id and grant.contract_hash == a.content_hash
+    # 模型层：grant 必填契约绑定（缺字段 → TypeError）
+    with pytest.raises(TypeError):
+        AuthorizationGrant(grant_id="gr_" + "1" * 12,
+                           user_event_id="lev_1756000000000_deadbeef",
+                           capability="cap.filesystem", tool_pattern="fs.write_text",
+                           workspace_scope=_grant_ws(), issued_at=0.0, expiry=1.0)
+    # broker 查询层：A 的 grant 对 B 的契约不覆盖/不匹配（covering/matching 双向）
+    assert broker.covering_grant(tool="fs.write_text", capability="cap.filesystem",
+                                 contract_id=b.contract_id, contract_hash=b.content_hash,
+                                 paths=("C:/ws/work/o.md",),
+                                 write_paths=("C:/ws/work/o.md",)) is None
+    assert broker.matching_grants(tool="fs.write_text", capability="cap.filesystem",
+                                  contract_id=b.contract_id,
+                                  contract_hash=b.content_hash,
+                                  paths=("C:/ws/work/o.md",),
+                                  write_paths=("C:/ws/work/o.md",)) == []
+    # 同 id 不同 hash（换约内容）同样不覆盖
+    b_same_id = _contract(policy_kind="pre_approved_scoped", contract_id="wc_16d_test",
+                          write_roots=("C:/ws/work", "C:/ws/extra"))
+    assert b_same_id.contract_id == a.contract_id
+    assert b_same_id.content_hash != a.content_hash
+    assert broker.covering_grant(tool="fs.write_text", capability="cap.filesystem",
+                                 contract_id=b_same_id.contract_id,
+                                 contract_hash=b_same_id.content_hash,
+                                 paths=("C:/ws/work/o.md",),
+                                 write_paths=("C:/ws/work/o.md",)) is None
+    # gate 层：B 的 gate 走 B 契约 → A 的 grant 不构成授权（pre_approved 无覆盖
+    # → DENY_APPROVAL，而非借用 A grant 放行）；A 的 gate 正常 ALLOW
+    pm = PermissionDecision(True, "task_authorization:t", Permission.L1_LOW_WRITE)
+    step = dict(tool="fs.write_text", args={"path": "C:/ws/work/o.md", "content": "x"},
+                pm_decision=pm, backend_capability_ids=("cap.filesystem",))
+    harness_a = _Harness(gate_a, broker)
+    assert harness_a.run_step(contract=a, **step).verdict == GateVerdict.ALLOW
+    assert harness_a.tool_calls == 1
+    rb = gate_b.check_step(contract=b, **dict(step, run_id="run_p3c"))
+    assert rb.verdict == GateVerdict.DENY_APPROVAL, "Contract A 的 grant 不得放行 Contract B"
+    assert rb.permit is None
+
+
+# ================================================================ P3D. capability/expiry/workspace 变化，旧 USER evidence 拒绝
+def test_patch3d_user_evidence_exact_context_binding():
+    clock = FakeClock()
+    c = _contract(policy_kind="pre_approved_scoped")
+    broker, gate, _ = _make_pair(c, broker_kw={"clock": clock})
+    now = clock()
+    ws = _grant_ws()
+    base_ctx = dict(
+        decision="grant", contract_id=c.contract_id, contract_hash=c.content_hash,
+        capability="cap.filesystem", tool_pattern="fs.write_text",
+        workspace_read_roots=ws.read_roots, workspace_write_roots=ws.write_roots,
+        issued_at=now, expiry=now + 3600)
+
+    def _mint(ctx_kw=None) -> str:
+        return broker.request_user_evidence(
+            "lev_1756000000000_deadbeef",
+            context=EvidenceContext(**{**base_ctx, **(ctx_kw or {})}))
+
+    def _try_consume(nonce: str, **grant_kw) -> None:
+        kw = dict(capability="cap.filesystem", tool_pattern="fs.write_text",
+                  workspace_scope=ws, issued_at=now, expiry=now + 3600,
+                  contract_id=c.contract_id, contract_hash=c.content_hash)
+        kw.update(grant_kw)
+        broker.create_grant(user_evidence=nonce, **kw)
+
+    # (a) 旧 nonce + 消费时刻任一维变化 → exact-equality 拒绝
+    with pytest.raises(ApprovalStateError):
+        _try_consume(_mint(), capability="cap.documents")     # capability 变化
+    with pytest.raises(ApprovalStateError):
+        _try_consume(_mint(), expiry=now + 7200)              # expiry 变化
+    ws_other = WorkspaceScope(read_roots=("C:/ws/docs",),
+                              write_roots=("C:/ws/work/sub",))
+    with pytest.raises(ApprovalStateError):                   # workspace 变化
+        _try_consume(_mint(), workspace_scope=ws_other)
+    with pytest.raises(ApprovalStateError):                   # scope_note 变化
+        _try_consume(_mint(), scope_note="different note")
+    # (b) 原始 event id 路径：verifier 台账绑定 contract_id+tool+capability——
+    # capability 变化 → 重查失败拒绝（verifier 不得只检查 contract_id+tool）
+    with pytest.raises(ApprovalStateError):
+        _try_consume("lev_1756000000000_deadbeef", capability="cap.documents")
+    # (c) approve_session 绑定完整 ApprovalRequest 身份：旧身份 nonce 不可跨请求使用
+    req1 = broker.create_request(contract_id=c.contract_id, run_id="run_1",
+                                 tool="fs.write_text", capability="cap.filesystem",
+                                 args={"path": "C:/ws/work/o.md", "content": "x"},
+                                 risk_level=Permission.L1_LOW_WRITE,
+                                 requested_scope=("C:/ws/work/o.md",),
+                                 expires_at=now + 60)
+    req2 = broker.create_request(contract_id=c.contract_id, run_id="run_1",
+                                 tool="fs.write_text", capability="cap.filesystem",
+                                 args={"path": "C:/ws/work/o.md", "content": "evil"},
+                                 risk_level=Permission.L1_LOW_WRITE,
+                                 requested_scope=("C:/ws/work/o.md",),
+                                 expires_at=now + 60)
+    assert req1.operation_digest != req2.operation_digest, \
+        "不同操作身份（content 不同）→ R1/R2 是两个不同审批"
+
+    def _session_ctx(req: Any) -> EvidenceContext:
+        return EvidenceContext(
+            decision="approve_session", approval_id=req.approval_id,
+            contract_id=req.contract_id, contract_hash=req.contract_hash,
+            run_id=req.run_id, tool=req.tool, capability=req.capability,
+            requested_scope=req.requested_scope, risk_level=req.risk_level.name,
+            policy_kind=req.policy_kind, operation_digest=req.operation_digest)
+
+    n1 = broker.request_user_evidence("lev_1756000000000_deadbeef",
+                                      context=_session_ctx(req1))
+    res1 = broker.resolve(req1.approval_id, ApprovalDecisionKind.APPROVE_SESSION,
+                          user_evidence=n1)
+    assert res1.ok and res1.status == ResolutionStatus.RESOLVED
+    n2 = broker.request_user_evidence("lev_1756000000000_deadbeef",
+                                      context=_session_ctx(req2))
+    res2 = broker.resolve(req2.approval_id, ApprovalDecisionKind.APPROVE_SESSION,
+                          user_evidence=n2)
+    assert res2.ok and res2.status == ResolutionStatus.RESOLVED
+    # 错身份 nonce（approval_id 填成 R2 的 → 上下文与 R3 消费时刻不一致）→ 拒绝
+    req3 = broker.create_request(contract_id=c.contract_id, run_id="run_3",
+                                 tool="fs.write_text", capability="cap.filesystem",
+                                 args={"path": "C:/ws/work/o.md", "content": "z"},
+                                 risk_level=Permission.L1_LOW_WRITE,
+                                 requested_scope=("C:/ws/work/o.md",),
+                                 expires_at=now + 60)
+    bad_ctx = dataclasses.replace(_session_ctx(req3), approval_id=req2.approval_id)
+    n_bad = broker.request_user_evidence("lev_1756000000000_deadbeef", context=bad_ctx)
+    with pytest.raises(ApprovalStateError):
+        broker.resolve(req3.approval_id, ApprovalDecisionKind.APPROVE_SESSION,
+                       user_evidence=n_bad)
+    # EvidenceContext 不可变（frozen dataclass：无 mutator）且格式 fail-closed
+    ctx = EvidenceContext(**base_ctx)
+    with pytest.raises(AttributeError):
+        ctx.capability = "cap.documents"   # type: ignore[misc]
+    with pytest.raises(ApprovalStateError):
+        EvidenceContext(decision="grant", contract_id="wc_x", contract_hash="not-hex")
+
+
+# ================================================================ P3E. nonce 跨 context/重复/超窗按锁定生命周期拒绝
+def test_patch3e_nonce_one_shot_and_bounded_lifetime():
+    clock = FakeClock()
+    c = _contract(policy_kind="pre_approved_scoped")
+    broker, gate, _ = _make_pair(c, broker_kw={"clock": clock})
+    now = clock()
+    ws = _grant_ws()
+    grant_ctx = EvidenceContext(
+        decision="grant", contract_id=c.contract_id, contract_hash=c.content_hash,
+        capability="cap.filesystem", tool_pattern="fs.write_text",
+        workspace_read_roots=ws.read_roots, workspace_write_roots=ws.write_roots,
+        issued_at=now, expiry=now + 3600)
+    grant_kw = dict(capability="cap.filesystem", tool_pattern="fs.write_text",
+                    workspace_scope=ws, issued_at=now, expiry=now + 3600,
+                    contract_id=c.contract_id, contract_hash=c.content_hash)
+    # (a) 一次性：成功消费后同 nonce 重复使用 → 拒绝（取出即销毁）
+    nonce = broker.request_user_evidence("lev_1756000000000_deadbeef", context=grant_ctx)
+    g1 = broker.create_grant(user_evidence=nonce, **grant_kw)
+    assert g1.grant_id.startswith("gr_")
+    with pytest.raises(ApprovalStateError):
+        broker.create_grant(user_evidence=nonce, **grant_kw)
+    # (b) 跨 context：grant 上下文的 nonce 用于 approve_session → 拒绝
+    req = broker.create_request(contract_id=c.contract_id, run_id="run_1",
+                                tool="fs.write_text", capability="cap.filesystem",
+                                args={"path": "C:/ws/work/o.md", "content": "x"},
+                                risk_level=Permission.L1_LOW_WRITE,
+                                requested_scope=("C:/ws/work/o.md",),
+                                expires_at=now + 60)
+    grant_nonce = broker.request_user_evidence("lev_1756000000000_deadbeef",
+                                               context=grant_ctx)
+    with pytest.raises(ApprovalStateError):
+        broker.resolve(req.approval_id, ApprovalDecisionKind.APPROVE_SESSION,
+                       user_evidence=grant_nonce)
+    # (c) 有界生命周期：预验证后超 MAX_EVIDENCE_NONCE_TTL_SECONDS → 拒绝
+    stale = broker.request_user_evidence("lev_1756000000000_deadbeef",
+                                         context=grant_ctx)
+    clock.advance(MAX_EVIDENCE_NONCE_TTL_SECONDS + 1)
+    with pytest.raises(ApprovalStateError):
+        broker.create_grant(user_evidence=stale, **grant_kw)
+    # (d) 验证失败的尝试同样烧毁 nonce（fail-closed：无重放窗口）
+    burn = broker.request_user_evidence("lev_1756000000000_deadbeef",
+                                        context=grant_ctx)
+    with pytest.raises(ApprovalStateError):
+        broker.create_grant(user_evidence=burn,
+                            **dict(grant_kw, capability="cap.documents"))
+    with pytest.raises(ApprovalStateError):
+        broker.create_grant(user_evidence=burn, **grant_kw)
+
+
+# ================================================================ P3F. 双来源拒绝 + consume 全校验后单点提交
+def test_patch3f_exclusive_source_and_atomic_consume():
+    c_each = _contract(policy_kind="approval_required_each_step")
+    c_pre = _contract(policy_kind="pre_approved_scoped")
+    clock = FakeClock()
+    broker, gate, _ = _make_pair(c_each, broker_kw={"clock": clock})
+    pm = PermissionDecision(True, "task_authorization:t", Permission.L1_LOW_WRITE)
+    args_x = {"path": "C:/ws/work/o.md", "content": "x"}
+    kw = dict(tool="fs.write_text", args=args_x, contract=c_each, pm_decision=pm,
+              backend_capability_ids=("cap.filesystem",), wait_for_approval=False,
+              run_id="run_p3f")
+    # (a) approval+grant 双来源：模型层构造拒绝；issuer 层签发拒绝；consume 复核拒绝
+    r0 = gate.check_step(**kw)
+    broker.resolve(r0.approval.approval_id, ApprovalDecisionKind.APPROVE_ONCE)
+    r_ok = gate.check_step(**dict(kw, wait_for_approval=True))
+    assert r_ok.verdict == GateVerdict.ALLOW and r_ok.permit is not None
+    with pytest.raises(ApprovalStateError):
+        dataclasses.replace(r_ok.permit, grant_id="gr_" + "2" * 12)  # 双来源构造
+    issuer = broker.create_permit_issuer(expected_contract_id=c_each.contract_id,
+                                          expected_content_hash=c_each.content_hash)
+    with pytest.raises(ApprovalStateError):
+        issuer.issue(tool="fs.write_text", capability="cap.filesystem", args=args_x,
+                     run_id="run_x", approval_id=r_ok.approval.approval_id,
+                     grant_id="gr_" + "3" * 12)
+    # 篡改副本绕过构造校验（object.__setattr__ 直改 frozen 字段）→ 消费复核必拒
+    # （台账对象不相等 + 双来源违规双重拦截；真实台账对象不被污染）
+    dual = dataclasses.replace(r_ok.permit)
+    object.__setattr__(dual, "grant_id", "gr_" + "4" * 12)
+    assert dual.approval_id and dual.grant_id
+    assert not broker.consume_permit(dual, tool="fs.write_text",
+                                     capability="cap.filesystem", args=args_x).ok
+    assert broker.permit_state(r_ok.permit.permit_id)["consumed_at"] is None
+    # (b) 原子性：最后一步校验失败（operation digest 不匹配）→ approve_once 未
+    # consumed、permit 未 consumed，且随后正确消费仍成功（无部分状态变更）
+    assert not broker.consume_permit(r_ok.permit, tool="fs.write_text",
+                                     capability="cap.filesystem",
+                                     args={"path": "C:/ws/work/o.md",
+                                           "content": "TAMPERED"}).ok
+    assert not broker.is_consumed(r_ok.approval.approval_id), \
+        "校验失败不得标记 approve_once 消费"
+    assert broker.permit_state(r_ok.permit.permit_id)["consumed_at"] is None
+    assert broker.consume_permit(r_ok.permit, tool="fs.write_text",
+                                 capability="cap.filesystem", args=args_x).ok
+    assert broker.is_consumed(r_ok.approval.approval_id)
+    # (b2) approve_once 撤销后：来源校验（approval 状态=最后一步）失败 → 仍未
+    # consumed、permit 未消费（消费标记只在唯一提交点写入）
+    r4 = gate.check_step(**dict(kw, run_id="run_p3f3"))
+    broker.resolve(r4.approval.approval_id, ApprovalDecisionKind.APPROVE_ONCE)
+    r5 = gate.check_step(**dict(kw, run_id="run_p3f3", wait_for_approval=True))
+    assert r5.verdict == GateVerdict.ALLOW and r5.permit is not None
+    broker.revoke(r5.approval.approval_id, reason="revoke before boundary")
+    out5 = broker.consume_permit(r5.permit, tool="fs.write_text",
+                                 capability="cap.filesystem", args=args_x)
+    assert not out5.ok
+    assert not broker.is_consumed(r5.approval.approval_id)
+    assert broker.permit_state(r5.permit.permit_id)["consumed_at"] is None
+    # (c) 撤销窗口失败 → 零状态变更（approval 仍 REVOKED、permit 未消费）
+    r2 = gate.check_step(**dict(kw, run_id="run_p3f2"))
+    broker.resolve(r2.approval.approval_id, ApprovalDecisionKind.APPROVE_SESSION,
+                   user_evidence="lev_1756000000000_deadbeef")
+    r3 = gate.check_step(**dict(kw, run_id="run_p3f2"))
+    assert r3.verdict == GateVerdict.ALLOW and r3.permit is not None
+    broker.revoke(r3.approval.approval_id, reason="revoke between allow and run")
+    out = broker.consume_permit(r3.permit, tool="fs.write_text",
+                                capability="cap.filesystem", args=args_x)
+    assert not out.ok
+    assert broker.permit_state(r3.permit.permit_id)["consumed_at"] is None
+    assert broker.state_of(r3.approval.approval_id) == ApprovalState.REVOKED
+    # (d) grant 路径同理：permit TTL 超窗消费失败 → permit 未消费
+    clock2 = FakeClock()
+    broker_g, gate_g, _ = _make_pair(c_pre, broker_kw={"clock": clock2},
+                                     issuer_kw={"permit_ttl_seconds": 5})
+    _create_grant(broker_g, c_pre, expiry=clock2() + 3600)
+    rg = gate_g.check_step(tool="fs.write_text", args=args_x, contract=c_pre,
+                           pm_decision=pm, backend_capability_ids=("cap.filesystem",),
+                           run_id="run_p3fg")
+    assert rg.verdict == GateVerdict.ALLOW and rg.permit is not None
+    clock2.advance(6)   # permit TTL 超窗
+    assert not broker_g.consume_permit(rg.permit, tool="fs.write_text",
+                                       capability="cap.filesystem", args=args_x).ok
+    assert broker_g.permit_state(rg.permit.permit_id)["consumed_at"] is None
+
+
+# ================================================================ P3G. 合法四路径保持通过
+def test_patch3g_all_legit_paths_still_pass():
+    pm = PermissionDecision(True, "task_authorization:t", Permission.L1_LOW_WRITE)
+    args_x = {"path": "C:/ws/work/o.md", "content": "x"}
+    # 1) 免审批（on_risk 阈值 L2 下 L0 读）
+    c_or = _contract(policy_kind="approval_required_on_risk_level")
+    broker1, gate1, _ = _make_pair(c_or)
+    h1 = _Harness(gate1, broker1)
+    r1 = h1.run_step(tool="fs.read_file", args={"path": "C:/ws/docs/a.md"},
+                     contract=c_or,
+                     pm_decision=PermissionDecision(True, "auto", Permission.L0_READ),
+                     backend_capability_ids=("cap.filesystem",), run_id="run_free")
+    assert r1.verdict == GateVerdict.ALLOW and h1.tool_calls == 1
+    assert r1.permit.approval_id == "" and r1.permit.grant_id == "", "免审批来源：二者皆空"
+    # 2) approve_once
+    c_each = _contract(policy_kind="approval_required_each_step")
+    broker2, gate2, _ = _make_pair(c_each)
+    h2 = _Harness(gate2, broker2)
+    kw2 = dict(tool="fs.write_text", args=args_x, contract=c_each, pm_decision=pm,
+               backend_capability_ids=("cap.filesystem",), run_id="run_once")
+    p2 = h2.run_step(wait_for_approval=False, **kw2)
+    assert p2.verdict == GateVerdict.APPROVAL_PENDING
+    broker2.resolve(p2.approval.approval_id, ApprovalDecisionKind.APPROVE_ONCE)
+    assert h2.run_step(**kw2).verdict == GateVerdict.ALLOW and h2.tool_calls == 1
+    # 3) approve_session
+    broker3, gate3, _ = _make_pair(c_each)
+    h3 = _Harness(gate3, broker3)
+    kw3 = dict(kw2, run_id="run_session")
+    p3 = h3.run_step(wait_for_approval=False, **kw3)
+    broker3.resolve(p3.approval.approval_id, ApprovalDecisionKind.APPROVE_SESSION,
+                    user_evidence="lev_1756000000000_deadbeef")
+    assert h3.run_step(**kw3).verdict == GateVerdict.ALLOW
+    assert h3.run_step(**kw3).verdict == GateVerdict.ALLOW and h3.tool_calls == 2
+    # 4) grant（同契约绑定）
+    c_pre = _contract(policy_kind="pre_approved_scoped")
+    clock = FakeClock()
+    broker4, gate4, _ = _make_pair(c_pre, broker_kw={"clock": clock})
+    h4 = _Harness(gate4, broker4)
+    grant4 = _create_grant(broker4, c_pre, expiry=clock() + 3600)
+    kw4 = dict(tool="fs.write_text", args=args_x, contract=c_pre, pm_decision=pm,
+               backend_capability_ids=("cap.filesystem",), run_id="run_grant")
+    r4 = h4.run_step(**kw4)
+    assert r4.verdict == GateVerdict.ALLOW and r4.grant is not None and h4.tool_calls == 1
+    assert r4.permit.grant_id == grant4.grant_id and r4.permit.approval_id == ""
