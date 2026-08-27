@@ -607,3 +607,24 @@ def test_d4_f7_invalid_month_never_clamped():
     r = resolve_temporal("2026年13月我要搬家", basis_epoch=_basis(2026, 8, 27),
                          tz_name=SH)
     assert r.payload is None and r.uncertain is True
+
+
+# ================================================================
+# Final calendar off-by-one closure（Review_3 = NEEDS_ONE_LINE_PATCH）
+# ================================================================
+
+def test_d4_g1_century_edge_leap_gap():
+    """G1：basis=2096-03-01（2096 闰日已过，2100 非闰）→ 最近将来有效为 2104-02-29。"""
+    from furina.cognition.temporal import resolve_temporal
+    r = resolve_temporal("2月29日提交材料", basis_epoch=_basis(2096, 3, 1),
+                         tz_name=SH)
+    assert r.payload and r.payload["kind"] == "POINT"
+    assert r.payload["start"] == "2104-02-29", r.payload
+
+
+def test_d4_g2_near_datetime_max_fails_closed():
+    """可选加固：basis 贴近 datetime 上限 → fail-closed（uncertain），绝不 raise。"""
+    from furina.cognition.temporal import resolve_temporal
+    r = resolve_temporal("2月29日提交材料", basis_epoch=_basis(9999, 3, 1),
+                         tz_name=SH)
+    assert r.uncertain is True and r.payload is None

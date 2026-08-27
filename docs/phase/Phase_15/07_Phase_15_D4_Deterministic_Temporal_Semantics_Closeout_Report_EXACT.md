@@ -160,7 +160,9 @@ Gate E  FULL SUITE ×2                                1278 passed / 0 failed（1
 | ID | 内容 | 实现 / 证据 |
 |---|---|---|
 | R1 | 真实生产配置接线 | `load_config()` 新增 `timezone=os.environ.get("FURINA_TIMEZONE","")` 装载（最小显式契约 `FURINA_TIMEZONE=<IANA>`；空=未配置→时间语义 fail-closed，绝不猜测/固定偏移）。F1：env 注入 America/New_York → 真 load_config → Furina(cfg)（dispatcher 绑定 harness）→ submit → 行 tz==配置值、午夜场景 start==NY 本地“明天”08-28（≠Asia/Shanghai 视角）；F2：空 env → 行存在但零日期零标记。共用 `_real_furina` 增加加性 `timezone=/cfg=` 参数（旧调用零变化） |
-| R2 | 无年 Feb29 最近将来策略 | 缺年分支重写为沿 Gregorian 周期向后搜索有效候选年（≤8 年窗口必含闰周）：2026 basis “2月29日提交材料”→**2028-02-29**；闰年 basis 在 2月29日前→同年 02-29；“2月30日”多年无解→uncertain。年度生日 ANNUAL 行为不受影响 |
+| R2 | 无年 Feb29 最近将来策略 | 缺年分支自 basis 年起**含端点**搜索 offset 0..8 共 9 个候选年（覆盖 Gregorian
+    世纪边缘最大闰日间隔，如 2096-03-01→2104-02-29；上限贴 datetime 支持年份,
+    贴近上限即 fail-closed）：2026 basis “2月29日提交材料”→**2028-02-29**；闰年 basis 在 2月29日前→同年 02-29；“2月30日”多年无解→uncertain。年度生日 ANNUAL 行为不受影响 |
 | R3 | 显式 年-月 | 新增 `YYYY年M月` 窄语法（负向 lookahead 防误吃全日期）：`2026年9月我要搬家`→RANGE 2026-09-01..09-30 precision=month；`2028年2月`→…02-29（闰）；`2026年13月`→uncertain 永不 clamp。裸 `9月`/`九月` **显式 DEFERRED**：缺年词法在冻结策略里仅对“日级表达式”定义了最近将来规则，月份裸形式语义未冻结——留待后续任务再定 |
 
 静态复审更新：`DEFAULT_USER_TZ` 引用面仍仅限 temporal.py 内部（签名默认值/_zone 兜底）；
@@ -175,6 +177,27 @@ Gate D  tests/cognition 全目录                         220 passed
 Gate E  FULL SUITE ×2                                1285 passed / 0 failed（172s, 182s）
 ```
 （1278 = 前值 + 本补丁新增 7 个测试。）
+
+## 14. External Reviewer Residual Closure III（Review_3 = NEEDS_ONE_LINE_PATCH → 已闭合）
+
+针对 1dcc71c 的唯一 blocker（含端点越界）+ 可选加固闭合：
+
+| ID | 内容 | 实现 / 证据 |
+|---|---|---|
+| G1 | 世纪边缘闰日缺口 | 缺年搜索窗口由 `range(year, year+8)`（不含 +8）改为 **offset 0..8 含端点共 9 个候选年**，并以上限常量 `_MAX_SUPPORTED_YEAR=9999` 封顶。basis=2096-03-01 的“2月29日提交材料”→ **2104-02-29**（2096 已过、2097~2103 无闰、2100 非闰）——G1 锁定 |
+| G2(可选加固) | 贴近 datetime 上限 | basis=9999-03-01 时窗口被钳到 9999 即止，无候选 → uncertain（不 raise）——G2 锁定 |
+
+回归确认：2024-before-Feb29→同年、2026→2028、2月30日→uncertain 等既有锁定不变
+（D4 全套件与 cognition/full 套件证据如下）。措辞修正：上一轮“≤8 年窗口必含闰周”
+表述已替换为本节的含端点精确定义。
+
+**Gates**：
+```text
+Gate A/D4   tests/cognition/test_phase15_d4_temporal.py   31 passed（27+G1/G2）
+Gate D      tests/cognition 全目录                         222 passed
+Gate E      FULL SUITE ×2                                1287 passed / 0 failed（186s, 183s）
+```
+（1285 = 前值 + 本补丁新增 2 个测试。）
 
 ## 11. Final Line
 

@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_USER_TZ = "Asia/Shanghai"
 PAYLOAD_VERSION = 1
+_MAX_SUPPORTED_YEAR = 9999      # datetime 模块支持上限（与 MAXYEAR 一致）
 
 _WEEKDAY_CN = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
                "日": 0, "天": 0}
@@ -217,11 +218,17 @@ def resolve_temporal(text: str, *, basis_epoch: float,
     m = _ABS_NOYEAR_RE.search(t)
     if m:
         mo, d = int(m.group(1)), int(m.group(2))
-        for yy in range(local.year, local.year + 8):        # ≤8 年窗口必含闰周
+        # Final calendar off-by-one closure：offset 0..8 **含端点**（共 9 个候选年，
+        # 覆盖 Gregorian 世纪边缘最大闰日间隔，如 2096-03-01 basis → 2104-02-29）；
+        # 上限贴 datetime.MAXYEAR，越界即 fail-closed。
+        year_hi = min(local.year + 8, _MAX_SUPPORTED_YEAR)
+        for yy in range(local.year, year_hi + 1):
             try:
                 cand = local.replace(year=yy, month=mo, day=d).date()
             except ValueError:
                 continue                                    # 该年无此日期
+            except OverflowError:
+                break                                       # 超出 datetime 支持 → 终止搜索
             if cand >= local.date():
                 return out(_payload("POINT", start=_iso(cand), matched=m.group(0),
                                     basis_epoch=basis_epoch, tz_name=tz_name))
