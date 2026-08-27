@@ -100,6 +100,60 @@ def test_d3_t2c_selective_isolation_bounds_one(tmp_path):
     hub.close()
 
 
+def test_d3_t2e_recall_bypass_with_locked_phrase(tmp_path):
+    """任务书锁定说法「刚才那个…」：完整 cooldown → 显式召回绕过流程。"""
+    hub, ledger = _hub(tmp_path)
+    _mem(hub, "用户喜欢喝冷萃咖啡")
+    hub.build_index()
+    hub.assemble(query="冷萃咖啡")                    # 首现并标记
+    suppressed = hub.assemble(query="给我讲讲咖啡吧")   # 非召回措辞 → 冷却抑制
+    assert not any("冷萃" in m for m in suppressed.autobiographical_memories)
+    recall = hub.assemble(query="刚才那个冷萃咖啡的配方再讲一遍")  # 锁定说法
+    assert (any("冷萃" in m for m in recall.autobiographical_memories)), (
+        "「刚才那个…」显式召回必须绕过冷却")
+    hub.close()
+
+
+def test_d3_t1b_same_candidate_suppressed_in_adjacent_query(tmp_path):
+    """reviewer D3-T1：同一 C3 候选在相邻（下一轮、不同措辞）query 中被冷却抑制。
+    对照组证明：无任何曝光时同一 query 本可浮出 → 抑制确系冷却所致，
+    而非 query 串不匹配或首现轮副作用。"""
+    hub, ledger = _hub(tmp_path)
+    _mem(hub, "用户喜欢喝冷萃咖啡")
+    hub.build_index()
+    ctx1 = hub.assemble(query="冷萃咖啡")              # 首现：浮出并标记
+    assert any("冷萃" in m for m in ctx1.autobiographical_memories)
+    ctx2 = hub.assemble(query="给我讲讲咖啡吧")         # 相邻但不同的 query
+    assert (not any("冷萃" in m for m in ctx2.autobiographical_memories)), (
+        "同一 C3 候选在相邻不同 query 中必须被冷却抑制")
+    hub.close()
+
+    ctrl, _ = _hub(Path(tempfile.mkdtemp()))           # 对照组：零曝光
+    _mem(ctrl, "用户喜欢喝冷萃咖啡")
+    ctrl.build_index()
+    ctrl_ctx = ctrl.assemble(query="给我讲讲咖啡吧")
+    assert any("冷萃" in m for m in ctrl_ctx.autobiographical_memories), (
+        "对照：无冷却时同一 query 必须浮出该候选")
+    ctrl.close()
+
+
+def test_d3_t7b_c6_events_enter_context_during_c3_cooldown(tmp_path):
+    """reviewer D3-T7：C3 冷却前后，当前 C6 event 仍正常进入 context。"""
+    hub, ledger = _hub(tmp_path)
+    _mem(hub, "用户喜欢喝冷萃咖啡")
+    ev = hub.record_event("USER_MESSAGE", payload={"text": "帮我看看这个文件"},
+                          turn_id=1, consolidate=False)
+    hub.build_index()
+    ctx1 = hub.assemble(query="冷萃咖啡")              # 冷却前：C3 浮出 + C6 在场
+    assert any("冷萃" in m for m in ctx1.autobiographical_memories)
+    assert ev.event_id in [e.event_id for e in ctx1.recent_events]
+    ctx2 = hub.assemble(query="给我讲讲咖啡吧")         # 冷却中：C3 被抑制
+    assert not any("冷萃" in m for m in ctx2.autobiographical_memories)
+    ids2 = [e.event_id for e in ctx2.recent_events]
+    assert (ev.event_id in ids2), ("C3 冷却不得影响当前 C6 event 进入 context")
+    hub.close()
+
+
 # ================================================================ mark-after-success
 def test_d3_t4_mark_only_selected_into_final_context(tmp_path):
     """T4：桶上限截断后，仅入选对象被标记；未入选者不记曝光。"""
@@ -195,13 +249,19 @@ def test_d3_t8_ttl_expiry_restores_eligibility(tmp_path):
 
 def test_d3_t9_lru_capacity_bounded(tmp_path):
     hub, ledger = _hub(tmp_path, capacity=1)
-    _mem(hub, "用户喜欢喝冷萃咖啡")
+    a = _mem(hub, "用户喜欢喝冷萃咖啡")
     _mem(hub, "用户上周开始夜跑锻炼")
+    hub.assembler._bounds = dict(hub.assembler._bounds, memories=1)  # 每轮仅入选 1 条
     hub.build_index()
-    hub.assemble(query="冷萃咖啡")                    # A 入账本
-    hub.assemble(query="夜跑锻炼的事")                 # B 入账本 → A 被 LRU 逐出
+    hub.assemble(query="冷萃咖啡")                    # 仅 A 入选并入账本
+    hub.assemble(query="夜跑锻炼的事")                 # 仅 B 入选 → A 被 LRU 逐出
     snap_keys = list(ledger.snapshot().keys())
     assert len(snap_keys) == 1, f"容量=1 时账本不得超过 1 条: {snap_keys}"
+    # 被淘汰项恢复资格：A 已不在账本 → 不再冷却 → 相邻 query 可再次浮出
+    assert not ledger.cooled(f"C3:{a.mem_id}"), "LRU 逐出的 A 必须恢复资格"
+    again = hub.assemble(query="冷萃咖啡")
+    assert any("冷萃" in m for m in again.autobiographical_memories), (
+        "恢复资格后同一 C3 候选必须可再次浮出")
     hub.close()
 
 
@@ -294,7 +354,7 @@ def test_d3_t15_recall_detector_no_false_positives():
     from furina.cognition.retrieval.exposure import is_recall_intent
     positives = ["你还记得我说的报告吗", "刚才你讲了一个观点",
                  "再说说上次那个事", "我之前提过这个问题",
-                 "再说一次吧"]
+                 "再说一次吧", "刚才那个冷萃咖啡的配方再讲一遍"]
     negatives = ["今天天气怎么样", "帮我写一段代码",
                  "最近怎么样呀", "我明天要去体检",
                  "这首歌不错"]
