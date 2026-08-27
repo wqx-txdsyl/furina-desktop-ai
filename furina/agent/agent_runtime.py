@@ -19,8 +19,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from furina.core import EventBus, EventType, get_logger
 from .permission import Permission, PermissionManager
-from .planner import AgentPlan, Planner
-from .tool import ToolRegistry, ToolResult
+from .planner import AgentPlan, AgentStep, Planner
+from .tool import BaseTool, ToolRegistry, ToolResult
 
 log = get_logger("agent.runtime")
 
@@ -55,7 +55,12 @@ class AgentRuntime:
 
     # -------------------------------------------------- 主循环
     def execute(self, user_request: str, extra_context: Optional[Dict[str, Any]] = None,
-                task_auth=None) -> Dict[str, Any]:
+                task_auth=None, *,
+                execution_guard: Optional[Callable[[AgentStep, BaseTool], None]] = None
+                ) -> Dict[str, Any]:
+        # Phase 16B Patch 2：execution_guard —— 默认关闭的窄 scope 门（每调用传入）：
+        # 在每次实际 step 的 tool.run **之前** 被调用；未提供（None）时行为与既有完全一致。
+        # 禁止跨调用把 guard 存在 runtime 上（并发不安全）；由调用方按 task 传入。
         # Phase 14.1.1 §1：**本次 task 独立 AuthorizationContext**（immutable/task-local）。
         # 未显式给（普通自然语言任务）→ 默认 L0/L1 only；L2/L3 deny unless 本 task 有匹配授权。
         if task_auth is None:
@@ -140,8 +145,11 @@ class AgentRuntime:
                                   permission_summary=f"denied:{eff.name}:{decision.reason}")
                 return {"status": "failed", "reason": "permission_denied", "results": results,
                         "task_id": task_id, "task_record": self._last_task_record}
-            # 执行
+            # 执行（execution_guard：在 tool.run **之前**检查 scope/capability；未提供时
+            # 行为与既有完全一致——默认关闭）
             try:
+                if execution_guard is not None:
+                    execution_guard(step, tool)
                 res: ToolResult = tool.run(**step.args)
             except TypeError as e:
                 res = ToolResult(False, error=f"参数错误: {e}")

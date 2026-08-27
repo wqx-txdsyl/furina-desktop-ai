@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import subprocess
 import sys
 import time
@@ -42,7 +43,9 @@ from furina.agent.backend import (
     RoutingPolicy,
     TechnicalRouter,
 )
+from furina.agent.permission import Permission
 from furina.agent.planner import AgentPlan, AgentStep, Planner
+from furina.agent.tool import BaseTool, ToolResult
 from furina.agent.tools import ALL_TOOLS
 from furina.agent.work_contract import (
     ApprovalPolicyRef,
@@ -323,7 +326,7 @@ def test_08_submit_exception_failsoft_no_fallback(tmp_path):
 
 
 # ================================================================ 9. Native adapter preserves existing result semantics
-def _make_runtime(planner_steps, extra_tools=None):
+def _make_runtime(planner_steps, extra_tools=None, planner_factory=None):
     bus = EventBus()
     tools = ToolRegistry()
     for c in ALL_TOOLS:
@@ -332,8 +335,9 @@ def _make_runtime(planner_steps, extra_tools=None):
         tools.register(t)
     perm = PermissionManager()   # 生产默认：on_confirm=None → L2/L3 拒绝（不削弱权限）
     records = []
+    factory = planner_factory or (lambda t: _FixedPlanner(t, planner_steps))
     agent = AgentRuntime(bus, tools, perm,
-                         planner_factory=lambda t: _FixedPlanner(t, planner_steps),
+                         planner_factory=factory,
                          task_history=lambda rec: records.append(rec))
     return tools, agent, records
 
@@ -487,7 +491,10 @@ def _native_backend(tools, agent, steps=None, extra_tools=None):
 
 
 def test_p1_02b_out_of_scope_path_fail_closed(tmp_path):
-    """写路径越出 workspace write root → submit 前 fail-closed，零执行（文件不存在）。"""
+    """写路径越出 workspace write root → guard 在 tool.run 前拒绝，零副作用（文件不存在）。
+
+    Patch 2：拒绝发生在 run 内部（execution_guard，tool.run 之前），不再是 dispatch 层。
+    """
     work = tmp_path / "work"
     work.mkdir()
     outside = tmp_path / "outside"
@@ -499,34 +506,43 @@ def test_p1_02b_out_of_scope_path_fail_closed(tmp_path):
     contract = _contract(tmp_path, allowed_backends=("native",),
                          allowed_capabilities=("cap.documents", "cap.filesystem"))
     out = router.dispatch(contract)
-    assert not out.ok and out.failure_code == "scope_violation"
-    assert "越界" in out.failure_detail and "write" in out.failure_detail
+    assert out.ok, "dispatch 成功（guard 在 run 内 tool.run 前拒绝）"
+    result = backend.last_result(out.handle.run_id)
+    assert result["status"] == "failed"
+    assert "execution_guard" in result["reason"] and "越界" in result["reason"]
     assert not (outside / "evil.md").exists(), "越界路径绝不执行"
-    assert backend.last_result("") is None  # 无任何 run 产生
     # 只读工具读越界同样拒绝（read scope）
     steps2 = [AgentStep(tool="fs.read_file", args={"path": str(outside / "secret.txt")})]
     tools2, agent2, _ = _make_runtime(steps2)
-    _, router2 = _native_backend(tools2, agent2)
+    backend2, router2 = _native_backend(tools2, agent2)
     out2 = router2.dispatch(_contract(tmp_path, allowed_backends=("native",),
                                       allowed_capabilities=("cap.filesystem",)))
-    assert not out2.ok and out2.failure_code == "scope_violation" and "read" in out2.failure_detail
+    assert out2.ok
+    result2 = backend2.last_result(out2.handle.run_id)
+    assert result2["status"] == "failed"
+    assert "execution_guard" in result2["reason"] and "read" in result2["reason"]
 
 
 def test_p1_02c_over_permission_capability_fail_closed(tmp_path):
-    """计划使用契约 allowed_capabilities 之外的 capability 工具 → submit 前 fail-closed。"""
+    """计划使用契约 allowed_capabilities 之外的 capability 工具 → tool.run 前拒绝。
+
+    Patch 2：拒绝发生在 PermissionManager 边界（task-scoped AuthorizationContext 的
+    allowed_tools 白名单 → task_scope_mismatch → permission_denied）。
+    """
     work = tmp_path / "work"
     work.mkdir()
     steps = [AgentStep(tool="doc.create",
                        args={"path": str(work / "a.md"), "content": "x"})]
     tools, agent, _ = _make_runtime(steps)
-    _, router = _native_backend(tools, agent)
+    backend, router = _native_backend(tools, agent)
     contract = _contract(tmp_path, allowed_backends=("native",),
                          allowed_capabilities=("cap.filesystem",))  # 不含 cap.documents
     out = router.dispatch(contract)
-    assert not out.ok and out.failure_code == "scope_violation"
-    assert "越权 capability" in out.failure_detail
-    assert not (work / "a.md").exists()
-    # 工具无法归属任何 capability → scope 无法准确表达 → fail-closed
+    assert out.ok
+    result = backend.last_result(out.handle.run_id)
+    assert result["status"] == "failed" and result["reason"] == "permission_denied"
+    assert not (work / "a.md").exists(), "越权 capability 的 step 绝不执行"
+    # 工具无法归属任何 capability → allowed_tools 白名单外 → 同样 tool.run 前拒绝
     from furina.agent.tool import BaseTool
 
     class _OrphanTool(BaseTool):
@@ -535,11 +551,12 @@ def test_p1_02c_over_permission_capability_fail_closed(tmp_path):
 
     tools2, agent2, _ = _make_runtime(
         [AgentStep(tool="custom.gadget", args={})], extra_tools=[_OrphanTool()])
-    _, router2 = _native_backend(tools2, agent2)
+    backend2, router2 = _native_backend(tools2, agent2)
     out2 = router2.dispatch(_contract(tmp_path, allowed_backends=("native",),
                                       allowed_capabilities=("cap.filesystem",)))
-    assert not out2.ok and out2.failure_code == "scope_violation"
-    assert "无法归属" in out2.failure_detail
+    assert out2.ok
+    result2 = backend2.last_result(out2.handle.run_id)
+    assert result2["status"] == "failed" and result2["reason"] == "permission_denied"
 
 
 def test_p1_02d_legal_scope_positive(tmp_path):
@@ -691,3 +708,214 @@ def test_p1_05b_dispatch_invalid_handle_zero_fallback(tmp_path):
     out2 = router2.dispatch(contract)
     assert not out2.ok and out2.failure_code == "run_handle_backend_mismatch"
     assert wrong.submit_calls == 1 and b2b.submit_calls == 0
+
+
+# ================================================================ Reviewer Patch 2 锁定测试
+class _SpyDivergingPlanner(Planner):
+    """build_plan 计数 spy（Patch 2：每次 dispatch 只能 build_plan 一次）。"""
+
+    def __init__(self, tools, steps):
+        super().__init__(tools)
+        self._steps = steps
+        self.calls = 0
+
+    def build_plan(self, request, context=None):
+        self.calls += 1
+        return AgentPlan(goal=request, steps=self._steps)
+
+
+class _SpyWriteTool(BaseTool):
+    """run() 置 called 标记（证明 tool.run 是否真的被调用）。"""
+
+    name = "doc.create"
+    description = "spy doc.create"
+    permission = Permission.L1_LOW_WRITE
+
+    def __init__(self):
+        self.called = False
+
+    def run(self, **kwargs):
+        self.called = True
+        return ToolResult(True, data={}, verified=True)
+
+
+def _make_link(link: Path, target: Path) -> bool:
+    """创建目录 junction/symlink；两法皆不可用返回 False（测试跳过）。"""
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except OSError:
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                           capture_output=True)
+        return r.returncode == 0
+
+
+def test_p2_01_diverging_planner_single_call(tmp_path):
+    """build_plan 每次 dispatch 恰好一次；guard 仍在 tool.run 前拦截越界 step。"""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    steps = [AgentStep(tool="doc.create",
+                       args={"path": str(outside / "evil.md"), "content": "x"})]
+    tools, agent, _ = _make_runtime(steps, planner_factory=lambda t: _SpyDivergingPlanner(t, steps))
+    spy_planner = agent.planner
+    from furina.agent.capabilities import build_capability_registry
+    capreg = build_capability_registry(tools)
+    backend = NativeAgentRuntimeBackend(agent, capability_registry=capreg)
+    reg = ExecutionBackendRegistry()
+    _ready(reg, backend)
+    out = TechnicalRouter(reg).dispatch(
+        _contract(tmp_path, allowed_backends=("native",),
+                  allowed_capabilities=("cap.documents", "cap.filesystem")))
+    assert out.ok
+    assert spy_planner.calls == 1, "每次 dispatch 只能 build_plan 一次（无 planner 预检）"
+    result = backend.last_result(out.handle.run_id)
+    assert result["status"] == "failed" and "execution_guard" in result["reason"]
+    assert not (outside / "evil.md").exists(), "外部文件不存在（guard 在 tool.run 前拒绝）"
+
+
+def test_p2_02_actual_step_over_permission_rejected_before_run(tmp_path):
+    """实际 step 越权（capability 白名单外）→ PermissionManager 在 tool.run 前拒绝。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    spy = _SpyWriteTool()   # 覆盖 ALL_TOOLS 中的 doc.create（ToolRegistry 按名覆盖）
+    steps = [AgentStep(tool="doc.create", args={"path": str(work / "a.md"), "content": "x"})]
+    tools, agent, _ = _make_runtime(steps, extra_tools=[spy])
+    backend, router = _native_backend(tools, agent)
+    out = router.dispatch(_contract(tmp_path, allowed_backends=("native",),
+                                    allowed_capabilities=("cap.filesystem",)))  # 不含 doc.documents
+    assert out.ok
+    result = backend.last_result(out.handle.run_id)
+    assert result["status"] == "failed" and result["reason"] == "permission_denied"
+    assert spy.called is False, "越权 step 的 tool.run 绝不执行"
+    assert not (work / "a.md").exists()
+
+
+def test_p2_03_symlink_escape_write_and_read_rejected(tmp_path):
+    """workspace 内 symlink/junction 指向外部 → 写逃逸与读逃逸均在 tool.run 前拒绝。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = work / "esc"
+    if not _make_link(link, outside):
+        pytest.skip("本机无法创建 symlink/junction，跳过逃逸测试")
+    # 写逃逸：doc.create → work/esc/evil.md（realpath 解析到 outside）
+    steps = [AgentStep(tool="doc.create",
+                       args={"path": str(link / "evil.md"), "content": "x"})]
+    tools, agent, _ = _make_runtime(steps)
+    backend, router = _native_backend(tools, agent)
+    out = router.dispatch(_contract(tmp_path, allowed_backends=("native",),
+                                    allowed_capabilities=("cap.documents", "cap.filesystem")))
+    assert out.ok
+    result = backend.last_result(out.handle.run_id)
+    assert result["status"] == "failed" and "execution_guard" in result["reason"]
+    assert not (outside / "evil.md").exists(), "symlink 写逃逸的目标文件必须不存在"
+    # 读逃逸：fs.read_file → work/esc/secret.txt（outside 内已存在）
+    (outside / "secret.txt").write_text("TOP SECRET", encoding="utf-8")
+    steps2 = [AgentStep(tool="fs.read_file", args={"path": str(link / "secret.txt")})]
+    tools2, agent2, _ = _make_runtime(steps2)
+    backend2, router2 = _native_backend(tools2, agent2)
+    out2 = router2.dispatch(_contract(tmp_path, allowed_backends=("native",),
+                                      allowed_capabilities=("cap.filesystem",)))
+    assert out2.ok
+    result2 = backend2.last_result(out2.handle.run_id)
+    assert result2["status"] == "failed" and "execution_guard" in result2["reason"]
+    assert "越界" in result2["reason"] and "read" in result2["reason"]
+    if link.exists():
+        os.rmdir(link)   # 只删 junction 本身，不动 target
+
+
+def test_p2_04_capability_registry_modified_after_construction_no_effect(tmp_path):
+    """构造后外部 CapabilityRegistry 修改不得改变既有 backend 的授权（冻结快照）。"""
+    tools, agent, _ = _make_runtime([])
+    from furina.agent.capabilities import build_capability_registry
+    from furina.agent.capabilities.models import Capability
+    capreg = build_capability_registry(tools)
+    declared_before = frozenset(c.capability_id for c in capreg.all() if c.available)
+    backend = NativeAgentRuntimeBackend(agent, capability_registry=capreg)
+    # 构造后外部向 registry 注入新能力（覆盖既有 doc.create 的所有权归属）
+    capreg.register(Capability(capability_id="cap.injected", domain="INJECTED",
+                               tools=["doc.create"], available=True))
+    assert backend.capabilities.capability_ids == tuple(sorted(declared_before))
+    assert "cap.injected" not in backend.capabilities.capability_ids
+    # 冻结快照不变：doc.create 仍归属 cap.documents（cap.injected 无授权）
+    assert backend._cap_snapshot["doc.create"] == "cap.documents"
+    reg = ExecutionBackendRegistry()
+    _ready(reg, backend)
+    router = TechnicalRouter(reg)
+    dec = router.route(_contract(tmp_path, allowed_backends=("native",),
+                                 allowed_capabilities=("cap.injected",)))
+    assert not dec.ok and "capability_mismatch" in dec.refusal_detail, \
+        "registry 后续修改不得授予新能力"
+    # 既有授权照常工作
+    work = tmp_path / "work"
+    work.mkdir()
+    steps = [AgentStep(tool="doc.create",
+                       args={"path": str(work / "ok.md"), "content": "Hello"})]
+    tools2, agent2, _ = _make_runtime(steps)
+    backend2, router2 = _native_backend(tools2, agent2)
+    out = router2.dispatch(_contract(tmp_path, allowed_backends=("native",),
+                                     allowed_capabilities=("cap.documents",)))
+    assert out.ok and backend2.last_result(out.handle.run_id)["status"] == "completed"
+
+
+def test_p2_05_legal_multi_root_read_write(tmp_path):
+    """合法多 root 读写正例：read root + 两个 write root 均放行。"""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "read.md").write_text("data", encoding="utf-8")
+    work1 = tmp_path / "work1"
+    work1.mkdir()
+    work2 = tmp_path / "work2"
+    work2.mkdir()
+    ws = WorkspaceScope(read_roots=(str(docs),), write_roots=(str(work1), str(work2)))
+    steps = [
+        AgentStep(tool="fs.read_file", args={"path": str(docs / "read.md")}),
+        AgentStep(tool="doc.create",
+                  args={"path": str(work2 / "new.md"), "content": "multi-root"}),
+    ]
+    tools, agent, _ = _make_runtime(steps)
+    backend, router = _native_backend(tools, agent)
+    contract = _contract(tmp_path, allowed_backends=("native",),
+                         allowed_capabilities=("cap.filesystem", "cap.documents"),
+                         workspace_scope=ws,
+                         verification_standard=VerificationStandard(
+                             criteria=(VerificationCriterion(
+                                 criterion_id="new_exists", kind="artifact_file_exists",
+                                 params={"path": str(work2 / "new.md")}),)))
+    out = router.dispatch(contract)
+    assert out.ok, out.decision
+    result = backend.last_result(out.handle.run_id)
+    assert result["status"] == "completed"
+    assert (work2 / "new.md").read_text(encoding="utf-8") == "multi-root"
+    assert result["task_record"]["steps"][0]["tool"] == "fs.read_file"
+    assert result["task_record"]["steps"][1]["status"] == "COMPLETED_VERIFIED"
+
+
+def test_p2_06_existing_permission_and_task_record_semantics(tmp_path):
+    """既有 L0/L1 放行、L2 denial、task_record 语义无回归（Native 路径显式锁定）。"""
+    # L1 写完成 + task_record 语义
+    work = tmp_path / "work"
+    work.mkdir()
+    steps = [AgentStep(tool="doc.create",
+                       args={"path": str(work / "ok.md"), "content": "Hello"})]
+    tools, agent, records = _make_runtime(steps)
+    backend, router = _native_backend(tools, agent)
+    out = router.dispatch(_contract(tmp_path, allowed_backends=("native",),
+                                    allowed_capabilities=("cap.documents",)))
+    assert out.ok
+    result = backend.last_result(out.handle.run_id)
+    rec = result["task_record"]
+    assert result["status"] == "completed"
+    assert rec["status"] == "COMPLETED_VERIFIED" and rec["verified"] is True
+    assert rec["task_id"] == result["task_id"] == out.handle.run_id
+    assert records and records[-1]["status"] == "COMPLETED_VERIFIED"
+    # L2 denial：fs.organize 在默认上下文（无 16D 审批）继续拒绝
+    steps2 = [AgentStep(tool="fs.organize", args={"base": str(work), "dry_run": True})]
+    tools2, agent2, _ = _make_runtime(steps2)
+    backend2, router2 = _native_backend(tools2, agent2)
+    out2 = router2.dispatch(_contract(tmp_path, allowed_backends=("native",)))
+    assert out2.ok
+    result2 = backend2.last_result(out2.handle.run_id)
+    assert result2["status"] == "failed" and result2["reason"] == "permission_denied"
+    assert result2["task_record"]["status"] == "FAILED"

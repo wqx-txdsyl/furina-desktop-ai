@@ -3,37 +3,43 @@
 包装既有 :class:`furina.agent.agent_runtime.AgentRuntime.execute`，**语义不变**：
 
 - 任务记录（task_record）、ToolResult 验证（ok ∧ verified）、权限行为全部原样透传；
-  ``task_auth=None`` → AgentRuntime 默认 L0/L1 任务上下文 —— **不实现 16D 异步审批，
-  也不削弱既有 PermissionManager**（L2/L3 依旧由默认上下文/on_confirm 拒绝）。
-- native “completed” 结果在 Phase 16 backend 边界仍属 **unverified**（16F 拥有 verifier）；
-  结果中的 verified 字段只反映 AgentRuntime 自身的验证语义，不是 16F 背书。
+- native “completed” 结果在 Phase 16 backend 边界仍属 **unverified**（16F 拥有 verifier）。
 
-**真 scope 约束（Reviewer Patch 1）**：Native 真正执行 WorkContract scope——
+**真 scope 约束（Reviewer Patch 1 + Patch 2）**：
 
-1. **实际工具不得越过 allowed_capabilities**：submit 前用 runtime 自身 planner 构建计划，
-   逐个步骤校验其工具归属的 capability 必须在契约 ``allowed_capabilities`` 内；
-   工具无法归属任何 capability / 未注册 / 权限声明缺失 → **scope 无法准确表达，
-   submit 前 fail-closed**（抛 :class:`BackendScopeViolation`）。
-2. **实际文件路径不得越过 workspace_scope**：每个步骤的路径参数（复用
-   AgentRuntime._step_paths 的规范路径提取）必须落在契约 workspace 内；写工具
-   （permission ≥ L1）路径必须在 write roots，只读工具路径在 read∪write roots。
-3. **执行后二次校验**：对实际 task_record 中真正执行过的步骤再查一遍（LLM planner
-   可能偏离预检计划；permission_denied / unknown_tool 步骤未执行工具，跳过）。
+1. **单次 build_plan**（Patch 2）：本模块**不**调用 planner 预检（消除"双 planner 调用"
+   安全模型）；build_plan 只在 AgentRuntime.execute 内发生一次。scope/capability 检查
+   通过两个真实边界在每次 step 的 ``tool.run`` **之前**执行：
+   a. **Native 专属 task-scoped AuthorizationContext**（allowed_tools = 冻结快照 ∩ 契约
+      allowed_capabilities；max_permission = L1）→ 既有 PermissionManager 在工具边界
+      拒绝 allowed_tools 之外的 step（越权 capability / 无归属工具 → task_scope_mismatch
+      → permission_denied）；L2/L3 因 max_permission=L1 **继续拒绝**（不实现 16D 异步
+      审批，不削弱既有权限语义）。
+   b. **execution_guard**（AgentRuntime 默认关闭的窄钩子，每调用传入，并发安全）→
+      真实路径封闭：resolved path（realpath + 不存在目标的最近现存祖先解析）必须在
+      workspace 内；workspace 内 symlink/junction 指向外部 → tool.run 前拒绝；
+      新文件目标 / 读路径 / 写路径均覆盖。
+2. **postflight 只作诊断**（Patch 2）：执行后对实际 task_record 做只读复核，发现越界仅
+   ``log.warning``，**不**作为阻止副作用的安全门（安全门由 guard 在 tool.run 前承担）。
 
-**真实能力/健康声明**：runtime 必须确实是 AgentRuntime；events/stop/resolve_approval
-均未实现 → 一律不声明支持（supports_*=False，调用即能力门控拒绝）；workspace_scoped
-只在真正执行 scope 时才为 true（本实现确实执行 → true）；probe TTL 必须有限正数。
+**冻结 capability ownership（Patch 2）**：构造时建立不可变 tool→capability 快照；
+外部 CapabilityRegistry 后续修改**不得**改变既有 backend 的授权；重复 tool owner、
+available 但 runtime 无对应工具等不一致事实在构造时 fail-closed；Native 只声明实际
+AgentRuntime 可执行的能力（available 且工具真实存在）。
 """
 from __future__ import annotations
 
 import math
+import os
 import time
+from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from furina.agent.agent_runtime import AgentRuntime
 from furina.agent.capabilities.models import CapabilityRegistry
-from furina.agent.permission import Permission
+from furina.agent.permission import AuthorizationContext, Permission
 from furina.agent.work_contract import WorkspaceScope
+from furina.core import get_logger
 
 from .models import (
     PROTOCOL_VERSION,
@@ -46,8 +52,7 @@ from .models import (
 )
 from .protocol import ExecutionBackend
 
-#: 未执行工具（无法产生实际路径/工具越界风险）的 step 错误标记。
-_SKIP_POSTFLIGHT_ERRORS = ("permission_denied",)
+log = get_logger("agent.backend.native")
 
 
 class NativeAgentRuntimeBackend(ExecutionBackend):
@@ -76,17 +81,21 @@ class NativeAgentRuntimeBackend(ExecutionBackend):
         self._runtime = runtime
         self._cap_reg = capability_registry
         self._probe_ttl_seconds = float(probe_ttl_seconds)
+        # 冻结 tool→capability 所有权快照（构造时刻固化；外部 registry 后续修改不影响授权）。
+        self._cap_snapshot = self._build_capability_snapshot(capability_registry, runtime)
         self._descriptor = BackendDescriptor(
             backend_id="native",
             display_name="Native AgentRuntime",
             description="包装既有 AgentRuntime.execute 的本地 backend（Phase 16B conformance）",
             protocol_version=PROTOCOL_VERSION,
         )
-        # 能力声明全部真实：events/stop/resolve_approval 未实现 → 一律 False；
-        # workspace_scoped 只在真正执行 scope 时才为 true（本实现 pre+post 双校验确实执行）。
+        # 只声明实际 AgentRuntime 可执行的能力：available 且声明了真实存在的工具。
+        # （构造校验已保证 available 能力的工具全部存在；空工具集能力不声明。）
+        registered = set(runtime.tools.list())
         self._capabilities = BackendCapabilities(
             capability_ids=tuple(sorted(
-                c.capability_id for c in capability_registry.all() if c.available)),
+                c.capability_id for c in capability_registry.all()
+                if c.available and c.tools and all(t in registered for t in c.tools))),
             supports_events=False,
             supports_stop=False,
             supports_resolve_approval=False,
@@ -120,7 +129,36 @@ class NativeAgentRuntimeBackend(ExecutionBackend):
             expiry=now + self._probe_ttl_seconds,
         )
 
-    # -- scope 解析与校验 ---------------------------------------------------------
+    # -- capability ownership 冻结 -------------------------------------------------
+    @staticmethod
+    def _build_capability_snapshot(registry: CapabilityRegistry,
+                                   runtime: AgentRuntime) -> Mapping[str, str]:
+        """构造时刻固化 tool→capability 所有权；不一致事实 fail-closed。
+
+        - 同一 tool 被两个不同 capability 声明（重复 owner）→ BackendError；
+        - available 能力声明的工具在 runtime 不存在 → BackendError。
+        返回 MappingProxyType 不可变快照（外部 registry 后续修改不影响授权）。
+        """
+        registered = set(runtime.tools.list())
+        snapshot: Dict[str, str] = {}
+        for cap in registry.all():
+            for tool in cap.tools:
+                prev = snapshot.get(tool)
+                if prev is not None and prev != cap.capability_id:
+                    raise BackendError(
+                        f"重复 tool owner: {tool!r} 同时被 '{prev}' 与 '{cap.capability_id}' "
+                        "声明（不一致事实 fail-closed）")
+                snapshot[tool] = cap.capability_id
+        for cap in registry.all():
+            if cap.available:
+                missing = [t for t in cap.tools if t not in registered]
+                if missing:
+                    raise BackendError(
+                        f"capability '{cap.capability_id}' available 但 runtime 无对应工具: "
+                        f"{missing}（不一致事实 fail-closed）")
+        return MappingProxyType(dict(snapshot))
+
+    # -- scope 解析与单步检查 -------------------------------------------------------
     def _extract_scope(self, projection: Mapping[str, Any]):
         """从只读 projection 重建契约 scope；无法表达 → BackendScopeViolation（fail-closed）。"""
         request = projection.get("canonical_user_request")
@@ -143,81 +181,136 @@ class NativeAgentRuntimeBackend(ExecutionBackend):
             extra["path"] = str(ws.write_roots[0])
         return request, allowed_caps, ws, extra
 
+    @staticmethod
+    def _resolve_path(path: str) -> str:
+        """realpath 语义 + 不存在目标的**最近现存祖先**解析。
+
+        - 已存在路径：os.path.realpath 完整解析 symlink/junction（Windows junction 同样）；
+        - 新文件目标（不存在）：逐级上溯到最近现存祖先再 realpath，之后按名字逐级拼回
+          —— workspace 内 symlink/junction 指向外部 → 解析结果越出根 → 拒绝。
+        """
+        ap = os.path.abspath(os.path.expanduser(str(path)))
+        cur = ap
+        suffix = []
+        while not os.path.exists(cur):
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            suffix.append(os.path.basename(cur))
+            cur = parent
+        real = os.path.realpath(cur)
+        for name in reversed(suffix):
+            real = os.path.join(real, name)
+        return real
+
+    @staticmethod
+    def _within(real_path: str, real_roots: Tuple[str, ...]) -> bool:
+        rp = os.path.normcase(real_path)
+        for rr in real_roots:
+            root = os.path.normcase(rr)
+            if rp == root or rp.startswith(root + os.sep):
+                return True
+        return False
+
+    def _check_path_closed(self, path: str, ws: WorkspaceScope, writable: bool) -> None:
+        """真实路径封闭：resolved path 必须在 workspace 内（写工具限 write roots）。"""
+        real = self._resolve_path(path)
+        roots = ws.write_roots if writable else (ws.read_roots + ws.write_roots)
+        real_roots = tuple(self._resolve_path(r) for r in roots)
+        if not self._within(real, real_roots):
+            kind = "write" if writable else "read"
+            raise BackendScopeViolation(
+                f"execution_guard: 路径越界（{kind} scope, realpath）: {path!r} -> {real!r}"
+                "（含 symlink/junction 解析；新文件目标按最近现存祖先解析）")
+
     def _check_step(self, tool_name: str, args: Mapping[str, Any],
                     allowed_caps: frozenset, ws: WorkspaceScope) -> None:
-        """单步 scope 门：工具 ∈ allowed_capabilities，路径 ∈ workspace（写工具限 write roots）。"""
+        """单步 scope 门（tool.run 前）：能力归属 ∈ allowed_capabilities，路径真实封闭。"""
         if not tool_name:
-            raise BackendScopeViolation("plan step 缺失 tool 名（scope 无法准确表达）")
-        owner = self._cap_reg.tool_owner(tool_name)
-        if owner is None:
+            raise BackendScopeViolation("execution_guard: step 缺失 tool 名（fail-closed）")
+        cap = self._cap_snapshot.get(tool_name)
+        if cap is None:
             raise BackendScopeViolation(
-                f"tool '{tool_name}' 无法归属任何 capability：scope 无法准确表达（fail-closed）")
-        if owner.capability_id not in allowed_caps:
+                f"execution_guard: tool '{tool_name}' 无法归属任何 capability（fail-closed）")
+        if cap not in allowed_caps:
             raise BackendScopeViolation(
-                f"tool '{tool_name}' 属于 '{owner.capability_id}'，超出契约 "
-                f"allowed_capabilities {sorted(allowed_caps)}（越权 capability）")
+                f"execution_guard: 越权 capability: tool '{tool_name}' 属于 '{cap}'，"
+                f"超出契约 allowed_capabilities {sorted(allowed_caps)}")
         try:
             tool = self._runtime.tools.get(tool_name)
         except Exception as exc:
             raise BackendScopeViolation(
-                f"tool '{tool_name}' 未注册：scope 无法准确表达（fail-closed）") from exc
+                f"execution_guard: tool '{tool_name}' 未注册（fail-closed）") from exc
         perm = getattr(tool, "permission", None)
         if not isinstance(perm, Permission):
             raise BackendScopeViolation(
-                f"tool '{tool_name}' 权限声明缺失/非法：scope 无法准确表达（fail-closed）")
+                f"execution_guard: tool '{tool_name}' 权限声明缺失（fail-closed）")
         writable = perm.value >= Permission.L1_LOW_WRITE.value
         for p in AgentRuntime._step_paths(tool_name, dict(args or {})):
-            if not ws.contains_path(p, writable=writable):
-                kind = "write" if writable else "read"
-                raise BackendScopeViolation(f"路径越界（{kind} scope）: {p}")
+            self._check_path_closed(p, ws, writable)
 
-    def _preflight(self, request: str, extra: Dict[str, Any],
-                   allowed_caps: frozenset, ws: WorkspaceScope) -> None:
-        """submit 前 fail-closed：用 runtime 自身 planner 预检计划（与实际执行同一路径）。"""
-        try:
-            plan = self._runtime.planner.build_plan(request, extra or {})
-        except Exception as exc:
-            raise BackendScopeViolation(
-                f"无法构建计划，scope 无法准确表达（fail-closed）: {exc}") from exc
-        for step in plan.steps:
+    def _make_guard(self, allowed_caps: frozenset, ws: WorkspaceScope):
+        """构造每 submit 专属 guard 闭包（AgentRuntime 在每次 tool.run 前调用）。
+
+        闭包只捕获构造时刻的契约事实（allowed_caps/ws）与冻结快照 → 并发安全，
+        无任何跨调用共享可变状态，也不 monkeypatch planner。
+        """
+        def _guard(step, tool) -> None:
             self._check_step(step.tool, step.args, allowed_caps, ws)
+        return _guard
 
-    def _postflight(self, result: Dict[str, Any],
-                    allowed_caps: frozenset, ws: WorkspaceScope) -> None:
-        """执行后二次校验实际 task_record（LLM planner 可能偏离预检；未执行步骤跳过）。"""
-        record = result.get("task_record") or {}
-        for step in record.get("steps") or []:
+    def _diagnostic_postflight(self, result: Dict[str, Any],
+                               allowed_caps: frozenset, ws: WorkspaceScope) -> None:
+        """诊断性后验：只读复核实际执行，越界仅记日志（**不**阻止副作用——安全门由 guard 承担）。"""
+        for step in (result.get("task_record") or {}).get("steps") or []:
             error = step.get("error") or ""
-            if error in _SKIP_POSTFLIGHT_ERRORS or error.startswith("unknown_tool"):
-                continue   # 工具未执行，无实际路径/工具越界风险
-            self._check_step(step.get("tool") or "", step.get("args") or {},
-                             allowed_caps, ws)
+            if (error == "permission_denied" or error.startswith("execution_guard:")
+                    or error.startswith("unknown_tool")):
+                continue   # 工具未执行：无实际越界风险
+            try:
+                self._check_step(step.get("tool") or "", step.get("args") or {},
+                                 allowed_caps, ws)
+            except BackendScopeViolation as exc:
+                log.warning("native postflight 诊断：实际执行越过契约 scope（guard 应已拦截）: %s", exc)
 
     # -- 执行 -------------------------------------------------------------------
     def submit(self, contract_projection: Mapping[str, Any], *,
                run_id: Optional[str] = None) -> BackendRunHandle:
         """以既有 AgentRuntime.execute 语义执行契约 projection；scope 真实约束。
 
-        - 请求主体取 canonical_user_request（客观内容）；workspace write root 作为
-          路径上下文（与 App 既有调用一致：``{"path": ...}``）；
-        - ``task_auth=None``：沿用 AgentRuntime 默认 L0/L1 任务上下文 —— **不削弱**
-          既有权限语义，也不在此伪造 16D 授权；
-        - run_id 由 AgentRuntime 内部生成（stable task_id），调用方 run_id 参数不覆盖
-          runtime 任务身份（身份真相归 runtime）。
+        - 请求主体取 canonical_user_request；workspace write root 作为路径上下文
+          （与 App 既有调用一致：``{"path": ...}``）；
+        - build_plan 只发生一次（execute 内部）；本方法不做任何 planner 预检；
+        - task_auth = Native 专属 task-scoped AuthorizationContext（allowed_tools 白名单 +
+          max_permission=L1）：PermissionManager 在真实工具边界拒绝越权 capability /
+          无归属工具；L2/L3 继续拒绝（不实现 16D 审批，不削弱既有权限语义）；
+        - execution_guard 在每次 tool.run 前做真实路径封闭（symlink/junction 逃逸拒绝）。
         """
-        # 1) 解析 + 预检（任何无法准确表达 → submit 前 fail-closed，零执行）
+        # 1) 解析契约 scope（无法准确表达 → submit 前 fail-closed，零执行）
         try:
             request, allowed_caps, ws, extra = self._extract_scope(contract_projection)
-            self._preflight(request, extra, allowed_caps, ws)
         except BackendScopeViolation:
             raise
         except Exception as exc:
             raise BackendScopeViolation(
-                f"契约 scope 解析/预检失败（fail-closed）: {exc}") from exc
-        # 2) 执行（语义原样透传；L2/L3 仍由 PermissionManager 默认拒绝）
-        result = self._runtime.execute(request, extra if extra else None)
-        # 3) 后验实际执行不得越过契约 scope
-        self._postflight(result, allowed_caps, ws)
+                f"契约 scope 解析失败（fail-closed）: {exc}") from exc
+        # 2) 每 submit 专属 guard + task-scoped AuthorizationContext（并发安全，无共享可变态）
+        guard = self._make_guard(allowed_caps, ws)
+        allowed_tools = tuple(sorted(
+            t for t, cap in self._cap_snapshot.items() if cap in allowed_caps))
+        task_auth = AuthorizationContext(
+            authorization_id=f"auth_native_{contract_projection.get('contract_id','')}",
+            max_permission=Permission.L1_LOW_WRITE,
+            allowed_tools=allowed_tools,
+            allowed_path_root="",     # 多 root workspace 由 guard 做真实路径封闭
+            source="native_backend",
+            is_default=False,
+        )
+        # 3) 执行：build_plan 仅一次；guard 在每次 tool.run 前检查
+        result = self._runtime.execute(
+            request, extra if extra else None, task_auth=task_auth, execution_guard=guard)
+        # 4) 诊断性后验（只记日志，不阻止）
+        self._diagnostic_postflight(result, allowed_caps, ws)
         rid = str(result.get("task_id") or "")
         if not rid:
             raise RuntimeError("AgentRuntime.execute 未返回 task_id")

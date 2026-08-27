@@ -2,10 +2,11 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED + Reviewer Patch 1 已落实（等待外部验收；不声明 16B_PASS）
+STATUS                         = EXECUTED + Reviewer Patch 1/2 已落实（等待外部验收；不声明 16B_PASS）
 BASE_SHA                       = 5a0e839c77b73407a5d4701901785f28f2386db4（ACCEPTED_16A_SHA，
                                  ff-only 集成后 16B 分支起点）
                                  ceea57fc50d3d437f40830fd734fd889e77ecaa5（Patch 1 起点）
+                                 c8ce379f6418f3bf7dca8531946fb6eb4e100676（Patch 2 起点）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，沿用 16A 惯例）
 BRANCH                         = feature/phase16-16b-execution-backend
 LOCAL_REMOTE_MATCH             = push 后核验，结论记录于外部 handoff
@@ -103,6 +104,40 @@ REVIEWER_PATCH_1                = 五项 blocker 修复：
                                  submit_calls==0 有测试锁定）；BackendScopeViolation 专门化
                                  failure_code=scope_violation。
 
+REVIEWER_PATCH_2                = 三项 blocker 修复：
+                                 P2-1 删除"双 planner 调用"安全模型：Native 不再做任何
+                                 planner 预检（build_plan 每次 dispatch 只在
+                                 AgentRuntime.execute 内发生**一次**，spy 计数锁定 ==1）；
+                                 scope/capability 改在两个真实边界于每次 step 的 tool.run
+                                 **之前**检查：(a) Native 专属 task-scoped
+                                 AuthorizationContext（allowed_tools = 冻结快照 ∩ 契约
+                                 allowed_capabilities，max_permission=L1，is_default=False）
+                                 → 既有 PermissionManager 在工具边界拒绝白名单外 step
+                                 （越权 capability/无归属工具 → task_scope_mismatch →
+                                 permission_denied），L2/L3 因 max_permission=L1 继续拒绝
+                                 （不实现 16D 异步审批，不削弱既有权限语义）；
+                                 (b) AgentRuntime 新增**默认关闭**的窄 execution_guard
+                                 （execute 每调用关键字参数，None 时行为与既有完全一致；
+                                 并发安全——guard 为每 submit 闭包，无跨调用共享可变态，
+                                 不 monkeypatch planner），在 tool.run 前做真实路径封闭。
+                                 postflight 降级为**只诊断**（发现越界仅 log.warning，
+                                 不作为阻止副作用的安全门——安全门由 guard 承担）。
+                                 P2-2 执行层真实路径封闭：guard 用 realpath 语义解析
+                                 resolved path；不存在的新文件目标按**最近现存祖先**解析
+                                 后再拼回；workspace 内 symlink/junction 指向外部 →
+                                 tool.run 前拒绝（写逃逸与读逃逸均拒绝，目标文件不存在
+                                 有测试锁定）；新文件目标/读路径/写路径全覆盖；写工具
+                                 （permission≥L1）限 write roots，只读工具限 read∪write。
+                                 P2-3 冻结 capability ownership：Native 构造时建立
+                                 tool→capability 不可变快照（MappingProxyType）；外部
+                                 CapabilityRegistry 构造后修改不得改变既有 backend 授权
+                                 （cap.injected 注入后仍 capability_mismatch，冻结快照
+                                 doc.create→cap.documents 不变有测试锁定）；重复 tool
+                                 owner、available 但 runtime 无对应工具 → 构造时
+                                 BackendError（不一致事实 fail-closed）；能力声明只含
+                                 available 且工具真实存在的能力（仅声明 AgentRuntime
+                                 实际可执行的能力）。
+
 C1_C7_SCHEMA_CHANGED           = false
 DATABASE_MIGRATION_ADDED       = false
 PRODUCTION_FILES_CHANGED       = 仅新增 furina/agent/backend/ 包（models.py/protocol.py/
@@ -111,28 +146,28 @@ PRODUCTION_FILES_CHANGED       = 仅新增 furina/agent/backend/ 包（models.py
                                  work_contract.py 等零改动）
 TEST_FILES_CHANGED             = 仅新增 tests/agent/integration/test_phase16b_execution_backend.py
 TARGETED_TESTS                 = tests/agent/integration/test_phase16b_execution_backend.py：
-                                 27 passed。任务书 §7 全部 12 项（1–12 同初版）+ Patch 1 否证
-                                 专项 11 项：越界写路径/越界读路径 submit 前 fail-closed 且
-                                 文件不存在、越权 capability（契约外 capability 工具 + 无归属
-                                 孤儿工具）、合法范围正例（allowed ∩ workspace 内成功）、
-                                 虚假 Native 能力（supports_* 全 False + capability_ids 恰为
-                                 available 派生 + 能力门控调用全拒 + TTL bool/0/负/NaN/Inf 拒）、
-                                 假 runtime/伪 capability_registry 构造即拒、capabilities
-                                 bool 冒充 int 与 NaN/Inf/非正上限全拒、health NaN/Inf/时序
-                                 非法/bool 冒充数值/到达 expiry 即 stale/healthy 缺前置态拒、
-                                 protocol_version 不匹配注册类型化拒绝、set_health 非
-                                 BackendHealth 拒且不覆盖既有事实、坏 descriptor/capabilities
-                                 不泄漏 AttributeError、submit 返回 None/错 backend handle
-                                 类型化失败且零 fallback。
+                                 33 passed。任务书 §7 全部 12 项 + Patch 1 否证 11 项 +
+                                 Patch 2 锁定 6 项：diverging planner（spy planner
+                                 calls==1，guard 仍在 tool.run 前拦截越界 step，外部文件
+                                 不存在）；实际 step 越权在 tool.run 前拒绝（spy tool
+                                 called=False + 无归属孤儿工具 permission_denied）；
+                                 symlink/junction 写逃逸与读逃逸均 tool.run 前拒绝
+                                 （realpath 解析到 workspace 外；写逃逸目标文件不存在；
+                                 本机 mklink /J 实测可用）；capability registry 构造后被
+                                 注入 cap.injected 不影响既有 backend（能力声明不变、
+                                 冻结快照不变、路由仍 capability_mismatch、既有授权照常）；
+                                 合法多 root 读写正例（read root + 双 write root 均放行）；
+                                 既有 L0/L1 放行、L2 denial、task_record 语义显式无回归。
 AGENT_RUNTIME_REGRESSION       = pytest tests/agent tests/test_agent_tools.py
-                                 tests/test_skeleton.py：273 passed
+                                 tests/test_skeleton.py：279 passed
                                  （15 warnings 为既有线程 ResourceWarning 类告警，与本
-                                 阶段无关）
+                                 阶段无关；含 AgentRuntime execution_guard 默认关闭
+                                 零回归验证）
 COGNITION_REGRESSION           = pytest tests/cognition：279 passed（Phase 15
                                  cognition/store 契约不变——任务书 §7.12）
 FULL_SUITE                     = .venv/Scripts/python.exe -m pytest -q（本轮仅一次）：
-                                 1518 passed, 0 failed（152.29s，exit 0）
-                                 较初版 1507 恰 +11（Patch 1 新增 11 项否证专项）
+                                 1524 passed, 0 failed（163.36s，exit 0）
+                                 较 Patch 1 1518 恰 +6（Patch 2 新增 6 项锁定专项）
 
 REMAINING_GAPS                 = 1) 按 brief 无 Hermes(16C)/approval channel(16D)/事件
                                    状态机(16E)/verifier(16F)/持久化 ledger(16H)/C7
