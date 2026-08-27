@@ -2,9 +2,10 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED + Reviewer Patch 1 已落实（等待外部验收；不声明 16A_PASS）
+STATUS                         = EXECUTED + Reviewer Patch 1/2 已落实（等待外部验收；不声明 16A_PASS）
 BASE_SHA                       = b107edf33a459a5b7080f1b0b575dd8a93cac06c（初版）
-                                 b23d8fee51956efccab358be8520a96c05ec10ec（Reviewer Patch 1 起点）
+                                 b23d8fee51956efccab358be8520a96c05ec10ec（Patch 1 起点）
+                                 6902a805339bcd782d79028e45c36235c984399e（Patch 2 起点）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，沿用 Phase 15 惯例）
 BRANCH                         = feature/phase16-16a-work-contract
 LOCAL_REMOTE_MATCH             = push 后核验，结论记录于外部 handoff
@@ -16,7 +17,15 @@ IMMUTABLE                      = true（全部 @dataclass(frozen=True)；集合�
                                   重算 hash 恒一致；setattr 抛 FrozenInstanceError 有测试锁定）
 CONTRACT_ID_RULE               = 调用方提供稳定幂等键 ^wc_[0-9a-zA-Z][0-9a-zA-Z._:-]{2,63}$；
                                   同 contract_id + 不同 content_hash ⇒ ContractIdConflictError
-                                  （ensure_no_conflict），是冲突不是更新；完全一致 = 幂等重放放行
+                                  （ensure_no_conflict），是冲突不是更新；完全一致 = 幂等重放放行；
+                                  直接构造时显式传入的 content_hash 同样强制 64 位小写 hex
+                                  （格式非法先拒，值不符走篡改拒绝路径；缺省由内部计算）
+NESTED_FROM_DICT_STRICT        = true（Patch 2 #1：全部嵌套 from_dict 无任何 float()/int()/
+                                  str() 有损转换——serialized scalar 按原类型进入
+                                  __post_init__ 严格校验；bool→int、float→int、
+                                  numeric-string→float、number→str 一律拒绝；
+                                  嵌套载荷缺键/形状损坏统一折为
+                                  WorkContractValidationError，不泄漏 KeyError/TypeError）
 VERSION_HASH_RULE              = contract_version 强制 semver 三段式并计入 hash 载荷；
                                   content_hash = SHA-256(canonical JSON)；canonical =
                                   json.dumps(sort_keys=True, separators=(",",":"),
@@ -57,23 +66,25 @@ PRODUCTION_FILES_CHANGED       = 仅新增 furina/agent/work_contract.py（独�
 TEST_FILES_CHANGED             = 仅新增 tests/agent/integration/test_phase16a_work_contract.py
 
 TARGETED_TESTS                 = tests/agent/integration/test_phase16a_work_contract.py：
-                                 76 passed。除任务书 §6 十项外覆盖 Patch 1 全部 blocker：
-                                 B1 criteria 防御性拷贝+外部 list 篡改后 hash 不变；
-                                 B2 required 严格 bool（"false"/1 等拒绝、True/False hash 相异、
-                                 往返不转换）；B3 CostBudget amount/currency 矩阵 + 规范化
-                                 同 hash + created_at_epoch 校验；B4 from_dict fail-closed 矩阵
-                                 （marker 缺失/不匹配、hash 缺失/空/非法/删 hash 后篡改一律拒绝
-                                 ——从不重新签名；未知字段拒绝；篡改保留旧 hash 拒绝）；
-                                 B5 严格 JSON 域（nan/inf/set 拒绝）；B6 非 abs 前置拒绝矩阵 +
-                                 UNC 根 + sibling-prefix 否证；B7 transport JSON loads/dumps
-                                 往返稳定、from_transport_json 还原等值、反向修改无效、
-                                 to_transport_dict 纯 plain dict 断言；B8 path 判据越界拒绝/
-                                 read/write 内放行；B9 真实 hub 全 store 快照（见下）。
+                                 94 passed。覆盖任务书 §6 十项 + Patch 1 全部 blocker
+                                 （B1–B8、B10：criteria 防御拷贝、required 严格 bool、
+                                 CostBudget/created_at 严格校验与 currency 规范化、
+                                 from_dict fail-closed 矩阵、严格 JSON 域、非 abs 根前置拒绝
+                                 +UNC+sibling 否证、transport 往返稳定、path 判据 scope 内）
+                                 + Patch 2 全部 blocker：
+                                 P2-1 嵌套 scalar 拒绝矩阵——max_attempts True/1.9/"3"、
+                                 duration "60.0"、cost amount "5.0"/True 与 currency 数值、
+                                 criterion_id/kind/policy_id/policy_kind/scope_note/
+                                 grant_record_ref 合法字符串改数值全部拒绝（原 payload 未触
+                                 碰时重算 hash 保持一致）；缺键/坏形载荷统一
+                                 WorkContractValidationError 无 KeyError/TypeError 泄漏；
+                                 直接构造显式 content_hash 格式前置校验；P2-2 C5 快照修复见
+                                 C1_C7_PROOF。
 AGENT_COGNITION_REGRESSION     = pytest tests/agent tests/cognition tests/test_c2_contract.py
-                                 tests/test_agent_tools.py：467 passed（15 warnings 为既有
+                                 tests/test_agent_tools.py：485 passed（15 warnings 为既有
                                  线程 ResourceWarning 类告警，与本阶段无关）
 FULL_SUITE                     = .venv/Scripts/python.exe -m pytest tests -q（本轮仅一次）：
-                                 1439 passed, 0 failed（227.90s，exit 0）
+                                 1457 passed, 0 failed（209.01s，exit 0）
 SKIP_XFAIL_ADDED               = false
 
 C1_C7_PROOF                    = 重写后的
@@ -86,11 +97,18 @@ C1_C7_PROOF                    = 重写后的
                                  （all_episodes/episode_count/sources/evidence_units/tier_counts
                                  只读注册面）、C3 memory 底层库全表快照、C4 user_model
                                  （query_active 原生行 + user_model_items 表）、C5 relationship
-                                 （milestones 表 + 引擎面只读探测）、C6 life_events（count/
-                                 query_recent 原生行 + 表快照 + event_processing）、C7
-                                 agent_task 三表冻结 schema+行；另以 cog.db 全表兜底。
-                                 WorkContract 构造/重放/冲突检测/from_dict/from_transport_json/
-                                 projection 全生命周期前后逐项相等 ⇒ unchanged。
+                                 ——Patch 2 #2 修复 false-green：禁用 getattr(rel,"engine")
+                                 兜底，改用 RelationshipStore 公共只读面
+                                 state_dict()/factors()/truth_owner/milestones()，并在快照内
+                                 断言真实引擎数据存在（truth_owner=="RelationshipEngine"、
+                                 state_dict ≥5 个数值键、factors 非空），前后完整相等；
+                                 不再引用不存在的 cog.db "memories" 表（memories 属 mem.db，
+                                 归 C3）；finally 同时关闭 hub 与 MemoryStore；
+                                 C6 life_events（count/query_recent 原生行 + 表快照 +
+                                 event_processing）、C7 agent_task 三表冻结 schema+行；
+                                 另以 cog.db 全表兜底。WorkContract 构造/重放/冲突检测/
+                                 from_dict/from_transport_json/projection 全生命周期前后
+                                 逐项相等 ⇒ unchanged。
 
 READONLY_VIEWS                 = 两类只读视图并存，措辞澄清（Patch1 #7）：
                                  (a) to_backend_projection()：递归 MappingProxyType 深度只读

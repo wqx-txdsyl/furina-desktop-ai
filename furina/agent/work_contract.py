@@ -124,6 +124,17 @@ def _clean_str(value: Any, field_name: str) -> str:
     return v
 
 
+def _nested_from_dict(cls_name: str, build):
+    """统一 fail-closed 壳：缺键/形状损坏一律折为 WorkContractValidationError，
+    不泄漏 KeyError/TypeError；校验错误原样穿透。"""
+    try:
+        return build()
+    except WorkContractValidationError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WorkContractValidationError(f"{cls_name}.from_dict 载荷损坏（缺键/形状错误）: {exc}") from exc
+
+
 def compute_content_hash(payload: Mapping[str, Any]) -> str:
     """确定性内容摘要：SHA-256 over canonical JSON（sorted keys、紧凑分隔符、ASCII、严格域）。
 
@@ -177,7 +188,12 @@ class CostBudget:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "CostBudget":
-        return cls(amount=d["amount"], currency=d.get("currency", "CNY"))
+        if not isinstance(d, Mapping):
+            _fail("CostBudget.from_dict 需要 Mapping 输入")
+        return _nested_from_dict(
+            "CostBudget",
+            lambda: cls(amount=d["amount"], currency=d.get("currency", "CNY")),
+        )
 
 
 @dataclass(frozen=True)
@@ -241,7 +257,15 @@ class WorkspaceScope:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "WorkspaceScope":
-        return cls(read_roots=tuple(d.get("read_roots", ())), write_roots=tuple(d.get("write_roots", ())))
+        if not isinstance(d, Mapping):
+            _fail("WorkspaceScope.from_dict 需要 Mapping 输入")
+        return _nested_from_dict(
+            "WorkspaceScope",
+            lambda: cls(
+                read_roots=tuple(d.get("read_roots", ())),
+                write_roots=tuple(d.get("write_roots", ())),
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -288,11 +312,21 @@ class ExecutionBudget:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "ExecutionBudget":
-        return cls(
-            max_duration_seconds=float(d["max_duration_seconds"]),
-            cost_limit=CostBudget.from_dict(d["cost_limit"]),
-            max_attempts=int(d["max_attempts"]),
-        )
+        if not isinstance(d, Mapping):
+            _fail("ExecutionBudget.from_dict 需要 Mapping 输入")
+
+        def _build():
+            raw_cost = d["cost_limit"]
+            cost = raw_cost if isinstance(raw_cost, CostBudget) else CostBudget.from_dict(raw_cost)
+            # scalar 一律原值透传：bool/float/numeric-string 由 __post_init__ 严格拒绝，
+            # 不做 float()/int() 有损转换
+            return cls(
+                max_duration_seconds=d["max_duration_seconds"],
+                cost_limit=cost,
+                max_attempts=d["max_attempts"],
+            )
+
+        return _nested_from_dict("ExecutionBudget", _build)
 
 
 @dataclass(frozen=True)
@@ -333,11 +367,16 @@ class ArtifactExpectation:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "ArtifactExpectation":
-        return cls(
-            artifact_id=d["artifact_id"],
-            artifact_type=d["artifact_type"],
-            expected_path=d["expected_path"],
-            required=d.get("required", True),  # 原值透传，由 __post_init__ 严格校验
+        if not isinstance(d, Mapping):
+            _fail("ArtifactExpectation.from_dict 需要 Mapping 输入")
+        return _nested_from_dict(
+            "ArtifactExpectation",
+            lambda: cls(
+                artifact_id=d["artifact_id"],
+                artifact_type=d["artifact_type"],
+                expected_path=d["expected_path"],
+                required=d.get("required", True),  # 原值透传，由 __post_init__ 严格校验
+            ),
         )
 
 
@@ -384,10 +423,15 @@ class VerificationCriterion:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "VerificationCriterion":
-        return cls(
-            criterion_id=str(d["criterion_id"]),
-            kind=str(d["kind"]),
-            params=tuple(dict(d.get("params", {})).items()),
+        if not isinstance(d, Mapping):
+            _fail("VerificationCriterion.from_dict 需要 Mapping 输入")
+        return _nested_from_dict(
+            "VerificationCriterion",
+            lambda: cls(
+                criterion_id=d["criterion_id"],  # 原值透传（禁止 str() 转换）
+                kind=d["kind"],
+                params=dict(d.get("params", {})),
+            ),
         )
 
 
@@ -434,9 +478,14 @@ class VerificationStandard:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "VerificationStandard":
-        return cls(
-            criteria=tuple(VerificationCriterion.from_dict(x) for x in d.get("criteria", ())),
-            verifier_refs=tuple(d.get("verifier_refs", ())),
+        if not isinstance(d, Mapping):
+            _fail("VerificationStandard.from_dict 需要 Mapping 输入")
+        return _nested_from_dict(
+            "VerificationStandard",
+            lambda: cls(
+                criteria=tuple(VerificationCriterion.from_dict(x) for x in d.get("criteria", ())),
+                verifier_refs=tuple(d.get("verifier_refs", ())),
+            ),
         )
 
 
@@ -476,11 +525,16 @@ class ApprovalPolicyRef:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "ApprovalPolicyRef":
-        return cls(
-            policy_id=str(d["policy_id"]),
-            policy_kind=str(d["policy_kind"]),
-            scope_note=str(d.get("scope_note", "")),
-            grant_record_ref=str(d.get("grant_record_ref", "")),
+        if not isinstance(d, Mapping):
+            _fail("ApprovalPolicyRef.from_dict 需要 Mapping 输入")
+        return _nested_from_dict(
+            "ApprovalPolicyRef",
+            lambda: cls(
+                policy_id=d["policy_id"],  # 原值透传（禁止 str() 转换）
+                policy_kind=d["policy_kind"],
+                scope_note=d.get("scope_note", ""),
+                grant_record_ref=d.get("grant_record_ref", ""),
+            ),
         )
 
 
@@ -610,6 +664,12 @@ class WorkContract:
         if math.isnan(ca_f) or math.isinf(ca_f):
             _fail("created_at_epoch 不允许 NaN/Inf")
         object.__setattr__(self, "created_at_epoch", ca_f)
+
+        if self.content_hash:
+            # 直接构造时显式提供的 content_hash 同样严格要求 64 位小写 hex
+            provided = self.content_hash
+            if not isinstance(provided, str) or not re.fullmatch(r"[0-9a-f]{64}", provided):
+                _fail(f"content_hash 必须是 64 位小写 hex（或留空由内部计算），得到 {provided!r}")
 
         computed = compute_content_hash(self._hash_payload())
         if self.content_hash and self.content_hash != computed:

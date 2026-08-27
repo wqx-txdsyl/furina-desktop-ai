@@ -206,6 +206,132 @@ def test_from_dict_fail_closed_matrix():
 
 
 # ================================================================
+# Patch 2 #1 — 嵌套 scalar 有损转换全部拒绝；载荷损坏不泄漏 KeyError/TypeError
+# ================================================================
+
+
+def test_max_attempts_bool_and_float_rejected_in_nested_transport():
+    base = WorkContract(**_minimal_kwargs())
+    original_hash = base.content_hash
+    for bad in (True, False, 1.9, "3"):
+        d = base.to_dict()
+        d["budget"]["max_attempts"] = bad
+        with pytest.raises(WorkContractValidationError, match="max_attempts"):
+            WorkContract.from_dict(d)
+    # 原 payload 未被触碰，hash 复算保持一致
+    assert compute_content_hash(base._hash_payload()) == original_hash
+
+
+def test_duration_numeric_string_rejected_in_nested_transport():
+    base = WorkContract(**_minimal_kwargs())
+    d = base.to_dict()
+    d["budget"]["max_duration_seconds"] = "60.0"
+    with pytest.raises(WorkContractValidationError, match="max_duration_seconds"):
+        WorkContract.from_dict(d)
+
+
+def test_cost_amount_and_currency_scalar_types_rejected_in_nested_transport():
+    base = WorkContract(**_minimal_kwargs())
+    for mutate in (
+        lambda dd: dd["budget"]["cost_limit"].update(amount="5.0"),
+        lambda dd: dd["budget"]["cost_limit"].update(amount=True),
+        lambda dd: dd["budget"]["cost_limit"].update(currency=7),
+    ):
+        d = base.to_dict()
+        mutate(d)
+        with pytest.raises(WorkContractValidationError):
+            WorkContract.from_dict(d)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("verification_standard", "criteria", 0, "criterion_id"),
+        ("verification_standard", "criteria", 0, "kind"),
+        ("approval_policy", "policy_id"),
+        ("approval_policy", "policy_kind"),
+        ("approval_policy", "scope_note"),
+        ("approval_policy", "grant_record_ref"),
+    ],
+)
+def test_valid_string_scalars_changed_to_numerics_rejected(path):
+    base = WorkContract(**_minimal_kwargs())
+    d = base.to_dict()
+    container = d
+    for key in path[:-1]:
+        container = container[key]
+    container[path[-1]] = 12345
+    with pytest.raises(WorkContractValidationError):
+        WorkContract.from_dict(d)
+
+
+def _payload_fragment(name):
+    """取一份合法契约的嵌套载荷片段（每次深拷贝，供缺键变异）。"""
+    p = WorkContract(**_minimal_kwargs()).to_dict()
+    mapping = {
+        "budget": p["budget"],
+        "cost": p["budget"]["cost_limit"],
+        "criterion": p["verification_standard"]["criteria"][0],
+        "policy": p["approval_policy"],
+        "artifact": _full_contract().to_dict()["artifact_expectations"][0],
+    }
+    return json.loads(json.dumps(mapping[name]))
+
+
+def _drop(fragment: dict, key: str) -> dict:
+    fragment.pop(key)
+    return fragment
+
+
+@pytest.mark.parametrize(
+    "name,build",
+    [
+        ("budget_no_cost_limit",
+         lambda: ExecutionBudget.from_dict(_drop(_payload_fragment("budget"), "cost_limit"))),
+        ("budget_no_duration",
+         lambda: ExecutionBudget.from_dict(_drop(_payload_fragment("budget"), "max_duration_seconds"))),
+        ("cost_no_amount",
+         lambda: CostBudget.from_dict(_drop(_payload_fragment("cost"), "amount"))),
+        ("criterion_params_wrong_shape",
+         lambda: VerificationCriterion.from_dict({**_payload_fragment("criterion"), "params": [1]})),
+        ("criterion_missing_id",
+         lambda: VerificationCriterion.from_dict({"kind": "artifact_file_exists"})),
+        ("policy_missing_kind",
+         lambda: ApprovalPolicyRef.from_dict(_drop(_payload_fragment("policy"), "policy_kind"))),
+        ("artifact_missing_path",
+         lambda: ArtifactExpectation.from_dict(_drop(_payload_fragment("artifact"), "expected_path"))),
+        ("scope_roots_not_a_sequence",
+         lambda: WorkspaceScope.from_dict({"read_roots": 7, "write_roots": ()})),
+    ],
+)
+def test_malformed_nested_payloads_raise_validation_error_not_keyerror(name, build):
+    try:
+        build()
+    except WorkContractValidationError:
+        return
+    except (KeyError, TypeError, ValueError) as exc:
+        pytest.fail(f"{name}.from_dict 泄漏了 {type(exc).__name__}: {exc}")
+    pytest.fail(f"{name}.from_dict 未拒绝损坏载荷")
+
+
+def test_direct_constructor_content_hash_format_strict():
+    base = WorkContract(**_minimal_kwargs())
+    # 显式提供正确 hash：合法且幂等
+    assert (
+        WorkContract(**_minimal_kwargs(content_hash=base.content_hash)).content_hash
+        == base.content_hash
+    )
+
+    for bad in ("ABCD", "A" * 64, "a" * 63, "a" * 65, "g" * 64):
+        with pytest.raises(WorkContractValidationError, match="64 位小写 hex|content_hash"):
+            WorkContract(**_minimal_kwargs(content_hash=bad))
+
+    # 格式合法但值不符 → 篡改拒绝（既有路径）
+    with pytest.raises(WorkContractValidationError, match="篡改"):
+        WorkContract(**_minimal_kwargs(content_hash="b" * 64))
+
+
+# ================================================================
 # 任务书 §6.3 — 同 id 改约冲突
 # ================================================================
 
@@ -686,6 +812,27 @@ def _canon_history_snapshot(ch):
     )
 
 
+def _c5_real_engine_snapshot(rel_store):
+    """C5 必须取真实 RelationshipEngine 数据面（RelationshipStore 公共只读 API），
+    并断言其存在——防止 getattr 兜底造成的 false-green。"""
+    state = rel_store.state_dict()
+    factors = rel_store.factors()
+    owner = rel_store.truth_owner
+    milestones = rel_store.milestones(limit=1000)
+    assert owner == "RelationshipEngine", f"truth_owner 必须是 engine 本体: {owner!r}"
+    assert isinstance(state, dict) and len(state) >= 5 and all(
+        isinstance(v, (int, float)) for v in state.values()
+    ), f"state_dict() 缺少真实引擎数值面: {state!r}"
+    assert isinstance(factors, dict) and len(factors) >= 1, "factors() 不得为空"
+    assert isinstance(milestones, list), "milestones() 必须返回列表"
+    return {
+        "owner": owner,
+        "state": dict(sorted(state.items())),
+        "factors": {k: float(v) for k, v in sorted(factors.items())},
+        "milestones": milestones,
+    }
+
+
 def _native_store_snapshots(hub, tmp: Path):
     """C1–C7 逐 store 原生 truth 证据（不包含任何 Phase16 工作域概念）。"""
     cog_tables = _db_snapshot(tmp / "cog.db")
@@ -709,14 +856,13 @@ def _native_store_snapshots(hub, tmp: Path):
         cog_tables.get("user_model_items"),
     )
 
-    # C5 — relationship truth（milestones 表 + 引擎面只读探测）
+    # C5 — relationship truth（store 公共只读面 → 真实 engine 数据，禁 getattr 兜底）
     rel = hub.relationship
-    eng = getattr(rel, "engine", None)
+    assert rel is not None, "hub 必须携带真实 RelationshipEngine 才能证明 C5"
     ev["C5_relationship"] = (
-        repr(getattr(eng, "state", None)),
+        _c5_real_engine_snapshot(rel),
         cog_tables.get("relationship_milestones"),
-        cog_tables.get("memories"),
-    ) if rel is not None else None
+    )
 
     # C6 — life events append-only ledger
     estore = hub.events
@@ -751,7 +897,7 @@ def _native_store_snapshots(hub, tmp: Path):
 
 
 def test_c1_to_c7_real_store_truth_unchanged_by_workcontract_lifecycle(tmp_path):
-    hub, _memory_store = _build_hub(tmp_path)
+    hub, memory_store = _build_hub(tmp_path)
     try:
         before = _native_store_snapshots(hub, tmp_path)
 
@@ -774,6 +920,7 @@ def test_c1_to_c7_real_store_truth_unchanged_by_workcontract_lifecycle(tmp_path)
         after = _native_store_snapshots(hub, tmp_path)
     finally:
         hub.close()
+        memory_store.close()
 
     assert before.keys() == after.keys()
     for label in before:
