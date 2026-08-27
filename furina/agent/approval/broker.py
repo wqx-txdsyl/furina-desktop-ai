@@ -3,52 +3,51 @@
 位置：位于既有同步 PermissionManager **之上**。线程边界显式：
 
 - **owner 只在构造时绑定**（``owner_thread_id``，由可信组合根传入）。decision 面
-  （``resolve`` / ``cancel`` / ``revoke`` / ``create_grant`` / ``revoke_grant``）
-  只允许 owner 线程；backend/executor 线程拿到 broker 引用后**无法抢占或改绑
-  owner**（无 ``bind_owner``，first-come-first-served 抢占向量已删除）；
+  （``resolve`` / ``cancel`` / ``revoke`` / ``create_grant`` / ``revoke_grant`` /
+  ``request_user_evidence``）只允许 owner 线程；backend/executor 线程拿到 broker
+  引用后**无法抢占或改绑 owner**；
 - **producer 面（executor / agent / backend 线程，锁保护，任意线程可调）**：
   ``create_request`` / ``get_or_create_request`` / ``wait_for_resolution`` /
-  ``state_of`` / ``consume`` / ``issue_permit`` / ``consume_permit`` / 各只读查询。
+  ``state_of`` / ``consume`` / ``operation_digest`` / 各只读查询。
 
-Reviewer Patch 关键收紧（本文件）：
+Reviewer Patch 2 关键收紧（本文件）：
 
-1. ``get_or_create_request``：**单锁内**查找或创建——并发同一步（完整身份相同）
-   只能产生一个请求；
-2. ``resolve(APPROVE_SESSION)`` 与 ``create_grant`` **必须**携带经可信入口验证器
-   （构造注入 ``user_evidence_verifier``）确认的 canonical USER 证据；格式正则
-   只是必要条件，不是真实性证明；未配置验证器一律 fail-closed；
-3. grant 有效窗口 ``issued_at <= now < expiry``：``create_grant`` 拒绝未来签发
-   （``issued_at > now``）与已过期新 grant（``expiry <= now``）；
-4. ``issue_permit`` / ``consume_permit``：gate ALLOW → 真实工具边界**原子**消费/
-   复核（approve_once 恰好一次、session 未被撤销、grant 未撤销且在有效窗口、
-   permit 自身未消费且在 TTL 内）——消除 ALLOW 到 tool.run 的撤销 TOCTOU；
-5. 事件载荷递归 sanitize + 递归冻结；导出/emit 防御复制。
+1. **permit 生产/消费移出 broker**：公开 ``issue_permit`` / ``consume_permit`` 已删除
+   ——可消费 permit 只能由四层 Gate 判定后产生并在 Gate 侧原子消费；broker 只保留
+   审批/grant 状态与操作摘要计算（``operation_digest``）；
+2. **操作摘要**：``operation_digest(args)`` 用**每 broker 随机密钥**对**严格 canonical
+   原始 args** 计算 HMAC-SHA256，不保存原文、不可逆、不可导出；不同敏感值产生不同
+   身份。audit 摘要（``audit_args_digest``，redacted SHA-256）可导出，不作操作身份；
+3. **canonical USER 证据**：公开 ``verify_user_evidence`` 已删除。决策入口经
+   ``request_user_evidence`` 预验证并返回内部 opaque nonce（``uev_*``）；消费
+   （approve_session / grant）只接受本 broker nonce 或原始 event id，且**在消费时刻
+   重新查询可信记录并绑定具体操作上下文**（approval_id / contract_id / contract_hash
+   / tool / requested_scope / decision）——手工 VerifiedUserEvidence、跨 broker
+   nonce、无关真实事件一律拒绝；
+4. ``get_or_create_request``：单锁原子 get-or-create，身份含 operation_digest
+   （不同操作/不同敏感值不得复用）；并发同一步只产生一个请求。
 
-状态机（:class:`ApprovalState`）：PENDING → APPROVED_ONCE / APPROVED_SESSION /
-DENIED / TIMED_OUT / REVOKED / CANCELLED；终态不可逆。resolve **exactly once**：
-- 相同决议重复 → ``DUPLICATE``（幂等 no-op，不重复消费）；
-- 与既有用户决议冲突 → ``CONFLICT``（类型化拒绝）；
-- 迟于 timeout/cancel → ``LATE``（类型化拒绝）；
-- 未知 id → ``UNKNOWN``。
-
-timeout：PENDING 且 now ≥ expires_at → TIMED_OUT，每个请求只发**一个**终态事件；
-``sweep_timeouts`` / 各读路径惰性推进。撤销（revoke / revoke_grant）在下一个工具
-边界前生效（consume_permit 复核时已不覆盖）。
+状态机：PENDING → APPROVED_ONCE / APPROVED_SESSION / DENIED / TIMED_OUT /
+REVOKED / CANCELLED；终态不可逆。resolve exactly once（DUPLICATE / CONFLICT /
+LATE / UNKNOWN 类型化）。grant 有效窗口 ``issued_at <= now < expiry``；拒绝未来
+签发与已过期新 grant。事件载荷递归 sanitize + 冻结，导出/emit 防御复制。
 """
 from __future__ import annotations
 
+import hmac
+import hashlib
 import math
+import secrets
 import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from furina.agent.permission import Permission
 from furina.agent.work_contract import APPROVAL_POLICY_KINDS, WorkspaceScope
 
 from .models import (
-    MAX_PERMIT_TTL_SECONDS,
     ApprovalDecisionKind,
     ApprovalEvent,
     ApprovalRequest,
@@ -56,11 +55,16 @@ from .models import (
     ApprovalState,
     ApprovalStateError,
     AuthorizationGrant,
+    GateSeal,
     PermitOutcome,
     ResolutionStatus,
     ToolPermit,
-    VerifiedUserEvidence,
-    canonical_args_digest,
+    USER_EVENT_ID_PATTERN,
+    USER_EVIDENCE_NONCE_PATTERN,
+    MAX_PERMIT_TTL_SECONDS,
+    audit_args_digest,
+    _canonical_json,
+    deep_freeze,
     redact_args,
     sanitize_text,
     sanitize_tree,
@@ -68,7 +72,7 @@ from .models import (
 
 __all__ = ["ApprovalBroker"]
 
-UserEvidenceVerifier = Callable[[str], Any]
+UserEvidenceVerifier = Callable[[str, Mapping[str, Any]], Any]
 
 
 @dataclass
@@ -79,7 +83,7 @@ class _RequestRecord:
     decided_at: float = 0.0
     consumed_at: Optional[float] = None   # approve_once 消费时刻（exactly once）
     detail: str = ""
-    #: APPROVE_SESSION 决议的 canonical USER 证据 id（经可信入口验证）。
+    #: APPROVE_SESSION 决议的 canonical USER 事件 id（消费时刻经可信入口重查确认）。
     decided_by_user_event: str = ""
 
 
@@ -88,7 +92,7 @@ class _GrantRecord:
     grant: AuthorizationGrant
     revoked_at: Optional[float] = None
     revoked_reason: str = ""
-    #: 铸造该 grant 的可信验证器名（VerifiedUserEvidence.verified_by）。
+    #: 铸造该 grant 的可信验证器名（审计用；真实性靠消费时刻重查，不靠该字符串）。
     verified_by: str = ""
 
 
@@ -99,24 +103,26 @@ class _PermitRecord:
 
 
 class ApprovalBroker:
-    """审批状态所有者：exactly-once 决议 / 超时 / 撤销 / 会话 grant / permit / redacted 事件。
+    """审批状态所有者：exactly-once 决议 / 超时 / 撤销 / 会话 grant / redacted 事件。
 
     构造参数（可信组合根所有）：
 
     - ``owner_thread_id``：owner 线程**只在构造时绑定**（backend 不得抢占；构造后
       无任何改绑 API）。None = decision 面永久锁定（fail-closed）；
-    - ``user_evidence_verifier``：canonical USER 事件真实性验证器（可信入口，如
-      C6 事件台账查询）。**approve_session 与 grant 无它一律 fail-closed**。
+    - ``user_evidence_verifier``：canonical USER 事件真实性验证器
+      ``verifier(user_event_id, context) -> truthy``（可信入口，如 C6 台账查询）。
+      **approve_session 与 grant 无它一律 fail-closed**；验证在**消费时刻**执行并
+      绑定具体操作上下文。
     """
 
     def __init__(self, *, clock: Optional[Callable[[], float]] = None,
                  owner_thread_id: Optional[int] = None,
                  user_evidence_verifier: Optional[UserEvidenceVerifier] = None,
                  user_evidence_source: str = "trusted_entry",
+                 gate_seal: Optional[Any] = None,
                  default_approval_timeout_seconds: float = 120.0,
                  max_approval_timeout_seconds: float = 86400.0,
                  max_grant_duration_seconds: float = 86400.0 * 365,
-                 permit_ttl_seconds: float = 30.0,
                  emit: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> None:
         for name, v in (("default_approval_timeout_seconds", default_approval_timeout_seconds),
                         ("max_approval_timeout_seconds", max_approval_timeout_seconds),
@@ -124,11 +130,6 @@ class ApprovalBroker:
             if (isinstance(v, bool) or not isinstance(v, (int, float))
                     or not math.isfinite(float(v)) or v <= 0):
                 raise ApprovalStateError(f"{name} 必须有限正数，得到 {v!r}")
-        if (isinstance(permit_ttl_seconds, bool) or not isinstance(permit_ttl_seconds, (int, float))
-                or not math.isfinite(float(permit_ttl_seconds)) or permit_ttl_seconds <= 0
-                or permit_ttl_seconds > MAX_PERMIT_TTL_SECONDS):
-            raise ApprovalStateError(
-                f"permit_ttl_seconds 必须在 (0, {MAX_PERMIT_TTL_SECONDS}] 内，得到 {permit_ttl_seconds!r}")
         if not callable(user_evidence_verifier) and user_evidence_verifier is not None:
             raise ApprovalStateError("user_evidence_verifier 必须是可调用或 None")
         if not isinstance(user_evidence_source, str) or not user_evidence_source.strip():
@@ -137,16 +138,24 @@ class ApprovalBroker:
         self._owner = owner_thread_id   # 构造期唯一绑定点；此后不可变
         self._verifier = user_evidence_verifier
         self._verifier_name = sanitize_text(user_evidence_source.strip(), max_len=120)
+        #: 四层 Gate 的签发凭证（Patch 2）：非 None 时只有持有该 seal 对象的 Gate
+        #: 能签发 permit（对象身份校验）；None = permit 生产永久禁用（fail-closed）。
+        if gate_seal is not None and not isinstance(gate_seal, GateSeal):
+            raise ApprovalStateError("gate_seal 必须是 GateSeal 实例或 None")
+        self._gate_seal = gate_seal
         self._default_timeout = float(default_approval_timeout_seconds)
         self._max_timeout = float(max_approval_timeout_seconds)
         self._max_grant_duration = float(max_grant_duration_seconds)
-        self._permit_ttl = float(permit_ttl_seconds)
         self._emit = emit
+        #: 每 broker 随机密钥（Patch 2）：operation digest 的 HMAC 密钥，不落盘、不导出。
+        self._op_key = secrets.token_bytes(32)
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
         self._requests: Dict[str, _RequestRecord] = {}
         self._grants: Dict[str, _GrantRecord] = {}
         self._permits: Dict[str, _PermitRecord] = {}
+        #: opaque USER 证据 nonce → (user_event_id, 预验证时的操作上下文)。
+        self._evidence_nonces: Dict[str, Tuple[str, Mapping[str, Any]]] = {}
         self._events: List[ApprovalEvent] = []
 
     # -------------------------------------------------- 时钟
@@ -178,52 +187,93 @@ class ApprovalBroker:
                 f"current={threading.get_ident()}）——backend/executor 线程不得做出决议；"
                 "owner 仅在构造时由可信组合根绑定，无运行期改绑 API")
 
-    # -------------------------------------------------- canonical USER 证据
-    def verify_user_evidence(self, user_event_id: str) -> VerifiedUserEvidence:
-        """经**可信入口验证器**确认 canonical USER 事件（唯一铸造 VerifiedUserEvidence 的路径）。
+    # -------------------------------------------------- 操作摘要（Patch 2）
+    def operation_digest(self, args: Optional[Mapping[str, Any]]) -> str:
+        """**operation digest**：每 broker 随机密钥的 HMAC-SHA256 over 严格 canonical
+        **原始** args（``_canonical_json``，无 repr 兜底，非 JSON 类型 fail-closed）。
 
-        - 未配置验证器 → fail-closed（ApprovalStateError）；
-        - 格式正则只是必要条件；验证器返回假值/抛错 → fail-closed。
+        - 不保存原文、不可逆、不可导出（密钥只在本 broker 内存中）；
+        - 不同敏感值 ⇒ 不同摘要 ⇒ 不同操作身份（audit digest 脱敏后碰撞，不能作身份）。
         """
-        if not isinstance(user_event_id, str):
-            raise ApprovalStateError(f"user_event_id 必须是 str，得到 {user_event_id!r}")
+        raw = _canonical_json(dict(args or {}))
+        return hmac.new(self._op_key, raw.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    # -------------------------------------------------- canonical USER 证据（Patch 2）
+    def request_user_evidence(self, user_event_id: str, *,
+                              context: Mapping[str, Any]) -> str:
+        """决策入口（owner 线程）对指定**操作上下文**预验证 canonical USER 事件，
+        返回内部 opaque nonce（``uev_*``）。
+
+        消费（approve_session / grant）时 broker 会**重新查询可信记录**并再次绑定
+        操作上下文；nonce 只是"本 broker 预验证过"的内部句柄，手工构造 / 跨 broker
+        均无法通过。
+        """
+        self.require_owner("user_evidence 预验证")
+        if not isinstance(user_event_id, str) or not USER_EVENT_ID_PATTERN.match(user_event_id):
+            raise ApprovalStateError(
+                f"USER 事件 id 必须匹配 lev_<ms>_<hex>，得到 {user_event_id!r}")
+        ctx = sanitize_tree(dict(context or {}))
+        self._verify_user_event(user_event_id, ctx)
+        nonce = f"uev_{uuid.uuid4().hex[:12]}"
+        with self._lock:
+            self._evidence_nonces[nonce] = (user_event_id, deep_freeze(ctx))
+        return nonce
+
+    def _verify_user_event(self, user_event_id: str, context: Mapping[str, Any]) -> None:
+        """**消费时刻**重新查询可信记录：验证器必须确认该 USER 事件真实存在 **且**
+        属于当前操作上下文（approval_id/contract_id/contract_hash/tool/scope/
+        decision）。格式正则只是必要条件。"""
         if self._verifier is None:
             raise ApprovalStateError(
                 "canonical USER 证据验证器未配置（user_evidence_verifier=None）——"
                 "approve_session / grant 一律 fail-closed：格式正则不是真实性证明")
-        now = self._clock()
         try:
-            authentic = self._verifier(user_event_id)
+            authentic = self._verifier(user_event_id, dict(context or {}))
         except Exception as exc:
             raise ApprovalStateError(
                 f"USER 证据验证器异常（fail-closed，不泄漏细节）: {type(exc).__name__}") from exc
         if not authentic:
             raise ApprovalStateError(
-                f"USER 事件 {sanitize_text(user_event_id, max_len=120)} 未能通过可信入口验证"
-                "（格式合法 ≠ 真实存在：backend/LLM 无法伪造验证器确认）")
-        return VerifiedUserEvidence(
-            user_event_id=user_event_id, verified_at=now, verified_by=self._verifier_name)
+                f"USER 事件 {sanitize_text(user_event_id, max_len=120)} 未通过可信入口在"
+                f"当前操作上下文下的重查（事件不存在或与操作无关：格式合法 ≠ 真实性，"
+                "backend/LLM 无法伪造验证器确认）")
 
     def _require_user_evidence(self, what: str,
-                               user_evidence: Union[str, VerifiedUserEvidence, None]
-                               ) -> VerifiedUserEvidence:
-        """决议/授权入口的统一证据校验：None → fail-closed；str → 过验证器；
-        VerifiedUserEvidence → 校验铸造者与本 broker 的可信验证器一致。"""
+                               user_evidence: Union[str, Any, None],
+                               *, context: Mapping[str, Any]) -> str:
+        """消费入口统一证据校验（Patch 2：只接受本 broker nonce 或原始 event id）。
+
+        - None / 非 str（含手工构造的 VerifiedUserEvidence）→ 拒绝；
+        - ``uev_*`` nonce：必须在**本 broker** 预验证记录中（跨 broker 拒绝），
+          且消费时刻**重新查询**可信记录绑定当前上下文；
+        - 原始 event id：消费时刻直接重新查询可信记录。
+        """
         if user_evidence is None:
             raise ApprovalStateError(
                 f"'{what}' 必须携带 canonical USER 证据（user_evidence）："
-                "经可信入口验证的存在性证明，不接受任何缺省/推断")
-        if isinstance(user_evidence, str):
-            return self.verify_user_evidence(user_evidence)
-        if isinstance(user_evidence, VerifiedUserEvidence):
-            if user_evidence.verified_by != self._verifier_name or self._verifier is None:
+                "经可信入口在操作上下文下验证的存在性证明，不接受任何缺省/推断")
+        if not isinstance(user_evidence, str):
+            raise ApprovalStateError(
+                f"'{what}' 的 user_evidence 只接受本 broker 签发的 opaque nonce（uev_*）"
+                f"或原始事件 id str，得到 {type(user_evidence).__name__}——手工构造的"
+                "VerifiedUserEvidence 一律拒绝（不得公开自铸）")
+        if USER_EVIDENCE_NONCE_PATTERN.match(user_evidence):
+            with self._lock:
+                stored = self._evidence_nonces.get(user_evidence)
+            if stored is None:
                 raise ApprovalStateError(
-                    f"'{what}' 的 USER 证据非本 broker 可信入口铸造"
-                    f"（verified_by={user_evidence.verified_by!r} ≠ {self._verifier_name!r}）")
-            return user_evidence
-        raise ApprovalStateError(
-            f"'{what}' 的 user_evidence 必须是 str 或 VerifiedUserEvidence，"
-            f"得到 {type(user_evidence).__name__}")
+                    f"'{what}' 的 user_evidence nonce 非本 broker 签发（跨 broker/伪造 "
+                    "nonce，拒绝）")
+            ev_id, _stored_ctx = stored
+            # 消费时重新查可信记录，绑定当前操作上下文
+            self._verify_user_event(ev_id, dict(context))
+            return ev_id
+        if not isinstance(user_evidence, str) or not USER_EVENT_ID_PATTERN.match(user_evidence):
+            raise ApprovalStateError(
+                f"'{what}' 的 user_evidence 必须匹配 lev_<ms>_<hex> 事件 id，得到 {user_evidence!r}")
+        # 原始 event id：消费时直接重新查询可信记录（绑定上下文）
+        self._verify_user_event(user_evidence, dict(context))
+        return user_evidence
 
     # -------------------------------------------------- 事件（redacted + 不可变）
     def _log_event(self, etype: str, *, approval_id: str = "", grant_id: str = "",
@@ -249,20 +299,24 @@ class ApprovalBroker:
     def _normalize_request_params(self, *, contract_id: str, run_id: str, tool: str,
                                   capability: str, args: Optional[Mapping[str, Any]],
                                   requested_scope: Tuple[str, ...],
-                                  policy_kind: str) -> Tuple[Dict[str, Any], str]:
-        """请求构造参数归一（redact + digest + scope 清洗）；返回 (kwargs, args_digest)。"""
+                                  policy_kind: str) -> Tuple[Dict[str, Any], str, str]:
+        """请求构造参数归一（redact + audit digest + operation digest）；返回
+        (base_kwargs, audit_digest, op_digest)。operation digest 由本 broker 密钥
+        现场对**原始 args** 计算（单一权威，不信任调用方自报）。"""
         redacted = redact_args(dict(args or {}))
-        digest = canonical_args_digest(redacted)
+        audit = audit_args_digest(redacted)
+        op = self.operation_digest(args)
         scope = tuple(str(p).strip() for p in (requested_scope or ()) if str(p).strip())
         kwargs = dict(contract_id=contract_id, run_id=run_id, tool=tool, capability=capability,
-                      args_redacted=redacted, args_digest=digest, requested_scope=scope,
-                      policy_kind=policy_kind)
-        return kwargs, digest
+                      args_redacted=redacted, audit_args_digest=audit,
+                      operation_digest=op, requested_scope=scope, policy_kind=policy_kind)
+        return kwargs, audit, op
 
     def _identity_of(self, r: ApprovalRequest) -> Tuple[Any, ...]:
-        """请求身份（Reviewer Patch）：不同操作不得复用同一审批。"""
+        """请求身份（Reviewer Patch 1/2）：不同操作不得复用同一审批——
+        操作身份含 operation_digest（HMAC over 原始 args，敏感值不同即不同）。"""
         return (r.contract_id, r.contract_hash, r.run_id, r.tool, r.capability,
-                r.requested_scope, r.risk_level, r.policy_kind, r.args_digest)
+                r.requested_scope, r.risk_level, r.policy_kind, r.operation_digest)
 
     def create_request(self, *, contract_id: str, run_id: str, tool: str, capability: str,
                        args: Optional[Mapping[str, Any]] = None, reason: str = "",
@@ -291,7 +345,7 @@ class ApprovalBroker:
             raise ApprovalStateError(f"expires_at 必须是 > now 的有限时刻，得到 {expires_at!r}")
         if exp - now > self._max_timeout:
             raise ApprovalStateError(f"expires_at 超出来自审批窗口上限 {self._max_timeout}s")
-        base, _digest = self._normalize_request_params(
+        base, _audit, _op = self._normalize_request_params(
             contract_id=contract_id, run_id=run_id, tool=tool, capability=capability,
             args=args, requested_scope=requested_scope, policy_kind=policy_kind)
         request = ApprovalRequest(
@@ -306,29 +360,32 @@ class ApprovalBroker:
                         payload=request.to_audit_dict())
         return request
 
-    def get_or_create_request(self, **kwargs: Any) -> Tuple[ApprovalRequest, bool]:
-        """**原子** get-or-create（Reviewer Patch 5）：单锁内按完整身份查找，命中即复用，
-        未命中才创建——并发同一步只能产生一个请求。参数与 :meth:`create_request` 相同；
-        返回 (request, created)。"""
-        base, _digest = self._normalize_request_params(
-            contract_id=kwargs.get("contract_id", ""), run_id=kwargs.get("run_id", ""),
-            tool=kwargs.get("tool", ""), capability=kwargs.get("capability", ""),
-            args=kwargs.get("args"), requested_scope=kwargs.get("requested_scope") or (),
-            policy_kind=kwargs.get("policy_kind", "approval_required_each_step"))
-        risk_level = kwargs.get("risk_level", Permission.L1_LOW_WRITE)
+    def get_or_create_request(self, *, contract_id: str, run_id: str, tool: str,
+                              capability: str, args: Optional[Mapping[str, Any]] = None,
+                              reason: str = "",
+                              risk_level: Permission = Permission.L1_LOW_WRITE,
+                              requested_scope: Tuple[str, ...] = (),
+                              expires_at: Optional[float] = None,
+                              provenance: str = "executor",
+                              policy_kind: str = "approval_required_each_step",
+                              contract_hash: str = "") -> Tuple[ApprovalRequest, bool]:
+        """**原子** get-or-create（Reviewer Patch 1）：单锁内按完整身份
+        （含 operation_digest）查找，命中即复用，未命中才创建——并发同一步只能产生
+        一个请求。返回 (request, created)。"""
+        base, _audit, op = self._normalize_request_params(
+            contract_id=contract_id, run_id=run_id, tool=tool, capability=capability,
+            args=args, requested_scope=requested_scope, policy_kind=policy_kind)
         if not isinstance(risk_level, Permission):
             raise ApprovalStateError(
                 f"risk_level 必须是 Permission（int enum），得到 {type(risk_level).__name__}")
-        contract_hash = kwargs.get("contract_hash", "")
         now = self._clock()
         with self._lock:
             identity_probe = (base["contract_id"], contract_hash, base["run_id"],
                               base["tool"], base["capability"], base["requested_scope"],
-                              risk_level, base["policy_kind"], base["args_digest"])
+                              risk_level, base["policy_kind"], op)
             for rec in self._requests.values():
                 if self._identity_of(rec.request) == identity_probe:
                     return rec.request, False
-            expires_at = kwargs.get("expires_at")
             if expires_at is None:
                 expires_at = now + self._default_timeout
             if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
@@ -340,13 +397,12 @@ class ApprovalBroker:
                 raise ApprovalStateError(f"expires_at 超出来自审批窗口上限 {self._max_timeout}s")
             request = ApprovalRequest(
                 approval_id=f"apv_{uuid.uuid4().hex[:12]}",
-                reason=kwargs.get("reason", ""), risk_level=risk_level,
-                created_at=now, expires_at=exp,
-                provenance=kwargs.get("provenance", "executor"),
+                reason=reason, risk_level=risk_level,
+                created_at=now, expires_at=exp, provenance=provenance,
                 contract_hash=contract_hash, **base,
             )
             self._requests[request.approval_id] = _RequestRecord(request, ApprovalState.PENDING)
-        # 事件发射在锁外（create_request 同构；RLock 下锁内亦安全，此处缩短临界区）
+        # 事件发射在锁外（create_request 同构）
         self._log_event("approval.requested", approval_id=request.approval_id,
                         payload=request.to_audit_dict())
         return request, True
@@ -358,7 +414,7 @@ class ApprovalBroker:
                          capability: Optional[str] = None,
                          risk_level: Optional[Permission] = None,
                          policy_kind: Optional[str] = None,
-                         args_digest: Optional[str] = None) -> Optional[ApprovalRequest]:
+                         operation_digest: Optional[str] = None) -> Optional[ApprovalRequest]:
         """同一步的**最近**请求（任意终态）；无 → None。
 
         省略的身份维度（None）按通配处理（诊断用途）；gate 的复用路径走
@@ -375,7 +431,7 @@ class ApprovalBroker:
                         and (capability is None or r.capability == capability)
                         and (risk_level is None or r.risk_level == risk_level)
                         and (policy_kind is None or r.policy_kind == policy_kind)
-                        and (args_digest is None or r.args_digest == args_digest)):
+                        and (operation_digest is None or r.operation_digest == operation_digest)):
                     found = r   # 插入序 = 创建序 → 覆盖后即最近
             return found
 
@@ -421,23 +477,40 @@ class ApprovalBroker:
     # -------------------------------------------------- decision 面：resolve
     def resolve(self, approval_id: str, decision: ApprovalDecisionKind, *,
                 reason: str = "",
-                user_evidence: Union[str, VerifiedUserEvidence, None] = None
+                user_evidence: Union[str, Any, None] = None
                 ) -> ApprovalResolution:
         """决议（owner 线程）：exactly-once；重复 → DUPLICATE，冲突 → CONFLICT，
         迟于 timeout/cancel → LATE，未知 → UNKNOWN。
 
-        **APPROVE_SESSION 必须携带经可信入口验证的 canonical USER 证据**
-        （``user_evidence``：事件 id str → 过验证器，或 broker 铸造的
-        VerifiedUserEvidence）；缺失/验证失败 → ApprovalStateError（决议不生效）。
+        **APPROVE_SESSION 必须携带 canonical USER 证据**（本 broker opaque nonce 或
+        原始 event id），且**在消费时刻经可信入口重新查询并绑定该请求的具体操作
+        上下文**（approval_id/contract_id/contract_hash/tool/scope/decision）——
+        缺失/验证失败 → ApprovalStateError（决议不生效）。
         """
         if not isinstance(decision, ApprovalDecisionKind):
             raise ApprovalStateError(f"decision 必须是 ApprovalDecisionKind，得到 {decision!r}")
         self.require_owner("resolve")
-        evidence: Optional[VerifiedUserEvidence] = None
+        evidence_id: Optional[str] = None
         if decision == ApprovalDecisionKind.APPROVE_SESSION:
-            evidence = self._require_user_evidence("approve_session 决议", user_evidence)
+            with self._cv:
+                rec = self._requests.get(approval_id)
+                if rec is None:
+                    return ApprovalResolution(False, ResolutionStatus.UNKNOWN, approval_id,
+                                              decision=decision, detail="approval_id 不存在")
+                self._maybe_timeout_locked(rec)
+                # 操作上下文从请求记录派生（不信任调用方自报）
+                context = {
+                    "decision": "approve_session",
+                    "approval_id": approval_id,
+                    "contract_id": rec.request.contract_id,
+                    "contract_hash": rec.request.contract_hash,
+                    "tool": rec.request.tool,
+                    "requested_scope": list(rec.request.requested_scope),
+                }
+            evidence_id = self._require_user_evidence("approve_session 决议", user_evidence,
+                                                      context=context)
         elif user_evidence is not None:
-            # 其他决议种类不接受随手附带证据（避免语义混淆）；要验证请显式调用
+            # 其他决议种类不接受随手附带证据（避免语义混淆）
             raise ApprovalStateError(
                 "user_evidence 只用于 approve_session 决议（approve_once/deny 为单步决议，"
                 "不建立持久授权）")
@@ -452,15 +525,15 @@ class ApprovalBroker:
                 rec.decision = decision
                 rec.decided_at = self._clock()
                 rec.detail = sanitize_text(reason)
-                if evidence is not None:
-                    rec.decided_by_user_event = evidence.user_event_id
+                if evidence_id is not None:
+                    rec.decided_by_user_event = evidence_id
                 self._cv.notify_all()
                 payload: Dict[str, Any] = {**rec.request.to_audit_dict(),
                                            "decision": decision.value,
                                            "decided_at": rec.decided_at,
                                            "detail": rec.detail}
-                if evidence is not None:
-                    payload["user_event_id"] = evidence.user_event_id
+                if evidence_id is not None:
+                    payload["user_event_id"] = evidence_id
                 self._log_event("approval.decided", approval_id=approval_id, payload=payload)
                 return ApprovalResolution(True, ResolutionStatus.RESOLVED, approval_id,
                                           decision=decision, decided_at=rec.decided_at,
@@ -550,8 +623,9 @@ class ApprovalBroker:
                                       detail=f"与既有决议 {rec.state.value} 冲突")
 
     def consume(self, approval_id: str) -> bool:
-        """approve_once 标记消费（producer 面；旧窄 API）。**推荐**工具边界经
-        :meth:`consume_permit` 原子复核+消费（revocation TOCTOU 封闭）。"""
+        """approve_once 标记消费（producer 面）。**工具边界必须**经
+        :meth:`consume_permit` 原子复核+消费（撤销 TOCTOU 封闭；本方法只做标记，
+        不产生任何 permit）。"""
         now = self._clock()
         with self._lock:
             rec = self._requests.get(approval_id)
@@ -559,6 +633,127 @@ class ApprovalBroker:
                 return False
             rec.consumed_at = now
             return True
+
+    # -------------------------------------------------- permit 生产/消费（Patch 2）
+    def issue_permit(self, seal: Any, *, gate_id: str, tool: str, capability: str,
+                     args: Optional[Mapping[str, Any]], run_id: str,
+                     contract_id: str, contract_hash: str,
+                     approval_id: str = "", grant_id: str = "",
+                     ttl_seconds: Optional[float] = None) -> ToolPermit:
+        """签发工具边界许可（Patch 2：**seal 门控**——任意 producer 不可调用）。
+
+        - 必须持有本 broker 构造时注入的 :class:`GateSeal` 对象（``seal is
+          self._gate_seal``）；未经四层 Gate 判定（不持 seal）→ 一律
+          :class:`ApprovalStateError`，不产生任何可消费 permit；
+        - operation digest 由本 broker 密钥对**原始 args** 内部计算（不信任调用方
+          自报摘要）；非严格 JSON 域 fail-closed；
+        - permit 绑定 gate_id（可信 Gate 决议者）+ contract_id + content_hash +
+          run_id；TTL 有界（≤ MAX_PERMIT_TTL_SECONDS）。
+        """
+        if self._gate_seal is None or seal is not self._gate_seal:
+            raise ApprovalStateError(
+                "issue_permit 需要持有本 broker 构造期注入的 GateSeal——未经四层 Gate "
+                "判定不得产生可消费 permit（任意 producer 无此凭证）")
+        if not isinstance(gate_id, str) or not gate_id:
+            raise ApprovalStateError("gate_id 必须是非空 str")
+        op_digest = self.operation_digest(args)
+        now = self._clock()
+        ttl = 30.0 if ttl_seconds is None else float(ttl_seconds)
+        if (isinstance(ttl_seconds, bool) or not isinstance(ttl, (int, float))
+                or not math.isfinite(float(ttl)) or ttl <= 0
+                or ttl > MAX_PERMIT_TTL_SECONDS):
+            raise ApprovalStateError(
+                f"permit TTL 必须在 (0, {MAX_PERMIT_TTL_SECONDS}] 内，得到 {ttl_seconds!r}")
+        permit = ToolPermit(
+            permit_id=f"pmt_{secrets.token_hex(6)}",
+            gate_id=gate_id, tool=tool, capability=capability, operation_digest=op_digest,
+            contract_id=contract_id, contract_hash=contract_hash, run_id=run_id,
+            approval_id=approval_id, grant_id=grant_id,
+            not_before=now, valid_until=now + ttl)
+        with self._lock:
+            self._permits[permit.permit_id] = _PermitRecord(permit)
+        return permit
+
+    def consume_permit(self, permit: ToolPermit, *, tool: str, capability: str,
+                       args: Mapping[str, Any]) -> PermitOutcome:
+        """**真实工具边界**的原子消费/复核（消除 ALLOW → tool.run 的撤销 TOCTOU）。
+
+        - ``tool`` / ``capability`` / ``args`` **必填**（真实操作身份）；本方法用
+          broker 密钥对**原始 args** 内部重新计算 operation digest 与 permit 比对
+          ——**禁止调用方传 permit 自身字段完成自证**；
+        - **单锁内**一次完成全部检查（permit/approval/grant 同锁，无状态间隙）：
+          permit 必须由持 seal 的 Gate 签发（伪造/篡改任意字段拒绝）；未消费且在
+          有效窗口；approval 绑定：APPROVE_ONCE → 此刻原子标记消费（恰好一次）、
+          APPROVE_SESSION → 仍处 APPROVED_SESSION（撤销/超时/拒绝一律失败）；
+          grant 绑定：未撤销且 ``issued_at <= now < expiry``。
+          任何失败 → ok=False，零 tool call。
+        """
+        if not isinstance(permit, ToolPermit):
+            raise ApprovalStateError(f"permit 必须是 ToolPermit，得到 {type(permit).__name__}")
+        if not isinstance(tool, str) or not isinstance(capability, str):
+            raise ApprovalStateError("consume_permit 必须携带真实 tool/capability（str）")
+        if not isinstance(args, Mapping):
+            raise ApprovalStateError("consume_permit 必须携带真实原始 args（Mapping）")
+        try:
+            op_digest = self.operation_digest(dict(args))
+        except ApprovalStateError as exc:
+            return PermitOutcome(False, f"操作参数不可 canonical（fail-closed）: {exc}",
+                                 permit_id=permit.permit_id)
+        now = self._clock()
+        with self._lock:
+            rec = self._permits.get(permit.permit_id)
+            if rec is None or rec.permit != permit:
+                return PermitOutcome(False, "permit 非本 broker 签发或字段已被篡改"
+                                     "（伪造/换 id/改字段/改时间窗一律拒绝）",
+                                     permit_id=permit.permit_id)
+            if rec.consumed_at is not None:
+                return PermitOutcome(False, "permit 已被消费（恰好一次）",
+                                     permit_id=permit.permit_id, consumed_at=rec.consumed_at)
+            if not (permit.not_before <= now < permit.valid_until):
+                return PermitOutcome(False,
+                                     f"permit 超出有效窗口（now={now}, "
+                                     f"window=[{permit.not_before},{permit.valid_until})）",
+                                     permit_id=permit.permit_id)
+            if tool != permit.tool:
+                return PermitOutcome(False, "permit 身份复核失败（tool 不匹配）",
+                                     permit_id=permit.permit_id)
+            if capability != permit.capability:
+                return PermitOutcome(False, "permit 身份复核失败（capability 不匹配）",
+                                     permit_id=permit.permit_id)
+            if op_digest != permit.operation_digest:
+                return PermitOutcome(False, "permit 身份复核失败（operation digest 不匹配："
+                                     "被放行的操作 ≠ 即将执行的操作）", permit_id=permit.permit_id)
+            if permit.approval_id:
+                arec = self._requests.get(permit.approval_id)
+                if arec is None:
+                    return PermitOutcome(False, "permit 绑定的审批请求不存在",
+                                         permit_id=permit.permit_id)
+                if arec.state == ApprovalState.APPROVED_ONCE:
+                    if arec.consumed_at is not None:
+                        return PermitOutcome(False, "approve_once 已被消费（恰好一次）",
+                                             permit_id=permit.permit_id,
+                                             consumed_at=arec.consumed_at)
+                    arec.consumed_at = now
+                elif arec.state != ApprovalState.APPROVED_SESSION:
+                    return PermitOutcome(
+                        False, f"审批决议已不再是放行态（{arec.state.value}）",
+                        permit_id=permit.permit_id)
+            if permit.grant_id:
+                grec = self._grants.get(permit.grant_id)
+                if grec is None or not self._grant_active(grec, now):
+                    return PermitOutcome(False, "grant 已撤销/过期/未生效"
+                                         "（issued_at <= now < expiry 不满足）",
+                                         permit_id=permit.permit_id)
+            rec.consumed_at = now
+            return PermitOutcome(True, "permit 消费成功", permit_id=permit.permit_id,
+                                 consumed_at=now)
+
+    def permit_state(self, permit_id: str) -> Dict[str, Any]:
+        with self._lock:
+            rec = self._permits.get(permit_id)
+            if rec is None:
+                raise ApprovalStateError(f"unknown permit_id: {permit_id}")
+            return {**rec.permit.to_dict(), "consumed_at": rec.consumed_at}
 
     # -------------------------------------------------- timeout
     def _maybe_timeout_locked(self, rec: _RequestRecord) -> bool:
@@ -586,25 +781,35 @@ class ApprovalBroker:
         return timed_out
 
     # -------------------------------------------------- decision 面：会话 grant
-    def create_grant(self, *, user_evidence: Union[str, VerifiedUserEvidence],
+    def create_grant(self, *, user_evidence: Union[str, Any],
                      capability: str, tool_pattern: str,
                      workspace_scope: WorkspaceScope, expiry: float, scope_note: str = "",
-                     issued_at: Optional[float] = None) -> AuthorizationGrant:
+                     issued_at: Optional[float] = None,
+                     contract_id: str = "",
+                     contract_hash: str = "") -> AuthorizationGrant:
         """创建会话/持久授权（owner 线程）。
 
-        Reviewer Patch 收紧：
+        Reviewer Patch 1/2 收紧：
 
-        - ``user_evidence`` **必须**是经可信入口验证器确认的 canonical USER 证据
-          （事件 id str → broker 过验证器；或本 broker 铸造的 VerifiedUserEvidence）。
-          格式正则不是真实性证明；未配置验证器 fail-closed；
+        - ``user_evidence`` **必须**是经可信入口在**本操作上下文**下验证的 canonical
+          USER 证据（本 broker opaque nonce 或原始 event id；消费时刻重查可信记录，
+          绑定 contract_id/contract_hash/tool_pattern/workspace/decision）。手工构造
+          VerifiedUserEvidence / 跨 broker nonce / 无关真实事件 → 拒绝；未配置验证器
+          fail-closed；
         - 拒绝**未来签发**（``issued_at > now``）与**已过期新 grant**
-          （``expiry <= now``）；
-        - 有效窗口 ``issued_at <= now < expiry``（covering_grant / grant_state /
-          consume_permit 一致执行）。
+          （``expiry <= now``）；有效窗口 ``issued_at <= now < expiry``。
         """
         self.require_owner("create_grant")
-        evidence = self._require_user_evidence("grant 创建", user_evidence)
         now = self._clock()
+        context = {
+            "decision": "grant",
+            "contract_id": contract_id,
+            "contract_hash": contract_hash,
+            "tool_pattern": tool_pattern,
+            "workspace_read_roots": list(workspace_scope.read_roots),
+            "workspace_write_roots": list(workspace_scope.write_roots),
+        }
+        evidence_id = self._require_user_evidence("grant 创建", user_evidence, context=context)
         if issued_at is None:
             issued = now
         else:
@@ -629,12 +834,12 @@ class ApprovalBroker:
                 f"grant 时长超过上限 {self._max_grant_duration}s（无永久 grant）")
         grant = AuthorizationGrant(
             grant_id=f"gr_{uuid.uuid4().hex[:12]}",
-            user_event_id=evidence.user_event_id, capability=capability,
+            user_event_id=evidence_id, capability=capability,
             tool_pattern=tool_pattern, workspace_scope=workspace_scope,
             issued_at=issued, expiry=exp, scope_note=scope_note,
         )
         with self._lock:
-            self._grants[grant.grant_id] = _GrantRecord(grant, verified_by=evidence.verified_by)
+            self._grants[grant.grant_id] = _GrantRecord(grant, verified_by=self._verifier_name)
         self._log_event("approval.grant_created", grant_id=grant.grant_id, payload=grant.to_dict())
         return grant
 
@@ -659,6 +864,15 @@ class ApprovalBroker:
         g = rec.grant
         return (rec.revoked_at is None
                 and g.issued_at <= now < g.expiry)
+
+    def is_grant_active(self, grant_id: str, *, now: Optional[float] = None) -> bool:
+        """指定 grant 是否激活（Gate 消费 permit 时复核用）。"""
+        now = self._clock() if now is None else now
+        with self._lock:
+            rec = self._grants.get(grant_id)
+            if rec is None:
+                return False
+            return self._grant_active(rec, now)
 
     def covering_grant(self, *, tool: str, capability: str, paths: Tuple[str, ...] = (),
                        write_paths: Tuple[str, ...] = (),
@@ -705,106 +919,6 @@ class ApprovalBroker:
     def list_grants(self) -> List[AuthorizationGrant]:
         with self._lock:
             return [rec.grant for rec in self._grants.values()]
-
-    # -------------------------------------------------- producer 面：ToolPermit
-    def issue_permit(self, *, tool: str, capability: str, args_digest: str,
-                     approval_id: str = "", grant_id: str = "",
-                     ttl_seconds: Optional[float] = None) -> ToolPermit:
-        """签发工具边界许可（gate ALLOW 时调用；producer 面任意线程）。
-
-        TTL 有界（默认 ``permit_ttl_seconds``，上限 ``MAX_PERMIT_TTL_SECONDS``）——
-        长窗口等于重新打开撤销 TOCTOU。
-        """
-        now = self._clock()
-        ttl = self._permit_ttl if ttl_seconds is None else float(ttl_seconds)
-        if (isinstance(ttl_seconds, bool) or not isinstance(ttl, (int, float))
-                or not math.isfinite(float(ttl)) or ttl <= 0
-                or ttl > MAX_PERMIT_TTL_SECONDS):
-            raise ApprovalStateError(
-                f"permit TTL 必须在 (0, {MAX_PERMIT_TTL_SECONDS}] 内，得到 {ttl_seconds!r}")
-        permit = ToolPermit(
-            permit_id=f"pmt_{uuid.uuid4().hex[:12]}",
-            tool=tool, capability=capability, args_digest=args_digest,
-            approval_id=approval_id, grant_id=grant_id,
-            not_before=now, valid_until=now + ttl)
-        with self._lock:
-            self._permits[permit.permit_id] = _PermitRecord(permit)
-        return permit
-
-    def consume_permit(self, permit: ToolPermit, *,
-                       tool: Optional[str] = None,
-                       capability: Optional[str] = None,
-                       args_digest: Optional[str] = None) -> PermitOutcome:
-        """**真实工具边界**的原子消费/复核（消除 ALLOW → tool.run 的撤销 TOCTOU）。
-
-        单锁内一次完成全部检查（任何失败 → ok=False，零 tool call）：
-
-        - permit 必须是本 broker 签发（未知/伪造 → 拒绝）；
-        - 可选身份复核：传入 tool/capability/args_digest 时必须与 permit 一致；
-        - permit 未消费过且在有效窗口内（``not_before <= now < valid_until``）；
-        - approval 绑定：APPROVE_ONCE → **此刻**原子标记消费（恰好一次）；
-          APPROVE_SESSION → 仍处 APPROVED_SESSION（被撤销/未决 → 拒绝）；
-        - grant 绑定：未撤销且 ``issued_at <= now < expiry``。
-        """
-        if not isinstance(permit, ToolPermit):
-            raise ApprovalStateError(f"permit 必须是 ToolPermit，得到 {type(permit).__name__}")
-        now = self._clock()
-        with self._lock:
-            rec = self._permits.get(permit.permit_id)
-            if rec is None or rec.permit != permit:
-                return PermitOutcome(False, "permit 未经本 broker 签发（伪造/未知凭证）",
-                                     permit_id=permit.permit_id)
-            if rec.consumed_at is not None:
-                return PermitOutcome(False, "permit 已被消费（恰好一次）",
-                                     permit_id=permit.permit_id, consumed_at=rec.consumed_at)
-            if not (permit.not_before <= now < permit.valid_until):
-                return PermitOutcome(False,
-                                     f"permit 超出有效窗口（now={now}, "
-                                     f"window=[{permit.not_before},{permit.valid_until})）",
-                                     permit_id=permit.permit_id)
-            if tool is not None and tool != permit.tool:
-                return PermitOutcome(False, f"permit 身份复核失败（tool 不匹配）",
-                                     permit_id=permit.permit_id)
-            if capability is not None and capability != permit.capability:
-                return PermitOutcome(False, "permit 身份复核失败（capability 不匹配）",
-                                     permit_id=permit.permit_id)
-            if args_digest is not None and args_digest != permit.args_digest:
-                return PermitOutcome(False, "permit 身份复核失败（args_digest 不匹配："
-                                     "被放行的操作 ≠ 即将执行的操作）",
-                                     permit_id=permit.permit_id)
-            if permit.approval_id:
-                arec = self._requests.get(permit.approval_id)
-                if arec is None:
-                    return PermitOutcome(False, "permit 绑定的审批请求不存在",
-                                         permit_id=permit.permit_id)
-                if arec.state == ApprovalState.APPROVED_ONCE:
-                    if arec.consumed_at is not None:
-                        return PermitOutcome(False, "approve_once 已被消费（恰好一次）",
-                                             permit_id=permit.permit_id,
-                                             consumed_at=arec.consumed_at)
-                    arec.consumed_at = now
-                elif arec.state == ApprovalState.APPROVED_SESSION:
-                    pass   # 会话决议仍生效（撤销/未决在下方统一拒绝）
-                else:
-                    return PermitOutcome(
-                        False, f"审批决议已不再是放行态（{arec.state.value}）",
-                        permit_id=permit.permit_id)
-            if permit.grant_id:
-                grec = self._grants.get(permit.grant_id)
-                if grec is None or not self._grant_active(grec, now):
-                    return PermitOutcome(False, "grant 已撤销/过期/未生效"
-                                         "（issued_at <= now < expiry 不满足）",
-                                         permit_id=permit.permit_id)
-            rec.consumed_at = now
-            return PermitOutcome(True, "permit 消费成功", permit_id=permit.permit_id,
-                                 consumed_at=now)
-
-    def permit_state(self, permit_id: str) -> Dict[str, Any]:
-        with self._lock:
-            rec = self._permits.get(permit_id)
-            if rec is None:
-                raise ApprovalStateError(f"unknown permit_id: {permit_id}")
-            return {**rec.permit.to_dict(), "consumed_at": rec.consumed_at}
 
     # -------------------------------------------------- 内部
     def _resolution_locked(self, rec: _RequestRecord) -> ApprovalResolution:

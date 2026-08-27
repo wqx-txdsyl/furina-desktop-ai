@@ -4,33 +4,33 @@
 通道。effective permission = WorkContract scope ∩ PermissionManager L0–L3 ∩
 explicit approval decision/grant ∩ backend capability；**任何一层都不得放宽另一层**。
 
-Reviewer Patch 关键收紧（本文件）：
-- **审批身份完整性**：ApprovalRequest 携带 ``contract_hash``（16A 内容摘要）与
-  ``args_digest``（规范化参数摘要）；请求身份 = contract_id + contract_hash + run_id +
-  tool + capability + requested_scope + risk_level + policy_kind + args_digest——
-  **不同操作不得复用同一审批**；
-- **canonical USER evidence**：``VerifiedUserEvidence`` 只能由 broker 经**可信入口
-  注入的验证器**（``user_evidence_verifier``）产生；格式正则只是必要条件，不是
-  真实性证明；approve_session 与 grant 一律要求该证据；
-- **递归不可变 + 导出防御复制**：request/event 审计载荷存储时递归冻结
-  （MappingProxyType/tuple），导出（to_audit_dict / to_payload）深拷贝为全新对象图；
-- **可见文本统一限长/脱敏**：``sanitize_text`` —— 控制字符清除 + 秘密形态脱敏 +
-  限长截断；所有进入事件/审计/决议 detail 的自由文本一律经过它；
-- **grant 写语义**：``matches`` 区分 write_paths——read_roots 不授予写权限；
-- **ToolPermit**：gate ALLOW → 真实工具边界 ``consume_permit`` 原子消费/复核，
-  消除 ALLOW 与 tool.run 之间的撤销 TOCTOU。
+Reviewer Patch 1（保留）：审批身份绑定 contract_hash+args 摘要、写目标强制
+write_roots、sanitize/freeze 载荷、有效窗口 issued_at<=now<expiry、grant 写语义。
 
-状态机与 owner 线程边界在 broker.py（owner 只在**构造时**由可信组合根绑定，
-backend 线程不得抢占）；四层交集判定在 gate.py。
+Reviewer Patch 2 关键收紧（本文件）：
+- **双摘要分离**：``audit_args_digest``（SHA-256 over **redacted** canonical args，
+  确定性、可导出、供审计）与 ``operation_digest``（broker 每实例随机密钥的
+  HMAC-SHA256 over **严格 canonical 原始 args**，不保存原文；不同敏感值产生不同
+  操作身份——redacted 摘要会因脱敏而碰撞，不能作操作身份）；两者一律严格 JSON 域
+  （``default=repr`` 已删除，非 JSON 类型 fail-closed）；
+- **ToolPermit 绑定完整操作身份**：gate_id（四层 Gate 决议者）+ contract_id +
+  content_hash + run_id + operation_digest；有效窗口有界
+  （``valid_until - not_before <= MAX_PERMIT_TTL_SECONDS``，超长窗口构造拒绝）；
+- **VerifiedUserEvidence 不得公开自铸**：broker 不再返回该对象；消费（approve_
+  session / grant）只接受本 broker 签发的 opaque nonce（``uev_*``）或原始
+  event id，且消费时**重新查询可信记录并绑定具体操作上下文**（approval_id/
+  contract_hash/tool/scope/decision）——手工构造的对象、跨 broker nonce、
+  无关真实事件一律拒绝。
 
-边界（任务书 §6）：不替换/削弱 PermissionManager；无 UI/Hermes/verifier/C7 写入；
-无 C1–C7 schema / DB 迁移；无任何持久化行为。
+状态机与 owner 线程边界在 broker.py（owner 只在**构造时**绑定，backend 线程不得
+抢占）；permit 的生产/消费在 gate.py（四层 Gate 判定才产生可消费 permit）。
 """
 from __future__ import annotations
 
 import enum
 import fnmatch
 import hashlib
+import hmac
 import json
 import math
 import re
@@ -55,11 +55,12 @@ __all__ = [
     "ApprovalState",
     "ApprovalStateError",
     "AuthorizationGrant",
+    "GateSeal",
     "PermitOutcome",
     "ResolutionStatus",
     "ToolPermit",
     "VerifiedUserEvidence",
-    "canonical_args_digest",
+    "audit_args_digest",
     "classify_step_paths",
     "deep_freeze",
     "redact_args",
@@ -71,6 +72,20 @@ __all__ = [
 
 class ApprovalStateError(FurinaError):
     """审批域类型化错误（非法字段 / 非 owner 变更 / 未知 id / 非法决议）。"""
+
+
+class GateSeal:
+    """四层 Gate 的签发凭证（**不透明**，仅可信组合根持有/分发）。
+
+    ``ApprovalBroker.issue_permit`` 要求 ``seal is broker._gate_seal``（对象身份
+    校验）：任意 producer 即使调用 ``issue_permit`` 也无法通过（无本 broker 持有
+    的 seal 对象引用）——可消费 permit 只能由持 seal 的 Gate 在四层判定后产生。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:   # pragma: no cover - 仅调试
+        return "<GateSeal opaque>"
 
 
 # ---------------------------------------------------------------------------
@@ -135,13 +150,18 @@ class ResolutionStatus(str, enum.Enum):
 _APPROVAL_ID_PATTERN = re.compile(r"^apv_[0-9a-f]{8,32}$")
 _GRANT_ID_PATTERN = re.compile(r"^gr_[0-9a-f]{8,32}$")
 PERMIT_ID_PATTERN = re.compile(r"^pmt_[0-9a-f]{8,32}$")
+_GATE_ID_PATTERN = re.compile(r"^gate_[0-9a-f]{8,32}$")
 _CONTRACT_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 #: canonical C6 USER 事件 id（与 WorkContract.source_event_id 同形）：USER provenance
-#: 的**必要非充分**条件。真实性由 broker 构造时注入的可信入口验证器
-#: （user_evidence_verifier → VerifiedUserEvidence）证明；backend 文本 / adapter
-#: 默认 / 推断意图 / LLM 输出即使凑出该形态也无法通过验证器。
+#: 的**必要非充分**条件。真实性由 broker 构造时注入的可信入口验证器在**消费时刻**
+#: 重新查询证明，且必须绑定具体操作上下文（approval_id/contract_hash/tool/scope/
+#: decision）；backend 文本 / adapter 默认 / 推断意图 / LLM 输出无法通过。
 USER_EVENT_ID_PATTERN = re.compile(r"^lev_\d{10,17}_[0-9a-f]{4,32}$")
+
+#: broker 内部 opaque USER 证据 nonce（仅 broker 自己签发/解析）。
+USER_EVIDENCE_NONCE_PATTERN = re.compile(r"^uev_[0-9a-f]{8,32}$")
 
 _CAP_TOKEN_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.:\-/]{1,119}$")
 _TOOL_PATTERN_PATTERN = re.compile(r"^[a-zA-Z0-9_.:*\-]{1,120}$")
@@ -244,17 +264,28 @@ def thaw_tree(obj: Any) -> Any:
     return obj
 
 
-def canonical_args_digest(redacted_args: Any) -> str:
-    """规范化参数摘要：对 redacted args 的 canonical JSON（sorted/紧凑/ASCII/严格域）
-    取 SHA-256。审批身份的"操作"绑定（同 tool 不同 args ⇒ 不同摘要 ⇒ 不同审批）。"""
+def _canonical_json(args: Any) -> str:
+    """严格 canonical JSON（sorted keys、紧凑分隔符、ASCII、**严格 JSON 域**）。
+
+    ``default`` 兜底已删除（Patch 2）：set/Path/自定义对象等任何不可 JSON 化的值
+    一律 :class:`ApprovalStateError` fail-closed——绝不 ``repr`` 化后当作可哈希身份
+    或可审计摘要。
+    """
     try:
-        canonical = json.dumps(
-            thaw_tree(redacted_args), sort_keys=True, separators=(",", ":"),
-            ensure_ascii=True, allow_nan=False, default=repr,
+        return json.dumps(
+            args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
         )
     except (TypeError, ValueError) as exc:
-        raise ApprovalStateError(f"args 摘要载荷不可规范化: {exc}") from exc
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        raise ApprovalStateError(f"参数不在严格 JSON 域内（拒绝 repr 兜底）: {exc}") from exc
+
+
+def audit_args_digest(redacted_args: Any) -> str:
+    """**audit digest**：SHA-256 over 严格 canonical **redacted** args。
+
+    确定性（跨 broker 一致）、可导出、供审计；只覆盖已脱敏内容——脱敏后不同敏感
+    值会碰撞，因此**不能**用作操作身份（操作身份见 broker.operation_digest）。
+    """
+    return hashlib.sha256(_canonical_json(thaw_tree(redacted_args)).encode("utf-8")).hexdigest()
 
 
 def classify_step_paths(tool: str, paths: Tuple[str, ...]) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
@@ -269,16 +300,16 @@ def classify_step_paths(tool: str, paths: Tuple[str, ...]) -> Tuple[Tuple[str, .
 
 
 # ---------------------------------------------------------------------------
-# VerifiedUserEvidence（canonical USER 证据）
+# VerifiedUserEvidence（不再公开自铸）
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class VerifiedUserEvidence:
-    """经**可信入口验证器**确认的 canonical USER 事件证据。
+    """**内部** canonical USER 事件证据记录（Patch 2：不得公开自铸）。
 
-    唯一合法产生路径：``ApprovalBroker.verify_user_evidence(user_event_id)``——
-    broker 构造时注入 ``user_evidence_verifier``（可信组合根所有）；验证器返回
-    真值才铸造本对象。**格式正则不是真实性证明**：凑出 ``lev_<ms>_<hex>`` 形态
-    的 backend/LLM 文本无法通过验证器。
+    - broker 不再公开铸造/返回本对象（public ``verify_user_evidence`` 已删除）；
+    - 消费入口（``ApprovalBroker.create_grant`` / ``resolve(APPROVE_SESSION)``）
+      只接受本 broker 签发的 opaque nonce（``uev_*``）或原始 event id str；
+      **手工构造本对象一律拒绝**——它只是内部形态遗留，供测试/文档引用。
     """
 
     user_event_id: str
@@ -308,9 +339,10 @@ class VerifiedUserEvidence:
 class ApprovalRequest:
     """一次异步审批请求（不可变；只存 redacted 参数摘要，原始参数不进入审批域）。
 
-    **审批身份**（Reviewer Patch）：contract_id + contract_hash + run_id + tool +
-    capability + requested_scope + risk_level + policy_kind + args_digest——
-    请求身份完整绑定被批准的操作；不同操作不得复用。
+    **审批身份**：contract_id + contract_hash + run_id + tool + capability +
+    requested_scope + risk_level + policy_kind + **operation_digest**（HMAC，见
+    broker）——请求身份完整绑定被批准的操作；不同操作（含仅敏感值不同）不得复用。
+    ``audit_args_digest`` 为可导出的 redacted 审计摘要（非操作身份）。
     """
 
     approval_id: str
@@ -320,8 +352,11 @@ class ApprovalRequest:
     capability: str
     #: normalized/redacted 参数摘要（由 broker 在 create 时 redact，永不存原始参数）。
     args_redacted: Mapping[str, Any]
-    #: 规范化参数摘要（redacted args 的 SHA-256 canonical JSON）——身份绑定。
-    args_digest: str
+    #: audit digest：SHA-256 over redacted canonical args（可导出审计身份）。
+    audit_args_digest: str
+    #: operation digest：broker 每实例随机密钥 HMAC over 原始 canonical args。
+    #: 操作身份——不同敏感值产生不同值；不保存原文，亦不导出审计。
+    operation_digest: str
     #: 16A WorkContract 内容摘要（64 hex；空串表示未绑定契约 hash 的裸请求）。
     contract_hash: str
     #: 请求作用的规范化路径集合（requested scope）。
@@ -348,10 +383,12 @@ class ApprovalRequest:
             raise ApprovalStateError(f"ApprovalRequest.reason 必须是 str，得到 {type(self.reason).__name__}")
         # 可见文本统一出口：限长 + 控制字符清除 + 秘密形态脱敏
         object.__setattr__(self, "reason", sanitize_text(self.reason.strip()))
-        if not isinstance(self.args_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", self.args_digest):
-            raise ApprovalStateError(
-                f"args_digest 必须是 64 位小写 hex（canonical_args_digest），得到 {self.args_digest!r}")
-        object.__setattr__(self, "args_digest", self.args_digest)
+        for fname in ("audit_args_digest", "operation_digest"):
+            v = getattr(self, fname)
+            if not isinstance(v, str) or not _DIGEST_PATTERN.match(v):
+                raise ApprovalStateError(
+                    f"ApprovalRequest.{fname} 必须是 64 位小写 hex，得到 {v!r}")
+            object.__setattr__(self, fname, v)
         if not isinstance(self.contract_hash, str):
             raise ApprovalStateError(f"contract_hash 必须是 str，得到 {self.contract_hash!r}")
         if self.contract_hash and not _CONTRACT_HASH_PATTERN.match(self.contract_hash):
@@ -387,7 +424,8 @@ class ApprovalRequest:
 
     def to_audit_dict(self) -> Dict[str, Any]:
         """用户可见/审计 payload：只含 redacted 字段（args 已脱敏，值永不泄漏）；
-        **防御复制**——返回全新 plain 对象图，修改不影响存储的不可变状态。"""
+        **防御复制**——返回全新 plain 对象图，修改不影响存储的不可变状态。
+        ``operation_digest`` 为 HMAC（每 broker 密钥）不导出；审计摘要可导出。"""
         return {
             "approval_id": self.approval_id,
             "contract_id": self.contract_id,
@@ -396,7 +434,7 @@ class ApprovalRequest:
             "tool": self.tool,
             "capability": self.capability,
             "args_redacted": thaw_tree(self.args_redacted),
-            "args_digest": self.args_digest,
+            "audit_args_digest": self.audit_args_digest,
             "requested_scope": list(self.requested_scope),
             "reason": self.reason,
             "risk_level": self.risk_level.name,
@@ -470,9 +508,9 @@ class AuthorizationGrant:
     """会话授权记录：强制 canonical USER provenance + 有界 scope + 可撤销。
 
     - ``user_event_id`` 必须是 canonical C6 USER 事件 id（``lev_<ms>_<hex>``）**且**
-      经 broker 的可信入口验证器确认为真（格式正则只是必要条件，见
-      ``ApprovalBroker.verify_user_evidence``）——backend 文本 / adapter 默认 /
-      推断意图 / LLM 输出一律不可能通过；
+      在 broker 消费时刻经可信入口验证器绑定具体操作上下文重新确认——格式正则只是
+      必要条件，opaque nonce 只在本 broker 有效；backend 文本 / adapter 默认 /
+      推断意图 / LLM 输出不可能通过；
     - ``capability`` 精确绑定；``tool_pattern`` 精确名或仅安全字符集的 glob；
     - ``workspace_scope`` 必须有至少一个根（无界 grant 拒绝）；**read_roots 不授予
       写权限**（``matches`` 对 write_paths 强制落入 write_roots）；
@@ -557,25 +595,32 @@ class AuthorizationGrant:
 
 
 # ---------------------------------------------------------------------------
-# ToolPermit（ALLOW → tool.run 的原子消费凭证）
+# ToolPermit（Gate ALLOW → tool.run 的原子消费凭证）
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ToolPermit:
-    """工具边界许可：gate ALLOW 时签发，真实工具边界 ``consume_permit`` 原子消费。
+    """工具边界许可：**仅由四层 Gate** 在 ALLOW 时签发；真实工具边界
+    ``gate.consume_permit`` 原子消费/复核。
 
-    - 绑定被放行的操作身份（tool/capability/args_digest）与授权来源
-      （approval_id 或 grant_id，二者可同时为空 = 无需审批路径）；
-    - 有效窗口 ``not_before <= now < valid_until``（有界 TTL，拒绝长窗口重新
-      打开撤销 TOCTOU）；
-    - 消费在 broker 单锁内**原子**完成：approve_once 恰好消费一次、approve_session
+    - 绑定完整操作身份：``gate_id``（签发本 permit 的 Gate 决议者）+ tool +
+      capability + ``operation_digest``（broker 密钥 HMAC over 原始 args）+
+      ``contract_id`` + ``content_hash`` + ``run_id``；approval_id / grant_id
+      为授权来源（可同时为空 = 无需审批路径，但仍绑定可信 Gate 决议与契约身份）；
+    - 有效窗口有界：``not_before <= now < valid_until`` 且
+      ``valid_until - not_before <= MAX_PERMIT_TTL_SECONDS``（超长窗口构造拒绝）；
+    - 消费在 Gate 单锁内**原子**完成：approve_once 恰好消费一次、approve_session
       仍处 APPROVED_SESSION、grant 未撤销且 ``issued_at <= now < expiry``——
       任一不满足即消费失败 → 零 tool call。
     """
 
     permit_id: str
+    gate_id: str
     tool: str
     capability: str
-    args_digest: str
+    operation_digest: str
+    contract_id: str
+    contract_hash: str
+    run_id: str
     approval_id: str = ""
     grant_id: str = ""
     not_before: float = 0.0
@@ -585,13 +630,20 @@ class ToolPermit:
         pid = self.permit_id
         if not isinstance(pid, str) or not PERMIT_ID_PATTERN.match(pid):
             raise ApprovalStateError(f"permit_id 必须匹配 pmt_<hex>，得到 {pid!r}")
-        for fname in ("tool", "capability"):
+        gid = self.gate_id
+        if not isinstance(gid, str) or not _GATE_ID_PATTERN.match(gid):
+            raise ApprovalStateError(f"gate_id 必须匹配 gate_<hex>，得到 {gid!r}")
+        for fname in ("tool", "capability", "contract_id", "run_id"):
             v = getattr(self, fname)
-            if not isinstance(v, str) or not v.strip():
-                raise ApprovalStateError(f"ToolPermit.{fname} 必须是非空 str，得到 {v!r}")
+            if not isinstance(v, str):
+                raise ApprovalStateError(f"ToolPermit.{fname} 必须是 str，得到 {v!r}")
             object.__setattr__(self, fname, sanitize_text(v.strip()))
-        if not isinstance(self.args_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", self.args_digest):
-            raise ApprovalStateError(f"ToolPermit.args_digest 必须是 64 位小写 hex")
+        if not self.contract_id:
+            raise ApprovalStateError("ToolPermit.contract_id 必须非空（绑定契约身份）")
+        if not isinstance(self.contract_hash, str) or not _CONTRACT_HASH_PATTERN.match(self.contract_hash):
+            raise ApprovalStateError(f"ToolPermit.contract_hash 必须是 64 位小写 hex")
+        if not isinstance(self.operation_digest, str) or not _DIGEST_PATTERN.match(self.operation_digest):
+            raise ApprovalStateError(f"ToolPermit.operation_digest 必须是 64 位小写 hex")
         for fname in ("approval_id", "grant_id"):
             v = getattr(self, fname)
             if not isinstance(v, str):
@@ -605,13 +657,21 @@ class ToolPermit:
         if self.not_before >= self.valid_until:
             raise ApprovalStateError(
                 f"ToolPermit 有效窗口非法：not_before {self.not_before} >= valid_until {self.valid_until}")
+        if self.valid_until - self.not_before > MAX_PERMIT_TTL_SECONDS:
+            raise ApprovalStateError(
+                f"ToolPermit 有效窗口超长：{self.valid_until - self.not_before}s > "
+                f"上限 {MAX_PERMIT_TTL_SECONDS}s（长窗口=重新打开撤销 TOCTOU）")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "permit_id": self.permit_id,
+            "gate_id": self.gate_id,
             "tool": self.tool,
             "capability": self.capability,
-            "args_digest": self.args_digest,
+            "operation_digest": self.operation_digest,
+            "contract_id": self.contract_id,
+            "contract_hash": self.contract_hash,
+            "run_id": self.run_id,
             "approval_id": self.approval_id,
             "grant_id": self.grant_id,
             "not_before": self.not_before,
