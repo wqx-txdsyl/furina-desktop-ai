@@ -107,6 +107,11 @@ furina/agent/agent_runtime.py:308  _verify 全局硬门：res.ok AND res.verifie
 结论：`COMPLETED_VERIFIED` **已是真实定义**（store 枚举 + owner 写入 + C6 provenance
 现网使用），Phase 16 **不得重造状态名**，只能复用/扩展。见 §12。
 
+C7 schema（`furina/cognition/stores/base.py:63` agent_tasks DDL：task_id PK /
+original_request / goal / status / started_at / finished_at / permission_summary /
+plan_json / verified / result_summary / error）**无 contract 维度**；Phase 16 默认
+**不修改** C1-C7 schema / enum / writer（冻结边界见 §4.5）。
+
 ### 4.2 C6 — Event Timeline
 
 ```text
@@ -146,6 +151,29 @@ furina/agent/planner_v2.py     Planner V2 + deterministic fallback
 
 结论：16B 的 Native backend 实现 = 上述现有栈的适配器封装，**不改动**其内部执行语义。
 
+### 4.5 Work Execution 独立工作域（Work Domain）—— 不属于 C1-C7
+
+锁定声明（reviewer patch 硬化）：
+
+```text
+1. WorkContract / Execution 是独立工作域（work domain），不属于 C1-C7 cognition stores；
+   C7（agent_tasks/agent_task_steps/agent_artifacts）仍是 cognition 侧冻结真值。
+2. 默认不得修改 C1-C7 schema / enum / writer；工作域的一切状态与契约对象
+   （contract_id、run_id、WorkExecutionState）存在于工作域 ledger 中，不落 C7。
+3. 工作域不是 Persona / Memory / Relationship 的 truth 来源：C1（canon_identity）、
+   C4（user_model）、C5（relationship）真值依旧只由既有 owner 产生，工作域数据
+   不得成为或伪装成这些 truth（G-S2 哨兵延续）。
+4. contract_id ↔ C7 使用 binding/provenance 关联（非 C7 列）：
+   - 工作域 ledger 持有 contract_id ↔ task_id ↔ run_id 绑定；
+   - C6 事件（register_event_type + record_event）payload 携带 contract_id + task_id
+     作为 provenance 证据链（C7 行身份仍是 task_id，不变）；
+   - 已核验：C7 DDL 无 contract 列（base.py:63），cognition 全层无 contract 概念，
+     当前代码**不要求** schema 变更即可实现该绑定。
+5. 若任一 Delta 的实施被代码证明**必须**改 C7 schema/enum/writer →
+   标记 `FROZEN_CONTRACT_EXCEPTION_REQUIRED`，且 16G 在外部 reviewer 批准前
+   **BLOCKED**（不实现、不合并）；批准路径见 §5A / §17。
+```
+
 ## 5. 范围总表（16A–16I：范围、依赖、实施顺序）
 
 | ID | 组件 | 范围（一句话） | 关键依赖 | 顺序 |
@@ -170,6 +198,34 @@ furina/agent/planner_v2.py     Planner V2 + deterministic fallback
 
 每步独立 brief + 外部 reviewer PASS 后才能从更新后的 integration SHA 切下一个 Delta。
 
+## 5A. WorkExecutionState / C7 AgentTaskStatus 分离（两套状态机）
+
+锁定声明（reviewer patch 硬化）：Phase 16 引入 **两个相互独立的生命周期状态机**，
+禁止混用、禁止互相写入。
+
+```text
+WorkExecutionState（工作域，16E/16H 拥有，非 C7）：
+    IDLE / STARTING / RUNNING / WAITING_PERMISSION / BLOCKED_APPROVAL /
+    TOOL_RUNNING(子相位) / VERIFYING / REPAIRING / CANCELLING / CANCELLED /
+    BACKEND_DONE_UNVERIFIED / VERIFIED / FAILED / UNKNOWN
+
+frozen C7 AgentTaskStatus（cognition 冻结六态，agent_history.py:20）：
+    PLANNED / RUNNING / COMPLETED_VERIFIED / FAILED / UNVERIFIED / CANCELLED
+```
+
+禁写清单（must NOT be written into C7）：
+
+```text
+UNKNOWN / BLOCKED_APPROVAL / VERIFYING / REPAIRING / BACKEND_DONE_UNVERIFIED
+```
+
+- 上述工作域状态**不得**出现在 `agent_tasks.status` / `agent_task_steps.status`；
+  它们只存在于工作域 ledger 与 C6 事件流；
+- 工作域 → C7 的唯一合法晋升：16F 验证通过 → 经既有唯一 owner
+  `hub.persist_agent_result` 写 `COMPLETED_VERIFIED`（或如实落 FAILED / UNVERIFIED）；
+- 16E 归一层（backend 词表 → WorkExecutionState）只产出工作域状态；
+  C7 映射只发生在 16G 的终态折算，且仅限六态。
+
 ## 6. 技术路由 / Phase 17 意愿决策边界
 
 ```text
@@ -191,7 +247,10 @@ Phase 17（后续，Character Agency / Work Willingness 正式行为）：
 2. Phase 16 的拒绝只发生在**机制层**（无审批通道 / 能力缺失 / contract 违约），
    不实现"Furina 主观不愿意"的决策器；
 3. Phase 16 提供 backend 能力探测数据（16B registry + 16C probe），**不做**"选谁"的
-   agency 判定。
+   agency 判定；
+4. Phase 16 新工作域（§4.5）不属于 C1-C7 cognition stores；其任何数据
+   **不得成为 Persona / Memory / Relationship 的 truth**（C1/C4/C5 真值依旧只由
+   既有 owner 产生；G-S2 哨兵延续）。
 
 ## 7. 16A — Work Sovereignty Contract（数据契约）
 
@@ -208,7 +267,8 @@ time_budget              时间预算
 allowed_backends         允许后端集合（从 16B registry 约束）
 verification_standard    验证标准占位（16F 实施后填实）
 grant_permanent          approval 永久授权显式开关（默认 false，见 16D）
-contract_id              稳定幂等键（16H 使用，落入 C7 计划行）
+contract_id              稳定幂等键（16H 使用；与 C7 经 binding/provenance 关联，
+                        见 §4.5 —— 工作域 ledger + C6 事件链，**不新增 C7 列**）
 ```
 
 不含（禁止出现）：willingness 评分、拒绝理由生成、backend 偏好、情绪/亲密度。
@@ -238,6 +298,28 @@ contract_id              稳定幂等键（16H 使用，落入 C7 计划行）
 - **approval.request 一等公民化**：挂起 run → 向 Furina 外层转发 → 保留 SSE 余流；
   **禁止**复刻 HD 的 `stopAndFallback` 抢话路径（§14 G-S1）。
 - approval choices：默认剔除 `always/permanent`（除非 `contract.grant_permanent=true`）。
+
+### Hermes Interface Decision（reviewer patch 锁定，不允许 task brief 回退）
+
+```text
+API Server primary       适配器主通道 = hermes HTTP API Server（POST /v1/runs + SSE）
+                         只有 API Server 具备 run 生命周期 / approval 一等事件能力
+CLI probe/fallback       hermes CLI 仅用于能力探测（probe）与降级回退，不作为 run 通道
+webhook trigger-only     webhook 仅作触发信号（trigger-only），不是执行/结果通道，
+                         不承载 UNVERIFIED→VERIFIED 语义
+hermes proxy NOT_BACKEND 任何 "hermes proxy" 形态一律不算 backend：不进入 registry、
+                         不接 WorkContract、不参与 probe 健康面
+Plugin/MCP restricted    Plugin / MCP 通道受限：MCP 细则 DEFER（16B v2）；
+                         Phase 16 不得把 plugin/MCP 当一等执行通道
+capability probe         一切接口选择以 /v1/capabilities feature 布尔面为源头
+                         （run_submission / run_status / run_events_sse / run_stop /
+                         approval_response / …）；缺失能力 → 拒绝对应 contract 等级
+no always-approve        approval choices 默认剔除 always/permanent；仅当
+                         contract.grant_permanent=true 才可透传
+output always UNVERIFIED backend 任何输出（含 completed）一律折算为
+                         BACKEND_DONE_UNVERIFIED；VERIFIED 只由 16F 校验器产出
+Single Mouth             backend 用户可见文本 = 素材；经 Furina 嘴部仲裁输出（G-S1）
+```
 
 ## 9. 16D — Permission Boundary（双层）
 
@@ -274,6 +356,9 @@ VERIFIED                 16F 出口唯一合法晋升
 
 TOOL 高频事件背压采纳 CLAWD 有界队列 + CRITICAL_EVENTS 思想（terminal 事件永不丢弃）。
 
+以上全部是**工作域状态**（WorkExecutionState，见 §5A）；除 16G 终态折算（六态）外，
+**任何一项都不得写入 C7**。
+
 ## 11. 16F — Independent Verification + Bounded Repair
 
 - backend 说 completed ≡ `BACKEND_DONE_UNVERIFIED`，**绝不**自动 VERIFIED；
@@ -294,13 +379,27 @@ C3：自动写入默认关闭 —— backend 完成 ≠ 成功记忆；成功记
     权威路径（可选采样源，默认 OFF，需任务书显式开启）
 ```
 
+16G 冻结纪律（reviewer patch 硬化）：
+
+```text
+- C7 只接收 frozen 六态终态（§5A）；工作域状态（UNKNOWN/BLOCKED_APPROVAL/VERIFYING/
+  REPAIRING/BACKEND_DONE_UNVERIFIED）一律不写入 C7；
+- contract_id ↔ C7 走工作域 ledger 绑定 + C6 provenance 事件链（§4.5），不新增 C7 列、
+  不改 C7 行身份；
+- 默认不改 C1-C7 schema / enum / writer；若实施证明必须改 → 标记
+  FROZEN_CONTRACT_EXCEPTION_REQUIRED，16G 在外部 reviewer 批准前 BLOCKED。
+```
+
 ## 13. 16H — Cancellation / Crash / Restart / Idempotency
 
 ```text
-UNKNOWN recovery：重启后发现的历史 in-flight run 一律判 UNKNOWN →
-    verify-on-recovery（先查证再改状态；禁止直接标 FAILED；期间禁止新增同 contract 任务）
-contract_id 幂等：以 contract_id 为 durable 幂等键（落入 C7 计划行）；
-    submit 前查重；对"同 WorkContract 重试双跑"必须拒绝或接管（hermes 头照发但不依赖）
+UNKNOWN recovery：重启后发现的历史 in-flight run 一律判 **WorkExecutionState=UNKNOWN**
+    （工作域状态，§5A；**不得写入 C7**）→ verify-on-recovery（先查证再改状态；禁止
+    直接标 FAILED；期间禁止新增同 contract 任务）；**只有验证通过才经既有唯一 owner
+    hub.persist_agent_result 写 COMPLETED_VERIFIED**（§4.1 owner 路径，无旁路）
+contract_id 幂等：以 contract_id 为 durable 幂等键，存于**工作域 ledger**
+    （contract_id ↔ task_id ↔ run_id 绑定，§4.5，不新增 C7 列）；submit 前查重；
+    对"同 WorkContract 重试双跑"必须拒绝或接管（hermes 头照发但不依赖）
 CANCELLING：对外可见口径 = 正在停止；收到终态事件才落 CANCELLED/FAILED；
     超时升级策略显式化（超时补丁 → FAILED 候选）
 TOOL 背压：bounded queue + critical 事件永不丢弃（§10）
@@ -356,8 +455,11 @@ GAP-1   approval 通道不存在：代码库无 approval.request/WAITING_PERMISS
         16D 必须新增一等审批通道，且不得绕过现有 PermissionManager 同步判定。
 GAP-2   C7 CANCELLED 枚举存在但 AgentRuntime 无取消路径产出它；16H 的取消语义必须
         补上从 CANCELLING → CANCELLED 的真实转移（非仅状态名）。
-GAP-3   WorkContract / contract_id 不存在：全新契约对象；16H 依赖它在 C7 落 durable
-        幂等键（C7 现无 contract 维度字段，需任务书评审加列或加关联表）。
+GAP-3   WorkContract / contract_id 不存在：全新契约对象，属于工作域（§4.5）。
+        已核验：C7 DDL（base.py:63）无 contract 列，binding/provenance 方案
+        （工作域 ledger + C6 事件链）**不要求** C7 schema 变更；若任一 Delta 实施
+        被代码证明必须改 C7 → 标记 `FROZEN_CONTRACT_EXCEPTION_REQUIRED`，16G 在
+        外部 reviewer 批准前 BLOCKED（不实现、不合并）。
 GAP-4   backend 事件归一不存在：16E 是新层；hermes 词表只作映射目标，不搬运实现。
 GAP-5   独立验证只到 step 级（_verify）；16F 的任务级独立校验是扩展，不是重构。
 GAP-6   UNKNOWN 状态与 verify-on-recovery 不存在：16H 新增，且须与 C7 现有状态机兼容。
@@ -400,9 +502,40 @@ G-7   Single Mouth：run 流式期间 backend 文本不旁路用户对话
 G-8   C7 写入单 owner：无 persist_agent_result 之外的 COMPLETED_VERIFIED 写入路径
 G-9   contract_id 幂等：同 contract 重复 submit 拒绝或接管，不双跑
 G-10  Phase 15 冻结区零改动：C1–C7/Memory/UserModel/Canon/Retrieval 未触碰
+G-11  C7 schema/enum/writer 零改动（或经 FROZEN_CONTRACT_EXCEPTION_REQUIRED
+      + 外部 reviewer 批准）；工作域状态（UNKNOWN/BLOCKED_APPROVAL/VERIFYING/
+      REPAIRING/BACKEND_DONE_UNVERIFIED）零泄漏进 C7
+G-12  工作域数据不成为 Persona/Memory/Relationship truth（C1/C4/C5 真值 owner 未变）
 ```
 
 ## 21. Next Document
 
 下一份文档：`02_Phase_16_<首个 Delta>_Task_Brief_EXACT.md`（Delta 顺序见 §5），
 必须单独、窄幅编写，禁止合并多个 Delta 成一个巨型任务。
+
+## 22. Revision（Reviewer Patch）
+
+本版为 Master Plan reviewer document patch（docs only，零生产代码/测试/migration）。
+
+```text
+新增 §4.5   Work Execution 独立工作域：非 C1-C7；默认不改 C1-C7 schema/enum/writer；
+            contract_id↔C7 走 binding/provenance（工作域 ledger + C6 事件链）；
+            若必须改 C7 → FROZEN_CONTRACT_EXCEPTION_REQUIRED + 16G BLOCKED
+新增 §5A    WorkExecutionState / C7 AgentTaskStatus 两套状态机分离；
+            UNKNOWN/BLOCKED_APPROVAL/VERIFYING/REPAIRING/BACKEND_DONE_UNVERIFIED
+            禁写 C7；VERIFIED 仅经既有唯一 owner 晋升 COMPLETED_VERIFIED
+§6 边界铁律 4   新工作域不得成为 Persona/Memory/Relationship truth
+§8 16C      Hermes Interface Decision 锁定：API Server primary；CLI probe/fallback；
+            webhook trigger-only；hermes proxy NOT_BACKEND；Plugin/MCP restricted；
+            capability probe；no always-approve；output always UNVERIFIED；Single Mouth
+§10         16E 全部状态 = 工作域状态，除 16G 终态折算外不写 C7
+§12 16G     16G 冻结纪律（C7 只收六态终态；FROZEN_CONTRACT_EXCEPTION_REQUIRED 门）
+§13 16H     UNKNOWN 为工作域状态；verify-on-recovery 仅经唯一 owner 写
+            COMPLETED_VERIFIED；幂等键存工作域 ledger（不新增 C7 列）
+§17 GAP-3   修正：binding/provenance 方案不需 C7 schema 变更（base.py:63 已核验）；
+            若被证明必须改 → FROZEN_CONTRACT_EXCEPTION_REQUIRED + 16G BLOCKED
+§20         +G-11（C7 零改动/例外批准 + 工作域状态零泄漏）、G-12（不成为 truth）
+```
+
+冻结异常标记（当前状态）：`FROZEN_CONTRACT_EXCEPTION_REQUIRED = NOT_REQUIRED`
+（基于 base.py:63 DDL 现状核验；若未来 Delta 反证，须回填为 REQUIRED 并 BLOCK 16G）。
