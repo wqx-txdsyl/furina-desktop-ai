@@ -10,11 +10,17 @@
 """
 from __future__ import annotations
 
-import time
 from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Tuple
 
-from .models import BackendHealth, BackendRegistrationError, BackendUnknownError
+from .models import (
+    PROTOCOL_VERSION,
+    BackendCapabilities,
+    BackendDescriptor,
+    BackendHealth,
+    BackendRegistrationError,
+    BackendUnknownError,
+)
 from .protocol import ExecutionBackend
 
 
@@ -30,9 +36,26 @@ class ExecutionBackendRegistry:
         if not isinstance(backend, ExecutionBackend):
             raise BackendRegistrationError(
                 f"只接受 ExecutionBackend 实现，得到 {type(backend).__name__}")
-        bid = backend.descriptor.backend_id
+        # 坏实现不得把 AttributeError/TypeError 泄漏给调用方：元数据读取全部折为注册错误
+        try:
+            descriptor = backend.descriptor
+            capabilities = backend.capabilities
+        except Exception as exc:
+            raise BackendRegistrationError(
+                f"backend 元数据不可读（{type(backend).__name__} 实现损坏）: {exc}") from exc
+        if not isinstance(descriptor, BackendDescriptor):
+            raise BackendRegistrationError(
+                f"descriptor 必须是 BackendDescriptor，得到 {type(descriptor).__name__}")
+        if not isinstance(capabilities, BackendCapabilities):
+            raise BackendRegistrationError(
+                f"capabilities 必须是 BackendCapabilities，得到 {type(capabilities).__name__}")
+        bid = descriptor.backend_id
         if not bid:
             raise BackendRegistrationError("backend_id 不能为空")
+        if descriptor.protocol_version != PROTOCOL_VERSION:
+            raise BackendRegistrationError(
+                f"protocol_version 不兼容: {descriptor.protocol_version!r}"
+                f"（registry 支持 {PROTOCOL_VERSION}，类型化拒绝）")
         if bid in self._backends:
             raise BackendRegistrationError(f"重复 backend id: {bid!r}（注册是显式幂等，不覆盖）")
         self._backends[bid] = backend
@@ -76,8 +99,15 @@ class ExecutionBackendRegistry:
         return health
 
     def set_health(self, backend_id: str, health: BackendHealth) -> None:
-        """显式注入健康事实（测试/外部健康信号用；路由只认缓存事实）。"""
-        self.get_required(backend_id)   # 未知 backend 抛 BackendUnknownError
+        """显式注入健康事实（测试/外部健康信号用；路由只认缓存事实）。
+
+        只接受 BackendHealth（坏健康值不得进入路由输入面）。未知 backend 抛
+        BackendUnknownError。
+        """
+        self.get_required(backend_id)
+        if not isinstance(health, BackendHealth):
+            raise BackendRegistrationError(
+                f"set_health 只接受 BackendHealth，得到 {type(health).__name__}")
         self._health[backend_id] = health
 
     def health_of(self, backend_id: str) -> Optional[BackendHealth]:

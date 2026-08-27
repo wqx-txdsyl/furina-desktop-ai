@@ -21,7 +21,7 @@ from typing import Dict, Optional, Tuple
 
 from furina.agent.work_contract import WorkContract
 
-from .models import BackendRunHandle
+from .models import BackendRunHandle, BackendScopeViolation
 from .protocol import ExecutionBackend
 from .registry import ExecutionBackendRegistry
 
@@ -168,16 +168,39 @@ class TechnicalRouter:
 
     # -- 唯一 submit 路径 ---------------------------------------------------------
     def dispatch(self, contract: WorkContract) -> DispatchResult:
-        """route → submit。拒绝 → 零 submit；submit 异常 → fail-soft 类型化失败，不 fallback。"""
+        """route → submit。拒绝 → 零 submit；submit 异常 → fail-soft 类型化失败，不 fallback。
+
+        submit 返回值校验（Patch 1 #5）：
+        - 必须是 :class:`BackendRunHandle`（None/其他类型 → ``invalid_run_handle``）；
+        - ``handle.backend_id`` 必须等于选中 backend（错配 → ``run_handle_backend_mismatch``）；
+        - 两种非法返回均为类型化失败，且**零 fallback**（绝不尝试其他 backend）。
+        """
         decision = self.route(contract)
         if not decision.ok:
             return DispatchResult(ok=False, decision=decision)
         backend = self.registry.get_required(decision.backend_id)
         try:
             handle = backend.submit(contract.to_backend_projection())
+        except BackendScopeViolation as exc:   # scope 无法准确表达：submit 前 fail-closed
+            return DispatchResult(ok=False, decision=decision,
+                                  failure_code="scope_violation",
+                                  failure_detail=str(exc))
         except Exception as exc:  # fail-soft：类型化失败，绝不静默换 backend
             return DispatchResult(
                 ok=False, decision=decision,
                 failure_code="submit_error",
                 failure_detail=f"{type(exc).__name__}: {exc}")
+        if not isinstance(handle, BackendRunHandle):
+            return DispatchResult(
+                ok=False, decision=decision,
+                failure_code="invalid_run_handle",
+                failure_detail=f"submit 必须返回 BackendRunHandle，得到 {type(handle).__name__}")
+        if handle.backend_id != decision.backend_id:
+            return DispatchResult(
+                ok=False, decision=decision,
+                failure_code="run_handle_backend_mismatch",
+                failure_detail=(
+                    f"handle.backend_id {handle.backend_id!r} != 选中 backend "
+                    f"{decision.backend_id!r}")
+            )
         return DispatchResult(ok=True, decision=decision, handle=handle)

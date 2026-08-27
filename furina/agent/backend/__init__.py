@@ -14,6 +14,7 @@ from .models import (
     BackendHealth,
     BackendRegistrationError,
     BackendRunHandle,
+    BackendScopeViolation,
     BackendSubmitFailure,
     BackendUnknownError,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "BackendHealth",
     "BackendRegistrationError",
     "BackendRunHandle",
+    "BackendScopeViolation",
     "BackendSubmitFailure",
     "BackendUnknownError",
     "DispatchResult",

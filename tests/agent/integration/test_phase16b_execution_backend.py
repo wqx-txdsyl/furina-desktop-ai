@@ -27,6 +27,7 @@ import pytest
 
 from furina.agent import AgentRuntime, PermissionManager, ToolRegistry
 from furina.agent.backend import (
+    PROTOCOL_VERSION,
     BackendCapabilities,
     BackendCapabilityError,
     BackendDescriptor,
@@ -34,6 +35,7 @@ from furina.agent.backend import (
     BackendHealth,
     BackendRegistrationError,
     BackendRunHandle,
+    BackendUnknownError,
     ExecutionBackend,
     ExecutionBackendRegistry,
     NativeAgentRuntimeBackend,
@@ -97,14 +99,19 @@ def _contract(workspace_root: Path, **overrides):
 
 
 # ================================================================ 假 backend（spy + 可配置）
+_UNSET = object()
+
+
 class _FakeBackend(ExecutionBackend):
-    """可配置健康/能力/异常的可 spy backend（注册不是执行：probe_calls 由显式 probe 驱动）。"""
+    """可配置健康/能力/异常/返回值的可 spy backend（注册不是执行：probe_calls 由显式 probe 驱动）。"""
 
     def __init__(self, backend_id, *, capability_ids=("cap.filesystem",),
                  supports_events=False, supports_stop=False, supports_resolve_approval=False,
                  max_cost_limit=None, max_duration_seconds=None, workspace_scoped=True,
-                 probe_health=None, submit_error=None):
-        self._descriptor = BackendDescriptor(backend_id=backend_id, display_name=f"fake:{backend_id}")
+                 probe_health=None, submit_error=None, submit_return=_UNSET,
+                 protocol_version=PROTOCOL_VERSION):
+        self._descriptor = BackendDescriptor(backend_id=backend_id, display_name=f"fake:{backend_id}",
+                                             protocol_version=protocol_version)
         self._caps = BackendCapabilities(
             capability_ids=capability_ids,
             supports_events=supports_events, supports_stop=supports_stop,
@@ -114,6 +121,7 @@ class _FakeBackend(ExecutionBackend):
         )
         self._probe_health = probe_health
         self._submit_error = submit_error
+        self._submit_return = submit_return
         self.probe_calls = 0
         self.submit_calls = 0
 
@@ -137,8 +145,28 @@ class _FakeBackend(ExecutionBackend):
         self.submit_calls += 1
         if self._submit_error is not None:
             raise self._submit_error
+        if self._submit_return is not _UNSET:
+            return self._submit_return
         return BackendRunHandle(self._descriptor.backend_id, f"run_{self.submit_calls}",
                                 projection.get("contract_id", ""))
+
+
+class _BrokenMetadataBackend(ExecutionBackend):
+    """descriptor/capabilities 读取即抛 AttributeError 的坏实现（不得泄漏给 register 调用方）。"""
+
+    @property
+    def descriptor(self):
+        raise AttributeError("broken descriptor")
+
+    @property
+    def capabilities(self):
+        raise AttributeError("broken capabilities")
+
+    def probe(self):  # pragma: no cover - 注册即拒，不会走到
+        raise AssertionError("unreachable")
+
+    def submit(self, projection, *, run_id=None):  # pragma: no cover
+        raise AssertionError("unreachable")
 
 
 def _ready(registry, backend):
@@ -295,11 +323,13 @@ def test_08_submit_exception_failsoft_no_fallback(tmp_path):
 
 
 # ================================================================ 9. Native adapter preserves existing result semantics
-def _make_runtime(planner_steps):
+def _make_runtime(planner_steps, extra_tools=None):
     bus = EventBus()
     tools = ToolRegistry()
     for c in ALL_TOOLS:
         tools.register(c())
+    for t in extra_tools or []:
+        tools.register(t)
     perm = PermissionManager()   # 生产默认：on_confirm=None → L2/L3 拒绝（不削弱权限）
     records = []
     agent = AgentRuntime(bus, tools, perm,
@@ -444,3 +474,220 @@ def test_extra_budget_and_workspace_incompatibility(tmp_path):
     contract_ws = _contract(tmp_path, allowed_backends=("ws_backend",))
     dec2 = TechnicalRouter(reg).route(contract_ws)
     assert not dec2.ok and "workspace_incompatible" in dec2.refusal_detail
+
+
+# ================================================================ Reviewer Patch 1 否证测试
+def _native_backend(tools, agent, steps=None, extra_tools=None):
+    from furina.agent.capabilities import build_capability_registry
+    capreg = build_capability_registry(tools)
+    backend = NativeAgentRuntimeBackend(agent, capability_registry=capreg)
+    reg = ExecutionBackendRegistry()
+    _ready(reg, backend)
+    return backend, TechnicalRouter(reg)
+
+
+def test_p1_02b_out_of_scope_path_fail_closed(tmp_path):
+    """写路径越出 workspace write root → submit 前 fail-closed，零执行（文件不存在）。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    steps = [AgentStep(tool="doc.create",
+                       args={"path": str(outside / "evil.md"), "content": "x"})]
+    tools, agent, _ = _make_runtime(steps)
+    backend, router = _native_backend(tools, agent)
+    contract = _contract(tmp_path, allowed_backends=("native",),
+                         allowed_capabilities=("cap.documents", "cap.filesystem"))
+    out = router.dispatch(contract)
+    assert not out.ok and out.failure_code == "scope_violation"
+    assert "越界" in out.failure_detail and "write" in out.failure_detail
+    assert not (outside / "evil.md").exists(), "越界路径绝不执行"
+    assert backend.last_result("") is None  # 无任何 run 产生
+    # 只读工具读越界同样拒绝（read scope）
+    steps2 = [AgentStep(tool="fs.read_file", args={"path": str(outside / "secret.txt")})]
+    tools2, agent2, _ = _make_runtime(steps2)
+    _, router2 = _native_backend(tools2, agent2)
+    out2 = router2.dispatch(_contract(tmp_path, allowed_backends=("native",),
+                                      allowed_capabilities=("cap.filesystem",)))
+    assert not out2.ok and out2.failure_code == "scope_violation" and "read" in out2.failure_detail
+
+
+def test_p1_02c_over_permission_capability_fail_closed(tmp_path):
+    """计划使用契约 allowed_capabilities 之外的 capability 工具 → submit 前 fail-closed。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    steps = [AgentStep(tool="doc.create",
+                       args={"path": str(work / "a.md"), "content": "x"})]
+    tools, agent, _ = _make_runtime(steps)
+    _, router = _native_backend(tools, agent)
+    contract = _contract(tmp_path, allowed_backends=("native",),
+                         allowed_capabilities=("cap.filesystem",))  # 不含 cap.documents
+    out = router.dispatch(contract)
+    assert not out.ok and out.failure_code == "scope_violation"
+    assert "越权 capability" in out.failure_detail
+    assert not (work / "a.md").exists()
+    # 工具无法归属任何 capability → scope 无法准确表达 → fail-closed
+    from furina.agent.tool import BaseTool
+
+    class _OrphanTool(BaseTool):
+        name = "custom.gadget"
+        description = "无 capability 归属的工具"
+
+    tools2, agent2, _ = _make_runtime(
+        [AgentStep(tool="custom.gadget", args={})], extra_tools=[_OrphanTool()])
+    _, router2 = _native_backend(tools2, agent2)
+    out2 = router2.dispatch(_contract(tmp_path, allowed_backends=("native",),
+                                      allowed_capabilities=("cap.filesystem",)))
+    assert not out2.ok and out2.failure_code == "scope_violation"
+    assert "无法归属" in out2.failure_detail
+
+
+def test_p1_02d_legal_scope_positive(tmp_path):
+    """合法范围正例：工具 ∈ allowed_capabilities 且路径 ∈ workspace → submit 成功。"""
+    work = tmp_path / "work"
+    work.mkdir()
+    steps = [AgentStep(tool="doc.create",
+                       args={"path": str(work / "ok.md"), "content": "Hello"})]
+    tools, agent, records = _make_runtime(steps)
+    backend, router = _native_backend(tools, agent)
+    contract = _contract(tmp_path, allowed_backends=("native",),
+                         allowed_capabilities=("cap.documents",))
+    out = router.dispatch(contract)
+    assert out.ok, out.decision
+    result = backend.last_result(out.handle.run_id)
+    assert result["status"] == "completed"
+    assert (work / "ok.md").read_text(encoding="utf-8") == "Hello"
+    assert records and records[-1]["status"] == "COMPLETED_VERIFIED"
+
+
+def test_p1_04b_native_capabilities_real(tmp_path):
+    """Native 能力声明必须真实：未实现的能力一律 False；TTL 必须有限正数。"""
+    tools, agent, _ = _make_runtime([])
+    from furina.agent.capabilities import build_capability_registry
+    capreg = build_capability_registry(tools)
+    backend = NativeAgentRuntimeBackend(agent, capability_registry=capreg)
+    caps = backend.capabilities
+    assert caps.supports_events is False
+    assert caps.supports_stop is False
+    assert caps.supports_resolve_approval is False
+    assert caps.workspace_scoped is True, "真正执行 scope → 才可为 true"
+    # capability_ids 恰为 available 能力派生（无虚假声明）
+    expected = tuple(sorted(c.capability_id for c in capreg.all() if c.available))
+    assert caps.capability_ids == expected
+    with pytest.raises(BackendCapabilityError):
+        backend.events(BackendRunHandle("native", "r", ""))
+    with pytest.raises(BackendCapabilityError):
+        backend.stop(BackendRunHandle("native", "r", ""))
+    with pytest.raises(BackendCapabilityError):
+        backend.resolve_approval("x")
+    # probe TTL 必须有限正数
+    for bad in (0, -5, True, float("nan"), float("inf")):
+        with pytest.raises(BackendError):
+            NativeAgentRuntimeBackend(agent, capability_registry=capreg,
+                                      probe_ttl_seconds=bad)
+
+
+def test_p1_04c_fake_runtime_rejected(tmp_path):
+    """假 runtime / 缺失或伪 capability_registry → 构造即类型化拒绝。"""
+    from furina.agent.capabilities import build_capability_registry
+    tools, agent, _ = _make_runtime([])
+    capreg = build_capability_registry(tools)
+    with pytest.raises(BackendError, match="runtime"):
+        NativeAgentRuntimeBackend(object(), capability_registry=capreg)   # 假 runtime
+    with pytest.raises(BackendError, match="runtime"):
+        NativeAgentRuntimeBackend(None, capability_registry=capreg)
+    with pytest.raises(BackendError, match="capability_registry"):
+        NativeAgentRuntimeBackend(agent, capability_registry=None)        # 缺 scope 依据
+    with pytest.raises(BackendError, match="capability_registry"):
+        NativeAgentRuntimeBackend(agent, capability_registry=object())    # 伪 registry
+
+
+def test_p1_03b_capability_strict_validation():
+    """BackendCapabilities：bool 不得充当 int；NaN/Inf/非正上限一律拒绝。"""
+    with pytest.raises(BackendError):
+        BackendCapabilities(max_concurrent_runs=True)          # bool 冒充 int
+    with pytest.raises(BackendError):
+        BackendCapabilities(max_concurrent_runs=0)
+    for bad in (float("nan"), float("inf"), 0, -1.0, True):
+        with pytest.raises(BackendError):
+            BackendCapabilities(max_cost_limit=bad)
+        with pytest.raises(BackendError):
+            BackendCapabilities(max_duration_seconds=bad)
+
+
+def test_p1_03c_health_strict_validation():
+    """BackendHealth：时间必须有限且时序合法；到达 expiry 即 stale。"""
+    now = time.time()
+    with pytest.raises(BackendError):
+        BackendHealth(installed=True, reachable=True, healthy=True,
+                      checked_at=float("nan"), expiry=now + 10)
+    with pytest.raises(BackendError):
+        BackendHealth(installed=True, reachable=True, healthy=True,
+                      checked_at=now, expiry=float("inf"))
+    with pytest.raises(BackendError):
+        BackendHealth(installed=True, reachable=True, healthy=True,
+                      checked_at=now + 100, expiry=now)         # 时序非法
+    with pytest.raises(BackendError):
+        BackendHealth(installed=True, reachable=True, healthy=True,
+                      checked_at=True, expiry=now + 10)         # bool 冒充数值
+    # 到达 expiry 即 stale（== expiry 边界）
+    boundary = BackendHealth(installed=True, reachable=True, healthy=True,
+                             checked_at=now - 10, expiry=now)
+    assert boundary.is_stale(now) and not boundary.is_effective(now)
+    # healthy=True 必须 installed ∧ reachable
+    with pytest.raises(BackendError):
+        BackendHealth(installed=False, reachable=True, healthy=True,
+                      checked_at=now, expiry=now + 10)
+
+
+def test_p1_04d_protocol_mismatch_rejected():
+    """protocol_version 不兼容 → 注册类型化拒绝（不进入 registry）。"""
+    reg = ExecutionBackendRegistry()
+    with pytest.raises(BackendRegistrationError, match="protocol_version"):
+        reg.register(_FakeBackend("legacy_backend", protocol_version="9.9.9"))
+    assert "legacy_backend" not in reg
+
+
+def test_p1_04e_set_health_type_checked():
+    """set_health 只接受 BackendHealth；未知 backend → BackendUnknownError。"""
+    reg = ExecutionBackendRegistry()
+    _ready(reg, _FakeBackend("b1"))
+    _ready_health = reg.health_of("b1")
+    with pytest.raises(BackendRegistrationError, match="BackendHealth"):
+        reg.set_health("b1", {"healthy": True})
+    with pytest.raises(BackendRegistrationError, match="BackendHealth"):
+        reg.set_health("b1", None)
+    with pytest.raises(BackendUnknownError):
+        reg.set_health("ghost", _fresh_health())
+    # 坏健康值不得进入/覆盖路由输入面：probe 建立的既有健康事实原样保留
+    assert reg.health_of("b1") is _ready_health
+
+
+def test_p1_04f_bad_metadata_no_attr_leak():
+    """坏 descriptor/capabilities 实现 → 注册折为 BackendRegistrationError，不泄漏 AttributeError。"""
+    reg = ExecutionBackendRegistry()
+    with pytest.raises(BackendRegistrationError):
+        reg.register(_BrokenMetadataBackend())
+    assert len(reg) == 0
+
+
+def test_p1_05b_dispatch_invalid_handle_zero_fallback(tmp_path):
+    """submit 返回 None / 错 backend handle → 类型化失败，零 fallback。"""
+    contract = _contract(tmp_path, allowed_backends=("b1", "b2"))
+    reg = ExecutionBackendRegistry()
+    b1 = _ready(reg, _FakeBackend("b1", submit_return=None))
+    b2 = _ready(reg, _FakeBackend("b2"))
+    router = TechnicalRouter(reg, RoutingPolicy(preferred_backend_ids=("b1",)))
+    out = router.dispatch(contract)
+    assert not out.ok and out.failure_code == "invalid_run_handle"
+    assert "BackendRunHandle" in out.failure_detail
+    assert b1.submit_calls == 1 and b2.submit_calls == 0, "非法返回零 fallback"
+    # 错 backend_id 的 handle
+    reg2 = ExecutionBackendRegistry()
+    wrong = _ready(reg2, _FakeBackend("b1",
+                                      submit_return=BackendRunHandle("b2", "run_x", "")))
+    b2b = _ready(reg2, _FakeBackend("b2"))
+    router2 = TechnicalRouter(reg2, RoutingPolicy(preferred_backend_ids=("b1",)))
+    out2 = router2.dispatch(contract)
+    assert not out2.ok and out2.failure_code == "run_handle_backend_mismatch"
+    assert wrong.submit_calls == 1 and b2b.submit_calls == 0

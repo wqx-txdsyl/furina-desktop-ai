@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -49,6 +50,10 @@ class BackendCapabilityError(BackendError):
 
 class BackendSubmitFailure(BackendError):
     """backend submit 抛出的类型化失败（dispatch 层 fail-soft 承接，不静默换 backend）。"""
+
+
+class BackendScopeViolation(BackendError):
+    """backend 无法在契约 scope 内准确表达/执行：submit 前或结果面 fail-closed。"""
 
 
 def _clean_str(value: Any, field_name: str) -> str:
@@ -119,17 +124,17 @@ class BackendCapabilities:
                      "workspace_scoped"):
             if not isinstance(getattr(self, flag), bool):
                 raise BackendError(f"{flag} 必须是 bool")
-        if not isinstance(self.max_concurrent_runs, int) or self.max_concurrent_runs < 1:
-            raise BackendError(f"max_concurrent_runs 必须是 >=1 的 int，得到 {self.max_concurrent_runs!r}")
-        if self.max_cost_limit is not None and (
-                isinstance(self.max_cost_limit, bool) or not isinstance(self.max_cost_limit, (int, float))
-                or self.max_cost_limit <= 0):
-            raise BackendError(f"max_cost_limit 必须是正数值或 None，得到 {self.max_cost_limit!r}")
-        if self.max_duration_seconds is not None and (
-                isinstance(self.max_duration_seconds, bool)
-                or not isinstance(self.max_duration_seconds, (int, float))
-                or self.max_duration_seconds <= 0):
-            raise BackendError(f"max_duration_seconds 必须是正数值或 None，得到 {self.max_duration_seconds!r}")
+        if type(self.max_concurrent_runs) is not int or self.max_concurrent_runs < 1:
+            raise BackendError(
+                f"max_concurrent_runs 必须是 >=1 的 int（bool 不算 int），得到 {self.max_concurrent_runs!r}")
+        for name in ("max_cost_limit", "max_duration_seconds"):
+            v = getattr(self, name)
+            if v is None:
+                continue
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise BackendError(f"{name} 必须是正数值或 None，得到 {v!r}")
+            if not math.isfinite(float(v)) or float(v) <= 0:
+                raise BackendError(f"{name} 必须有限且 > 0（NaN/Inf/非正拒绝），得到 {v!r}")
 
     def satisfies(self, required_capabilities: Tuple[str, ...]) -> bool:
         """契约所需能力集合是否被本 backend 显式覆盖。"""
@@ -163,7 +168,13 @@ class BackendHealth:
             v = getattr(self, f)
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 raise BackendError(f"health.{f} 必须是非 bool 数值")
+            if not math.isfinite(float(v)):
+                raise BackendError(f"health.{f} 必须有限（NaN/Inf 拒绝），得到 {v!r}")
             object.__setattr__(self, f, float(v))
+        if self.checked_at > self.expiry:
+            raise BackendError(
+                f"health 时序非法：checked_at={self.checked_at} > expiry={self.expiry}"
+                "（健康事实必须先于其过期时刻产生）")
         if not isinstance(self.reason, str):
             raise BackendError("health.reason 必须是 str（healthy 时可为空）")
         object.__setattr__(self, "reason", self.reason.strip())
@@ -172,12 +183,12 @@ class BackendHealth:
 
     def is_stale(self, now: Optional[float] = None) -> bool:
         now = time.time() if now is None else now
-        return now > self.expiry
+        return now >= self.expiry
 
     def is_effective(self, now: Optional[float] = None) -> bool:
-        """router 唯一健康判据：installed ∧ reachable ∧ healthy ∧ 未过期（fail-closed）。"""
+        """router 唯一健康判据：installed ∧ reachable ∧ healthy ∧ 未过期（到达 expiry 即 stale）。"""
         now = time.time() if now is None else now
-        return self.installed and self.reachable and self.healthy and now <= self.expiry
+        return self.installed and self.reachable and self.healthy and now < self.expiry
 
 
 # ---------------------------------------------------------------------------

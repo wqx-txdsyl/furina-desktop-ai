@@ -2,9 +2,10 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED（等待外部验收；不声明 16B_PASS）
+STATUS                         = EXECUTED + Reviewer Patch 1 已落实（等待外部验收；不声明 16B_PASS）
 BASE_SHA                       = 5a0e839c77b73407a5d4701901785f28f2386db4（ACCEPTED_16A_SHA，
                                  ff-only 集成后 16B 分支起点）
+                                 ceea57fc50d3d437f40830fd734fd889e77ecaa5（Patch 1 起点）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，沿用 16A 惯例）
 BRANCH                         = feature/phase16-16b-execution-backend
 LOCAL_REMOTE_MATCH             = push 后核验，结论记录于外部 handoff
@@ -63,6 +64,45 @@ EVENT_RESULT_REFERENCE          = BackendEvent 仅类型化引用占位（backen
                                  native run 结果经 last_result(run_id) 原生访问器取得
                                  （16H 拥有持久化，16E 拥有统一结果引用语义）
 
+REVIEWER_PATCH_1                = 五项 blocker 修复：
+                                 P1-1 Native 真约束 WorkContract：submit 前用 runtime 自身
+                                 planner 预检每个 step——工具归属 capability 必须 ⊆ 契约
+                                 allowed_capabilities（越权 capability 拒）、路径参数（复用
+                                 AgentRuntime._step_paths 规范提取）必须在 workspace 内
+                                 （写工具 permission≥L1 → write roots，只读 → read∪write）；
+                                 工具无法归属任何 capability / 未注册 / 权限声明缺失 /
+                                 契约 scope 无法解析 → BackendScopeViolation submit 前
+                                 fail-closed 零执行；执行后再对实际 task_record 二次校验
+                                 （LLM 偏离预检兜底；permission_denied/unknown_tool 未执行
+                                 步骤跳过）。不实现 16D 异步审批：task_auth 仍为默认 L0/L1，
+                                 L2/L3 依旧由 PermissionManager 默认拒绝（有测试锁定），
+                                 不削弱既有权限语义。
+                                 P1-2 Native 能力/健康真实：runtime 强制 isinstance
+                                 AgentRuntime（假 runtime 构造即拒）；events/stop/
+                                 resolve_approval 均未实现 → 一律不声明支持（supports_*=False
+                                 + 能力门控拒绝测试）；workspace_scoped 仅在真正执行 scope
+                                 时 true（本实现 pre+post 双校验确实执行）；capability_ids
+                                 仅由 available 能力派生，无覆盖参数（杜绝虚假声明）；
+                                 probe_ttl_seconds 必须有限正数（bool/0/负/NaN/Inf 全拒）。
+                                 P1-3 BackendCapabilities/Health 严格校验：max_concurrent_runs
+                                 type(x) is int（bool 冒充 int 拒）；max_cost_limit /
+                                 max_duration_seconds 必须有限且 > 0（NaN/Inf/非正/True 拒）；
+                                 health checked_at/expiry 必须有限；时序合法
+                                 （checked_at ≤ expiry）；healthy=True 必须 installed ∧
+                                 reachable；is_stale 改为 now ≥ expiry（到达 expiry 即
+                                 stale），is_effective 改为 now < expiry。
+                                 P1-4 Registry fail-closed：set_health 只接受 BackendHealth
+                                 （坏健康值不得进入路由输入面）；register 校验 protocol_
+                                 version == PROTOCOL_VERSION 否则类型化拒绝；descriptor /
+                                 capabilities 读取包 try/except + 类型校验——坏实现不得泄漏
+                                 AttributeError。
+                                 P1-5 dispatch 验证 submit 返回：必须是 BackendRunHandle
+                                 （None/其他 → invalid_run_handle）；handle.backend_id 必须
+                                 等于选中 backend（错配 → run_handle_backend_mismatch）；
+                                 非法返回均为类型化失败且零 fallback（其他 backend
+                                 submit_calls==0 有测试锁定）；BackendScopeViolation 专门化
+                                 failure_code=scope_violation。
+
 C1_C7_SCHEMA_CHANGED           = false
 DATABASE_MIGRATION_ADDED       = false
 PRODUCTION_FILES_CHANGED       = 仅新增 furina/agent/backend/ 包（models.py/protocol.py/
@@ -71,35 +111,28 @@ PRODUCTION_FILES_CHANGED       = 仅新增 furina/agent/backend/ 包（models.py
                                  work_contract.py 等零改动）
 TEST_FILES_CHANGED             = 仅新增 tests/agent/integration/test_phase16b_execution_backend.py
 TARGETED_TESTS                 = tests/agent/integration/test_phase16b_execution_backend.py：
-                                 16 passed。覆盖任务书 §7 全部 12 项：1 重复 id 拒绝
-                                 （同 id 不同实例/同实例/非 ExecutionBackend 三路径）；
-                                 2 installed-but-unhealthy 不可路由 + 未 probe 的已注册
-                                 backend fail-closed（not_probed）；3 stale health
-                                 （expiry 已过）不得当作 healthy；4 能力不匹配 → 零 submit；
-                                 5 显式 allowed_backends 不可被策略偏好/允许集放宽（契约外
-                                 健康 backend 也绝不落入）；6 确定性 tie-break 可重复
-                                 （偏好顺序 + 字典序兜底 + 候选顺序锁定）；7 persona/
-                                 relationship 不影响技术路由（路由输入面结构断言）；
-                                 8 submit 异常 → fail-soft 类型化失败且不静默 fallback；
-                                 9 Native adapter 保留既有结果语义（COMPLETED_VERIFIED +
-                                 verified + 真实文件 + task_record 回调原样；9b 权限语义
-                                 permission_denied 不被削弱 + 能力门控 events/stop/
-                                 resolve_approval 全拒）；10 registry snapshot
-                                 不可变/调用方安全（MappingProxyType + 副本解耦 +
-                                 后续注册不影响旧快照）；11 无安装/卸载（方法面断言 +
-                                 注册零副作用）+ 11b 导入 backend 包不拉入 furina.cognition
-                                 （subprocess 干净解释器守卫）；另有拒绝码类型化
-                                 （no_registered_backend/no_compatible_backend）、预算/
-                                 workspace 不兼容否决等专项。
+                                 27 passed。任务书 §7 全部 12 项（1–12 同初版）+ Patch 1 否证
+                                 专项 11 项：越界写路径/越界读路径 submit 前 fail-closed 且
+                                 文件不存在、越权 capability（契约外 capability 工具 + 无归属
+                                 孤儿工具）、合法范围正例（allowed ∩ workspace 内成功）、
+                                 虚假 Native 能力（supports_* 全 False + capability_ids 恰为
+                                 available 派生 + 能力门控调用全拒 + TTL bool/0/负/NaN/Inf 拒）、
+                                 假 runtime/伪 capability_registry 构造即拒、capabilities
+                                 bool 冒充 int 与 NaN/Inf/非正上限全拒、health NaN/Inf/时序
+                                 非法/bool 冒充数值/到达 expiry 即 stale/healthy 缺前置态拒、
+                                 protocol_version 不匹配注册类型化拒绝、set_health 非
+                                 BackendHealth 拒且不覆盖既有事实、坏 descriptor/capabilities
+                                 不泄漏 AttributeError、submit 返回 None/错 backend handle
+                                 类型化失败且零 fallback。
 AGENT_RUNTIME_REGRESSION       = pytest tests/agent tests/test_agent_tools.py
-                                 tests/test_skeleton.py：262 passed
+                                 tests/test_skeleton.py：273 passed
                                  （15 warnings 为既有线程 ResourceWarning 类告警，与本
                                  阶段无关）
 COGNITION_REGRESSION           = pytest tests/cognition：279 passed（Phase 15
                                  cognition/store 契约不变——任务书 §7.12）
 FULL_SUITE                     = .venv/Scripts/python.exe -m pytest -q（本轮仅一次）：
-                                 1507 passed, 0 failed（190.07s，exit 0）
-                                 较集成基线 1491 恰 +16（新增 16B 专项）
+                                 1518 passed, 0 failed（152.29s，exit 0）
+                                 较初版 1507 恰 +11（Patch 1 新增 11 项否证专项）
 
 REMAINING_GAPS                 = 1) 按 brief 无 Hermes(16C)/approval channel(16D)/事件
                                    状态机(16E)/verifier(16F)/持久化 ledger(16H)/C7
