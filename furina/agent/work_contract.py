@@ -31,19 +31,21 @@ from types import MappingProxyType
 from typing import Any, Dict, Mapping, Tuple
 
 __all__ = [
+    "APPROVAL_POLICY_KINDS",
+    "ArtifactExpectation",
+    "ApprovalPolicyRef",
     "CONTRACT_SCHEMA_MARKER",
+    "ContractIdConflictError",
+    "CostBudget",
+    "ExecutionBudget",
     "HASH_VERSION",
     "MAX_ATTEMPTS",
     "MAX_BUDGET_DURATION_SECONDS",
     "MAX_COST_AMOUNT",
-    "ArtifactExpectation",
-    "ApprovalPolicyRef",
-    "ContractIdConflictError",
-    "CostBudget",
-    "ExecutionBudget",
     "VERIFICATION_CRITERION_KINDS",
     "VerificationCriterion",
     "VerificationStandard",
+    "WorkspaceScope",
     "WorkContract",
     "WorkContractValidationError",
     "compute_content_hash",
@@ -123,18 +125,18 @@ def _clean_str(value: Any, field_name: str) -> str:
 
 
 def compute_content_hash(payload: Mapping[str, Any]) -> str:
-    """确定性内容摘要：SHA-256 over canonical JSON（sorted keys、紧凑分隔符、ASCII）。
+    """确定性内容摘要：SHA-256 over canonical JSON（sorted keys、紧凑分隔符、ASCII、严格域）。
 
-    对相同逻辑内容跨进程 / 跨平台稳定；不涉及任何运行时状态。
+    严格 JSON 域：``allow_nan=False`` 且无 ``default`` 兜底——NaN/Inf 与任何不可
+    JSON 化的对象都会被拒绝，对相同逻辑内容跨进程 / 跨平台稳定。
     """
-    canonical = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=_json_default
-    )
+    try:
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise WorkContractValidationError(f"内容摘要载荷不在严格 JSON 域内: {exc}") from exc
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _json_default(obj: Any) -> Any:
-    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -144,17 +146,38 @@ def _json_default(obj: Any) -> Any:
 
 @dataclass(frozen=True)
 class CostBudget:
-    """成本上限（amount > 0 且有限；币种显式声明）。"""
+    """成本上限（amount 为非 bool 的有限数值且 >0；currency 强制 ISO-4217 三字母大写）。"""
 
     amount: float
     currency: str = "CNY"
+
+    def __post_init__(self) -> None:
+        amt = self.amount
+        if isinstance(amt, bool) or not isinstance(amt, (int, float)):
+            _fail("cost.amount 必须是非 bool 数值")
+        f = float(amt)
+        if math.isnan(f) or math.isinf(f):
+            _fail("cost.amount 不允许 NaN/Inf（无界预算）")
+        if f <= 0:
+            _fail(f"cost.amount 必须 > 0，得到 {f}")
+        if f > MAX_COST_AMOUNT:
+            _fail(f"cost.amount 超过事实上无界上限 {MAX_COST_AMOUNT}")
+        object.__setattr__(self, "amount", f)
+
+        cur = self.currency
+        if not isinstance(cur, str):
+            _fail("cost.currency 必须是 str")
+        normalized = cur.strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", normalized):
+            _fail(f"cost.currency 必须是 ISO-4217 三字母大写格式，得到 {cur!r}")
+        object.__setattr__(self, "currency", normalized)
 
     def to_dict(self) -> Dict[str, Any]:
         return {"amount": self.amount, "currency": self.currency}
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "CostBudget":
-        return cls(amount=float(d["amount"]), currency=str(d.get("currency", "CNY")))
+        return cls(amount=d["amount"], currency=d.get("currency", "CNY"))
 
 
 @dataclass(frozen=True)
@@ -189,19 +212,23 @@ class WorkspaceScope:
             _fail(f"{field_name} 根必须是 str")
         s = root.strip()
         if not s or s == ".":
-            # 必须在 abspath 之前拦截："" 会被解析为进程 CWD，等同隐式边界
             _fail(f"{field_name} 拒绝空根路径或相对当前目录根")
-        r = os.path.normpath(os.path.abspath(os.path.expanduser(s)))
+        expanded = os.path.expanduser(s)
+        # 在任何 abspath 之前拒绝非绝对根：相对路径 / "../x" 一律拒绝，
+        # 不再静默解析为进程 CWD（fail-closed，跨进程无歧义）。
+        if not os.path.isabs(expanded):
+            _fail(f"{field_name} 拒绝非绝对根路径（含相对与 .. 形式）: {root!r}")
+        r = os.path.normpath(expanded)
         if os.path.dirname(r) == r:
-            # "/"、"C:\\" 等：文件系统根或盘根本身 = 过宽边界
-            _fail(f"{field_name} 拒绝过宽根（文件系统/盘根）: {r}")
+            # "/"、"C:\\"、"\\\\srv\\share" 等：文件系统/盘/UNC share 根本身 = 过宽边界
+            _fail(f"{field_name} 拒绝过宽根（文件系统/盘/UNC 根）: {r}")
         if os.path.normcase(r) == os.path.normcase(os.path.expanduser("~")):
             _fail(f"{field_name} 拒绝过宽根（用户主目录整体）: {r}")
         return r
 
     def contains_path(self, path: str, *, writable: bool = False) -> bool:
-        """path 是否落在（可选：write）范围内。"""
-        p = os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(path))))
+        """绝对规范化 path 是否落在（可选：仅 write）范围内；sibling 前缀不算命中。"""
+        p = os.path.normcase(os.path.normpath(os.path.expanduser(path)))
         roots = self.write_roots if writable else self.read_roots + self.write_roots
         for root in roots:
             rc = os.path.normcase(root)
@@ -288,23 +315,29 @@ class ArtifactExpectation:
         atype = _clean_str(self.artifact_type, "artifact.artifact_type")
         object.__setattr__(self, "artifact_type", atype)
         path = _clean_str(self.expected_path, "artifact.expected_path")
-        object.__setattr__(self, "expected_path", os.path.normpath(os.path.abspath(os.path.expanduser(path))))
+        expanded = os.path.expanduser(path)
+        if not os.path.isabs(expanded):
+            _fail(f"artifact.expected_path 必须是绝对路径（禁止相对/.. 形式）: {path!r}")
+        object.__setattr__(self, "expected_path", os.path.normpath(expanded))
+        if not isinstance(self.required, bool):
+            # 严格 bool：bool("false")/bool(1) 这类真值转换会造成语义反转，fail-closed
+            _fail(f"artifact.required 必须是严格 bool（True/False），得到 {self.required!r}")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "artifact_id": self.artifact_id,
             "artifact_type": self.artifact_type,
             "expected_path": self.expected_path,
-            "required": bool(self.required),
+            "required": self.required,
         }
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "ArtifactExpectation":
         return cls(
-            artifact_id=str(d["artifact_id"]),
-            artifact_type=str(d["artifact_type"]),
-            expected_path=str(d["expected_path"]),
-            required=bool(d.get("required", True)),
+            artifact_id=d["artifact_id"],
+            artifact_type=d["artifact_type"],
+            expected_path=d["expected_path"],
+            required=d.get("required", True),  # 原值透传，由 __post_init__ 严格校验
         )
 
 
@@ -333,7 +366,10 @@ class VerificationCriterion:
                 f"criterion '{cid}' (kind={self.kind}) 参数键必须恰为 "
                 f"{list(VERIFICATION_CRITERION_KINDS[self.kind])}"
             )
-        normalized = tuple(sorted((k, str(v).strip()) for k, v in param_map.items()))
+        for k, v in param_map.items():
+            if not isinstance(v, str):
+                _fail(f"criterion '{cid}' 参数 {k} 必须是 str，得到 {v!r}")
+        normalized = tuple(sorted((k, v.strip()) for k, v in param_map.items()))
         for k, v in normalized:
             if not v:
                 _fail(f"criterion '{cid}' 参数 {k} 不能为空")
@@ -363,9 +399,19 @@ class VerificationStandard:
     verifier_refs: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for c in self.criteria:
-            if not isinstance(c, VerificationCriterion):
-                _fail("verification.criteria 元素必须是 VerificationCriterion")
+        # defensive copy：任何传入 list/生成器都立即固化为 tuple；
+        # 外部持有原 list 的后续修改不得影响本对象与内容摘要。
+        crit_items = []
+        for x in self.criteria:
+            if isinstance(x, VerificationCriterion):
+                crit_items.append(x)
+            elif isinstance(x, Mapping):
+                crit_items.append(VerificationCriterion.from_dict(x))
+            else:
+                _fail(f"verification.criteria 元素必须是 VerificationCriterion，得到 {type(x).__name__}")
+        criteria_t = tuple(crit_items)
+        object.__setattr__(self, "criteria", criteria_t)
+
         refs = []
         for ref in self.verifier_refs:
             ref_s = _clean_str(ref, "verification.verifier_refs")
@@ -373,11 +419,11 @@ class VerificationStandard:
                 _fail(f"verification.verifier_refs 引用格式非法: {ref_s!r}")
             refs.append(ref_s)
         object.__setattr__(self, "verifier_refs", tuple(refs))
-        cids = [c.criterion_id for c in self.criteria]
+        cids = [c.criterion_id for c in criteria_t]
         if len(cids) != len(set(cids)):
             dup = sorted({x for x in cids if cids.count(x) > 1})
             _fail(f"verification.criteria 存在重复 criterion_id: {dup}")
-        if not self.criteria and not self.verifier_refs:
+        if not criteria_t and not self.verifier_refs:
             _fail("verification_standard 为空：至少需要一条机器可查判据或类型化 verifier 引用")
 
     def to_dict(self) -> Dict[str, Any]:
@@ -549,6 +595,22 @@ class WorkContract:
                 )
         object.__setattr__(self, "artifact_expectations", arts_t)
 
+        # path-based 判据必须在 workspace read/write 范围内（workspace 外拒绝）
+        for c in self.verification_standard.criteria:
+            for k, v in c.params:
+                if k == "path" and not self.workspace_scope.contains_path(v):
+                    _fail(
+                        f"verification criterion '{c.criterion_id}' 的 {k} 位于 workspace 之外: {v}"
+                    )
+
+        ca = self.created_at_epoch
+        if isinstance(ca, bool) or not isinstance(ca, (int, float)):
+            _fail(f"created_at_epoch 必须是非 bool 数值，得到 {ca!r}")
+        ca_f = float(ca)
+        if math.isnan(ca_f) or math.isinf(ca_f):
+            _fail("created_at_epoch 不允许 NaN/Inf")
+        object.__setattr__(self, "created_at_epoch", ca_f)
+
         computed = compute_content_hash(self._hash_payload())
         if self.content_hash and self.content_hash != computed:
             raise WorkContractValidationError(
@@ -628,16 +690,54 @@ class WorkContract:
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "WorkContract":
-        known = {f for f in cls.__dataclass_fields__}
-        kwargs = {k: v for k, v in dict(d).items() if k in known}
+        """Fail-closed 反序列化：marker 必须匹配、content_hash 必须存在且合法
+        （缺失/空一律拒绝，**从不重新签名**）、未知字段拒绝（不静默丢弃）、
+        摘要不符拒绝（载荷被篡改或跨版本）。"""
+        if not isinstance(d, Mapping):
+            raise WorkContractValidationError("from_dict 需要 Mapping 输入")
+        data = dict(d)
+        marker = data.get("schema_marker")
+        if marker != CONTRACT_SCHEMA_MARKER:
+            raise WorkContractValidationError(
+                f"from_dict 拒绝：schema_marker 缺失或不匹配，期望 {CONTRACT_SCHEMA_MARKER!r}，得到 {marker!r}"
+            )
+        provided_hash = data.get("content_hash")
+        if not isinstance(provided_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", provided_hash):
+            raise WorkContractValidationError(
+                "from_dict 拒绝：content_hash 缺失/空/非法——16A 从不重新签名"
+            )
+        known = set(cls.__dataclass_fields__)
+        unknown = sorted(set(data) - known - {"schema_marker"})
+        if unknown:
+            raise WorkContractValidationError(f"from_dict 拒绝未知字段（不静默丢弃）: {unknown}")
         try:
-            rebuilt = cls(**kwargs)
-        except TypeError as exc:  # 缺少必填键等
+            return cls(**{k: v for k, v in data.items() if k != "schema_marker"})
+        except TypeError as exc:
             raise WorkContractValidationError(f"from_dict 失败：{exc}") from exc
-        provided_hash = dict(d).get("content_hash", "")
-        if provided_hash and provided_hash != rebuilt.content_hash:
-            raise WorkContractValidationError("from_dict：反序列化后内容摘要不一致（载荷被篡改或跨版本）")
-        return rebuilt
+
+    # -- transport（标准 JSON）视图：可 json.loads/dumps 往返、无就地修改面 ----
+
+    def to_transport_dict(self) -> Dict[str, Any]:
+        """纯 JSON 域 plain dict（list/dict/标量），每次调用构造全新对象图；
+        可直接 json.dumps；修改返回值不会影响 canonical 契约。"""
+        return self.to_dict()
+
+    def to_transport_json(self) -> str:
+        """标准 JSON 字符串传输面：sort_keys + 紧凑分隔符，loads→dumps 往返稳定。"""
+        return json.dumps(
+            self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        )
+
+    @classmethod
+    def from_transport_json(cls, blob: str) -> "WorkContract":
+        if not isinstance(blob, str):
+            raise WorkContractValidationError("from_transport_json 需要 str 输入")
+        try:
+            payload = json.loads(blob)
+        except json.JSONDecodeError as exc:
+            raise WorkContractValidationError(f"transport JSON 解析失败: {exc}") from exc
+        return cls.from_dict(payload)
 
     # -- backend 只读 projection ----------------------------------------------
 
