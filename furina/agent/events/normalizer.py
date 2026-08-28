@@ -386,7 +386,18 @@ class BackendEventNormalizer:
                 " 不一致（禁止静默改绑）")
         token = be.event_type if isinstance(be.event_type, str) else ""
         kind = map_kind(token)
-        payload = be.payload if isinstance(be.payload, Mapping) else {}
+        # Typed BackendEvent payload exactness（Reviewer Patch 3）：None = 合法空
+        # payload；Mapping = 正常归一；显式 list/str/int/任意对象等非 Mapping 一律
+        # EventNormalizationError——**不静默替换为 {}**。
+        if be.payload is None:
+            payload: Mapping[str, Any] = {}
+        elif isinstance(be.payload, Mapping):
+            payload = be.payload
+        else:
+            raise EventNormalizationError(
+                f"BackendEvent.payload 必须是 Mapping 或 None，得到 "
+                f"{type(be.payload).__name__}（非 Mapping 显式载荷一律拒绝，"
+                "不静默替换为 {}）")
         now = self._now_fn()
         sequence = self._next_seq()
         return NormalizedEvent(

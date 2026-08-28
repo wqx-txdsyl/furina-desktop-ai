@@ -2,14 +2,73 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED（Reviewer Patch 2 修复完成 + 全量测试通过，
+STATUS                         = EXECUTED（Reviewer Patch 3 修复完成 + 全量测试通过，
                                  等待外部验收；不声明 16E_PASS）
-BASE_SHA                       = a691b59505022af814a07dad3dda9c3d5c91d334
-                                 （Reviewer Patch 1 FINAL_SHA；Patch 2 以此为基；
-                                 16E 初版基线 7658ab30… 见 REVIEWER_PATCH_1 记录）
+BASE_SHA                       = e50d2af3849465f802a9c05a7cc5763269600155
+                                 （Reviewer Patch 2 FINAL_SHA；Patch 3 以此为基；
+                                 Patch 2 基线 a691b59… / 初版基线 7658ab30… 见
+                                 REVIEWER_PATCH_1/2 记录）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，沿用 16A/16B/16D 惯例）
 BRANCH                         = feature/phase16-16e-event-normalization
 LOCAL_REMOTE_MATCH             = push 后核验，结论记录于外部 handoff
+
+REVIEWER_PATCH_3               = 4 组 blocker 全部修复并逐一否证锁定（test_patch3a–3i）：
+                                 1) NormalizedEvent 真正 API-immutable（构造完成后
+                                    普通赋值/删除任何内部字段（_kind/_backend_id/
+                                    _payload/_terminal/_sequence/… 全部 12 slots 与
+                                    公共属性）一律 AttributeError、原值不变；构造 /
+                                    to_dict / payload freeze / terminal+critical
+                                    派生语义保持不变；不把 Python immutability
+                                    宣称为进程安全边界）；
+                                 2) Approval 语义精确：
+                                    a) approval_id 明确 lexical contract（以字母/
+                                       数字开头、仅含 [A-Za-z0-9._:-]、总长 <=128）
+                                       ——内部空白/control-char 经 sanitizer 变成
+                                       空格后同样词法非法拒绝（"ap\x00bad" 清洗为
+                                       "ap bad" → approval_id_invalid），不接受
+                                       内部空白/截断/别名冲突；
+                                    b) outcome 别名一致性：outcome/decision/
+                                       resolution/result 所有已出现别名必须规范化
+                                       一致（approve≈approved≈allow≈granted 等价）；
+                                       approve 与 deny/timeout 冲突 →
+                                       outcome_conflict typed rejection 零状态变化
+                                       （pending 保留可重试）；非 str/空/未知值
+                                       fail-closed；verification outcome 别名同样
+                                       一致性检查（start vs failed 冲突拒绝），
+                                       避免相邻 first-key-wins；
+                                    c) pending request 除 approval_id 外保存
+                                       canonical sanitized request fingerprint——
+                                       WAITING 中只有『同 approval_id + 同请求
+                                       内容』才是幂等观察；同 id 但 tool/scope/args/
+                                       其它 payload 不同 → approval_request_conflict
+                                       零变更、不得覆盖 pending；resolution 后同时
+                                       清除 pending id 与 fingerprint；
+                                 3) TOOL_PROGRESS 语义精确化（取代 Patch 2 的
+                                    "tick 也必须归因"）：payload 显式携带 tool
+                                    identity 时必须与 active_tool 精确匹配（不同/
+                                    类型非法/别名冲突均 typed rejection 零变更）；
+                                    payload 未携带任何工具身份时作为 generic
+                                    stream/progress tick——RUNNING 中合法
+                                    self-loop，不建立/不关闭/不改变 tool_subphase；
+                                    message.delta/reasoning/reasoning.delta 无
+                                    tool 字段的真实 fixture 必须通过 reducer 且
+                                    永远不能产生终态或 VERIFIED；TOOL_STARTED/
+                                    TOOL_COMPLETED 仍必须有合法且匹配的工具身份
+                                    （生命周期配对不放宽）；背压分类保持
+                                    （TOOL_PROGRESS droppable；TOOL_STARTED/
+                                    COMPLETED critical）；
+                                 4) Typed BackendEvent payload exactness：payload
+                                    None = 合法空 payload、Mapping = 正常归一；
+                                    list/str/int/任意对象等非 Mapping 显式载荷一律
+                                    EventNormalizationError——不静默替换为 {}
+                                    （信封构造与 sanitize_payload 双入口同样
+                                    fail-closed）
+                                 适配：既有 33 项测试全数保留，仅 test_patch2e 中
+                                 『TOOL_PROGRESS 缺身份 → 拒绝』一条断言按 Patch 3
+                                 新语义适配为『无身份 → generic tick 合法 self-loop』
+                                 （该断言与 Patch 3 强制语义直接冲突，属必然语义
+                                 更新），其余 32 项零改动全过；新增 9 项
+                                 reviewer-locked 否证（test_patch3a–3i），专项 42
 
 REVIEWER_PATCH_2               = 5 项 blocker 全部修复并逐一否证锁定（test_patch2a–2e）：
                                  1) Mapping 别名无歧义（身份字段 backend_id/backendId、
@@ -95,7 +154,19 @@ EVENT_ENVELOPE_MODULE          = furina/agent/events/models.py（NormalizedEvent
                                  <= 1MiB，bool/float/低于最小预算/超上限构造即拒绝
                                  （不允许"声称允许 1 byte 却返回超预算 JSON"）+
                                  递归冻结 + 防御复制导出
-                                 to_dict；EventKind 17 类 canonical 枚举 +
+                                 to_dict；**API-immutable（Reviewer Patch 3）**：
+                                 构造完成后普通赋值/删除任何内部字段（_kind/
+                                 _backend_id/_payload/_terminal/_sequence/… 全部
+                                 slots 与公共属性）一律 AttributeError、原值不变
+                                 （构造/to_dict/payload freeze/terminal+critical
+                                 派生语义不变；**不把 Python immutability 宣称为
+                                 进程安全边界**，仅保证正常 API 无法修改）；
+                                 **payload 类型精确（Reviewer Patch 3）**：必须
+                                 Mapping 或 None（None = 合法空 payload），list/str/
+                                 int/任意对象等非 Mapping 显式载荷一律
+                                 EventNormalizationError，不静默替换为 {}
+                                 （sanitize_payload 双入口同样 fail-closed）；
+                                 EventKind 17 类 canonical 枚举 +
                                  UNKNOWN_EVENT；EventPriority 三态 + classify_priority +
                                  EventBackpressurePolicy（纯策略，无队列））
 STATE_REDUCER_MODULE           = furina/agent/events/reducer.py（WorkExecutionReducer
@@ -125,7 +196,11 @@ STATE_REDUCER_MODULE           = furina/agent/events/reducer.py（WorkExecutionR
                                  sequence、混合流均不得碰撞；同内容两次事件 = 两次
                                  不同事件，不得被误去重）**、缺 sequence 按到达
                                  补序——同一输入流（fresh normalizer）重复归一结果
-                                 完全一致）
+                                 完全一致；**Typed BackendEvent payload exactness
+                                 （Reviewer Patch 3）：payload None = 合法空 payload、
+                                 Mapping = 正常归一、list/str/int/任意对象等非
+                                 Mapping 显式载荷一律 EventNormalizationError（不
+                                 静默替换为 {}）**）
 LEGAL_TRANSITIONS_LOCKED       = true（全部 14 个 WorkExecutionState 的合法转移表
                                  逐行锁定：IDLE/STARTING/RUNNING/WAITING_PERMISSION/
                                  BLOCKED_APPROVAL/CANCELLING/BACKEND_DONE_UNVERIFIED/
@@ -173,14 +248,21 @@ TOOL_RUNNING_SUBPHASE          = true 且精确化（TOOL_RUNNING 是子相位�
                                  tick 不改变状态、tool.completed 退出子相位；primary
                                  变化自动清空子相位（completed 结束工具）；state
                                  属性在子相位激活时呈现 TOOL_RUNNING，其余呈现
-                                 primary；**工具身份配对（Reviewer Patch 2）**：
+                                 primary；**工具身份配对（Reviewer Patch 2 + 3）**：
                                  TOOL_STARTED 必须建立非空 active_tool（缺工具名/
                                  空名 → tool_identity_invalid 零变更）；TOOL_PROGRESS/
-                                 TOOL_COMPLETED 的工具身份必须与 active_tool 一致
-                                 （缺失 → tool_identity_invalid、不同 →
-                                 tool_identity_mismatch，均 typed diagnostic 零变更；
+                                 TOOL_COMPLETED **显式携带**的工具身份必须与
+                                 active_tool 一致（缺失 → tool_identity_invalid、不同
+                                 → tool_identity_mismatch，均 typed diagnostic 零变更；
                                  **fs.read active 时 fs.delete completed 不得关闭
                                  子相位**；工具名不做 [:128] 截断配对，超长拒绝）；
+                                 **TOOL_PROGRESS 无工具身份 = generic stream/progress
+                                 tick（Reviewer Patch 3，取代 Patch 2 的"tick 也必须
+                                 归因"）**：payload 未携带任何工具身份时在 RUNNING
+                                 中合法 self-loop，不建立/不关闭/不改变 tool_subphase/
+                                 active_tool——message.delta/reasoning/reasoning.delta
+                                 无 tool 字段的真实 fixture 通过 reducer 且永远不能
+                                 产生终态或 VERIFIED（有否证测试）；
                                  子相位非法序列（未开始即完成 / 已激活再开始）→
                                  typed diagnostic 零变更）
 CRITICAL_EVENTS_DEFINED        = true 且精确化（16E 只做分类，durable queue/ledger
@@ -212,25 +294,42 @@ PAYLOAD_BOUNDED_REDACTED       = true 且精确化（秘密**键**（password/ap
                                  字节数超预算的载荷必须截断，original_bytes 记录
                                  真实 UTF-8 bytes；truncation marker 自身也不超
                                  预算——有否证测试））
-APPROVAL_ID_BOUND              = true 且精确化（Reviewer Patch 2：approval.
-                                 requested/resolved **必须精确绑定 approval_id**——
-                                 **禁止 [:128] 静默截断**，显式非法/超长（>128）/
-                                 control-char/多别名冲突 ID 直接 approval_id_invalid
-                                 typed diagnostic 零变更（长 ID 第 129 字符不同不得
-                                 互相批准，有否证测试）；payload 显式或回退请求事件
-                                 自身 canonical event_id——确定性绑定、不虚构）；
-                                 resolved 只能作用于当前挂起的 approval_id，不相关/
-                                 缺失 → approval_id_mismatch typed diagnostic 零变更；
-                                 **WAITING_PERMISSION 中同 approval_id 重投为幂等
-                                 观察（applied 无诊断）、不同 approval_id 请求为
-                                 approval_id_conflict（零变更，**绝不覆盖 pending**，
-                                 以原 id 仍可 approve）**；**BLOCKED_APPROVAL 仍允许
-                                 新合法 approval 请求（新 id → 重新挂起）**；
-                                 approve/deny/timeout 消费即销毁（一次性）；
-                                 deny/timeout 后同 approval_id 的 approve 不得
-                                 恢复 RUNNING；恢复必须经新的 approval.requested
-                                 （新 approval_id）；畸形 outcome 拒绝但不消费挂起
-                                 请求——有否证测试）
+APPROVAL_ID_BOUND              = true 且精确化（Reviewer Patch 2 + 3：**approval_id
+                                 明确 lexical contract（Patch 3）**——以字母/数字
+                                 开头、仅含 [A-Za-z0-9._:-]、总长 <=128；**内部空白/
+                                 control-char 经 sanitizer 变成空格后同样词法非法
+                                 拒绝**（"ap\x00bad" 清洗为 "ap bad" →
+                                 approval_id_invalid）、不接受内部空白/截断/别名冲突；
+                                 approval.requested/resolved **必须精确绑定
+                                 approval_id**——**禁止 [:128] 静默截断**，显式
+                                 非法/超长（>128）/control-char/多别名冲突 ID 直接
+                                 approval_id_invalid typed diagnostic 零变更（长 ID
+                                 第 129 字符不同不得互相批准，有否证测试）；payload
+                                 显式或回退请求事件自身 canonical event_id——确定性
+                                 绑定、不虚构）；resolved 只能作用于当前挂起的
+                                 approval_id，不相关/缺失 → approval_id_mismatch
+                                 typed diagnostic 零变更；**WAITING_PERMISSION 中
+                                 幂等观察 = 同 approval_id + 同请求内容（Patch 3：
+                                 pending 除 approval_id 外保存 canonical sanitized
+                                 request fingerprint；同 id 但 tool/scope/args/其它
+                                 payload 不同 → approval_request_conflict 零变更，
+                                 绝不覆盖 pending，以原请求仍可 approve）**；不同
+                                 approval_id 请求为 approval_id_conflict（零变更，
+                                 **绝不覆盖 pending**）；**resolution 后同时清除
+                                 pending id 与 fingerprint（Patch 3）**；
+                                 **BLOCKED_APPROVAL 仍允许新合法 approval 请求
+                                 （新 id → 重新挂起）**；approve/deny/timeout 消费
+                                 即销毁（一次性）；deny/timeout 后同 approval_id 的
+                                 approve 不得恢复 RUNNING；恢复必须经新的
+                                 approval.requested（新 approval_id）；**outcome 别名
+                                 一致性（Patch 3：outcome/decision/resolution/result
+                                 所有已出现别名规范化一致，approve≈approved≈allow≈
+                                 granted 等价；approve 与 deny/timeout 冲突 →
+                                 outcome_conflict typed rejection 零状态变化、pending
+                                 保留；非 str/空/未知值 fail-closed；verification
+                                 outcome 别名同样一致性检查（start vs failed 冲突
+                                 拒绝），避免相邻 first-key-wins）**；畸形 outcome
+                                 拒绝但不消费挂起请求——有否证测试）
 WORK_STATE_WRITTEN_TO_C7       = false（工作域状态绝不写 C7；仅 16G 六态终态折算）
 C6_EVENTS_APPENDED             = false（backend 运行事件非 C6 真值；16E 只定义
                                  投影接口语义，C6 append 归 16G；不引入重复 C6 词表）
@@ -250,20 +349,25 @@ DETERMINISTIC_REPLAY           = true 且精确化（同一事件流在全新 re
                                  max_sequence 确定性观测）
 
 C1_C7_SCHEMA_CHANGED           = false
-PRODUCTION_FILES_CHANGED       = 仅新增 furina/agent/events/ 包（models.py /
-                                 normalizer.py / reducer.py / __init__.py），
-                                 Reviewer Patch 1 只修改这三个生产模块；
+PRODUCTION_FILES_CHANGED       = 仅 furina/agent/events/ 包内自有模块
+                                 （models.py / normalizer.py / reducer.py）——
+                                 Reviewer Patch 3 只修改这三个生产模块 + 16E 测试；
                                  未修改任何其它生产文件（16A work_contract.py /
                                  16B backend/ / 16D approval/ / agent_runtime.py /
                                  permission.py / app.py 等零改动；16A/16B/16D
                                  frozen contracts 未触碰）
 TEST_FILES_CHANGED             = 仅新增 tests/agent/integration/test_phase16e_event_normalization.py
-                                 （33 个测试函数 = 任务书 §7 十二项 + 额外锁定 4 项
+                                 （42 个测试函数 = 任务书 §7 十二项 + 额外锁定 4 项
                                  + Reviewer Patch 1 否证 7 项 + Reviewer Patch 2
-                                 否证 5 项；既有 28 项全数保留并适配更严格语义）
+                                 否证 5 项 + Reviewer Patch 3 否证 9 项；既有 33 项
+                                 全数保留，仅 test_patch2e 一条断言按 Patch 3 强制
+                                 新语义适配——『TOOL_PROGRESS 缺身份 → 拒绝』改为
+                                 『无身份 → generic tick 合法 self-loop』，其余 32 项
+                                 零改动）
 TARGETED_TESTS                 = tests/agent/integration/test_phase16e_event_normalization.py：
-                                 33 passed（Reviewer Patch 2 否证 5 项 test_patch2a–2e
-                                 覆盖 5 个 blocker；既有 28 项适配后全过）。任务书
+                                 42 passed（Reviewer Patch 3 否证 9 项 test_patch3a–3i
+                                 覆盖 4 组 blocker；既有 33 项除上述一条必然语义适配
+                                 外零改动全过）。任务书
                                  §7 十二项逐项锁定：
                                  1) 完整合法转移表（LEGAL_TRANSITIONS 逐行 + approval
                                     outcome 分支（approval_id 绑定）+ verification
@@ -312,27 +416,29 @@ TARGETED_TESTS                 = tests/agent/integration/test_phase16e_event_nor
                                  Reviewer Patch 2 否证（5 项，见 REVIEWER_PATCH_2
                                  逐条对应 test_patch2a–2e；另含既有 28 项对
                                  更严格语义的适配说明）
+                                 Reviewer Patch 3 否证（9 项，见 REVIEWER_PATCH_3
+                                 逐条对应 test_patch3a–3i）
 AGENT_EVENT_REGRESSION         = pytest tests/agent tests/test_agent_tools.py
-                                 tests/test_skeleton.py：349 passed
+                                 tests/test_skeleton.py：358 passed
                                  （15 warnings 为既有线程 ResourceWarning 类告警，
-                                 与本阶段无关；16D 的 316 + 16E 专项 33 = 349）；
+                                 与本阶段无关；16D 的 316 + 16E 专项 42 = 358）；
                                  另跑 16A/16B/16D 专项
                                  tests/agent/integration/test_phase16b_execution_backend.py
                                  test_phase16a_work_contract.py
                                  test_phase16d_permission_approval.py：198 passed
-                                 （161 + 37；与 16E 专项合并跑 231 passed）
+                                 （161 + 37；与 16E 专项合并跑 240 passed）
 COGNITION_SUITE                = pytest tests/cognition：279 passed（Phase 15
                                  cognition/store 契约不变；events 包零 cognition
                                  依赖有专项断言）
-FULL_SUITE                     = .venv/Scripts/python.exe -m pytest -q：1594 passed,
-                                 0 failed（326.18s，exit 0），较 Patch 1 的 1589 恰
-                                 +5（16E Patch 2 新增否证；初版 1589 较 16D 的 1561
-                                 恰 +28）。
+FULL_SUITE                     = .venv/Scripts/python.exe -m pytest -q：1603 passed,
+                                 0 failed（220.29s，exit 0），较 Patch 2 的 1594 恰
+                                 +9（16E Patch 3 新增否证；Patch 2 的 1594 较
+                                 Patch 1 的 1589 恰 +5）。
                                  GUI flake 说明：16E 初版曾出现一次
                                  tests/test_gui_integration.py::
                                  test_gui_timer_advances_runtime 失败（Qt 定时器在
                                  满载 full suite CPU 争用下未在 drive 窗口内推进
-                                 生命周期）；该测试隔离运行通过、Patch 1 全量亦
+                                 生命周期）；该测试隔离运行通过、Patch 1/2 全量亦
                                  通过，**未稳定复现，不声明已证伪**——16E 零改动
                                  GUI/AnimationRuntime/EventBus 路径，但相关性判定
                                  留给外部验收
@@ -350,11 +456,13 @@ REMAINING_GAPS                 = 1) 按 brief 无 Hermes(16C)/verifier+repair(16
                                    4) 背压只做分类声明，有界队列/丢弃策略实现在
                                    16H；5) 基线已有 untracked（data/assets_v2/、
                                    scripts/assets_v2/、_night_*、nul）保持未触碰；
-                                   6) 说明：payload 内 approval_id 的 control-char
-                                   在信封层已被确定性清洗（\x00→空格，有测试断言），
-                                   reducer 侧的 _CTRL_RE 防御性检查保留（fail-closed
-                                   for 任何绕过清洗的直接构造路径），不声明 control-
-                                   char 在 reducer 层"显式拒绝"
+                                   6) 说明（Reviewer Patch 3 更新）：payload 内
+                                   approval_id 的 control-char 在信封层被确定性
+                                   清洗（\x00→空格，有测试断言），reducer 层以
+                                   **明确 lexical contract** 拒绝清洗后的内部空格
+                                   （"ap\x00bad"→"ap bad"→approval_id_invalid，
+                                   有否证测试）——不再有"control-char 经清洗后
+                                   被当作合法 id"的路径
 READY_FOR_REVIEW               = YES
 ```
 

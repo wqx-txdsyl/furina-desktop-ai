@@ -268,9 +268,19 @@ def sanitize_payload(payload: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Ma
       多字节字符（如 é）不得以字符数绕过预算；
     - ``original_bytes`` 记录真实 UTF-8 字节数；
     - truncation marker 自身也落在预算内（ASCII 形态最坏 ~64B < 最小预算 128）。
+    - payload 必须是 **Mapping 或 None**（None = 合法空 payload）；list/str/int/
+      任意对象等非 Mapping 显式载荷一律 EventNormalizationError——**不静默替换为 {}**
+      （Reviewer Patch 3：Typed BackendEvent payload exactness）。
     """
     budget = _validate_payload_budget(max_bytes)
-    tree = _sanitize_value(payload if isinstance(payload, Mapping) else {}, 0)
+    if payload is None:
+        tree: dict = {}
+    elif not isinstance(payload, Mapping):
+        raise EventNormalizationError(
+            f"payload 必须是 Mapping 或 None，得到 {type(payload).__name__}"
+            "（非 Mapping 显式载荷一律拒绝，不静默替换为 {}）")
+    else:
+        tree = _sanitize_value(payload, 0)
     if not isinstance(tree, dict):
         tree = {}
     try:
@@ -331,7 +341,11 @@ class NormalizedEvent:
 
     - ``terminal`` / ``critical`` 由 kind **派生**（构造时计算，来源方不可自证）；
     - payload 构造时自动脱敏 + 递归冻结 + 大小有界；
-    - 未知外部类型仍以 ``kind=UNKNOWN_EVENT`` 可观察，但**绝不可能产生成功转移**。
+    - 未知外部类型仍以 ``kind=UNKNOWN_EVENT`` 可观察，但**绝不可能产生成功转移**；
+    - **API-immutable（Reviewer Patch 3）**：构造完成后普通赋值/删除任何内部字段
+      （``_kind``/``_payload``/``_terminal``/…）一律 AttributeError。只保证正常 API
+      无法修改，**不把 Python immutability 宣称为进程安全边界**（进程内反射/原生
+      扩展可绕过；本承诺仅覆盖正常 API 面）。
     """
 
     __slots__ = (
@@ -369,19 +383,29 @@ class NormalizedEvent:
         if isinstance(sequence, bool) or type(sequence) is not int or sequence < 0:
             raise EventNormalizationError(
                 f"sequence 必须是 >=0 的 int（bool 不算），得到 {sequence!r}")
-        self._event_id = _clean_id(event_id, "event_id", _ID_PATTERN)
-        self._backend_id = _clean_id(backend_id, "backend_id", _ID_PATTERN)
-        self._contract_id = _clean_id(contract_id, "contract_id")
-        self._run_id = _clean_id(run_id, "run_id", _ID_PATTERN)
-        self._sequence = sequence
-        self._occurred_at = _finite_ts(occurred_at, "occurred_at")
-        self._received_at = _finite_ts(received_at, "received_at")
-        self._kind = kind
-        self._payload = deep_freeze(sanitize_payload(
-            payload or {}, max_bytes=_validate_payload_budget(max_payload_bytes)))
-        self._terminal = kind in TERMINAL_KINDS
-        self._critical = classify_priority(kind) is EventPriority.CRITICAL
-        self._provenance = _clean_id(provenance, "provenance")
+        # 构造期唯一允许写入的窗口（__setattr__ 已禁用普通赋值）。
+        object.__setattr__(self, "_event_id", _clean_id(event_id, "event_id", _ID_PATTERN))
+        object.__setattr__(self, "_backend_id", _clean_id(backend_id, "backend_id", _ID_PATTERN))
+        object.__setattr__(self, "_contract_id", _clean_id(contract_id, "contract_id"))
+        object.__setattr__(self, "_run_id", _clean_id(run_id, "run_id", _ID_PATTERN))
+        object.__setattr__(self, "_sequence", sequence)
+        object.__setattr__(self, "_occurred_at", _finite_ts(occurred_at, "occurred_at"))
+        object.__setattr__(self, "_received_at", _finite_ts(received_at, "received_at"))
+        object.__setattr__(self, "_kind", kind)
+        object.__setattr__(self, "_payload", deep_freeze(sanitize_payload(
+            payload, max_bytes=_validate_payload_budget(max_payload_bytes))))
+        object.__setattr__(self, "_terminal", kind in TERMINAL_KINDS)
+        object.__setattr__(self, "_critical", classify_priority(kind) is EventPriority.CRITICAL)
+        object.__setattr__(self, "_provenance", _clean_id(provenance, "provenance"))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(
+            f"NormalizedEvent 不可变：构造后禁止赋值 {name!r}"
+            "（API 层只读；不宣称进程安全边界，仅保证正常 API 无法修改）")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(
+            f"NormalizedEvent 不可变：构造后禁止删除属性 {name!r}")
 
     # -- 只读访问（信封不可变）---------------------------------------------------
     @property

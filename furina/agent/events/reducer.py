@@ -21,19 +21,31 @@ Master Plan §5A/§10 词表（工作域状态，**绝不写 C7**）：
 - 身份绑定：构造绑定 backend_id/run_id/contract_id，事件任一不匹配 raise
   ``WorkExecutionError``（normalizer 对身份不一致同样拒绝，禁止静默改绑）；
 - approval.requested/resolved **必须绑定 approval_id**（**精确绑定，无 [:128] 截断**：
-  显式非法/超长/control-char/别名冲突 ID 直接 approval_id_invalid 拒绝；resolved
-  只能作用于当前挂起的请求；deny/timeout 后同 approval_id 的 approve 不得恢复
-  RUNNING，不相关 approval_id 不得改变状态（approval_id_mismatch typed diagnostic，
-  零变更）；**WAITING_PERMISSION 中同 approval_id 重投为幂等观察、不同 approval_id
-  请求为 approval_id_conflict（零变更，绝不覆盖 pending）**；BLOCKED_APPROVAL 仍
-  允许新合法请求）；
+  显式非法/超长/control-char/别名冲突 ID 直接 approval_id_invalid 拒绝；
+  **Reviewer Patch 3 增加明确 lexical contract：以字母/数字开头、仅含
+  [A-Za-z0-9._:-]、总长 <=128——内部空白一律词法非法，control-char 经信封
+  sanitizer 变成空格后同样被拒**；resolved 只能作用于当前挂起的请求；deny/timeout
+  后同 approval_id 的 approve 不得恢复 RUNNING，不相关 approval_id 不得改变状态
+  （approval_id_mismatch typed diagnostic，零变更）；**WAITING_PERMISSION 中
+  幂等观察 = 同 approval_id + 同请求内容（除 approval_id 外保存 canonical
+  sanitized request fingerprint；同 id 异内容 → approval_request_conflict 零变更
+  —绝不覆盖 pending；resolution 后同时清除 pending id 与 fingerprint）**；不同
+  approval_id 请求为 approval_id_conflict（零变更，绝不覆盖 pending）；
+  **outcome/decision/resolution/result 所有已出现别名规范化一致（approve≈approved
+  等价；approve 与 deny/timeout 冲突 → outcome_conflict typed rejection 零状态
+  变化；非 str/空/未知值 fail-closed；verification outcome 别名同样一致性检查，
+  避免相邻 first-key-wins）**；BLOCKED_APPROVAL 仍允许新合法请求）；
 - 非法转移返回 typed diagnostic，**零状态变更**；
 - ``TOOL_RUNNING`` 是**子相位**（primary + tool_subphase/active_tool 分离快照），
   绝不覆盖/销毁 enclosing run state；TOOL_STARTED/TOOL_COMPLETED 是不可丢/不可
   合并的生命周期边界（critical）；**工具身份配对**：TOOL_STARTED 必须建立非空
-  active_tool；TOOL_PROGRESS/TOOL_COMPLETED 的工具身份必须与 active_tool 一致
+  active_tool；TOOL_COMPLETED 的工具身份必须与 active_tool 一致；**TOOL_PROGRESS
+  （Reviewer Patch 3）：payload 显式携带工具身份时必须与 active_tool 精确匹配
   （缺失/不同 → tool_identity_invalid/tool_identity_mismatch typed diagnostic、
-  零状态变更——fs.read active 时 fs.delete completed 不得关闭子相位）；
+  零状态变更——fs.read active 时 fs.delete completed 不得关闭子相位）；payload
+  未携带任何工具身份时作为 generic stream/progress tick（message.delta/reasoning/
+  reasoning.delta 无 tool 字段的真实 fixture）——RUNNING 中合法 self-loop，不建立、
+  不关闭、不改变 tool_subphase，永不产生终态或 VERIFIED**；
 - 同一事件流重放结果完全一致（确定性：内容寻址 id + 纯转移表 + 注入时钟）。
 
 本模块不执行 Hermes、不写 C6/C7、不实现 verifier/repair/recovery（16F/16H/16G 拥有）。
@@ -42,6 +54,7 @@ from __future__ import annotations
 
 import enum
 import json
+import re
 import time
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -217,75 +230,114 @@ LEGAL_TRANSITIONS: Mapping[WorkExecutionState, Mapping[EventKind, WorkExecutionS
     })
 
 
-def _outcome(mapping: Mapping[str, Any], keys: Tuple[str, ...]) -> str:
-    for k in keys:
-        v = mapping.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip().lower()
-    return ""
+#: outcome 别名一致性标记（普通值绝不可能与 `<...>` 形态冲突——词表里没有尖括号）。
+_OUTCOME_INVALID = "<invalid>"
+_OUTCOME_CONFLICT = "<conflict>"
+
+_APPROVAL_OUTCOME_KEYS = ("outcome", "decision", "resolution", "result")
+_APPROVAL_OUTCOME_ALIASES = {
+    "approve": "approve", "approved": "approve", "allow": "approve", "granted": "approve",
+    "deny": "deny", "denied": "deny", "reject": "deny", "rejected": "deny",
+    "timeout": "timeout", "expired": "timeout", "late": "timeout",
+}
+
+_VB_OUTCOME_KEYS = ("outcome", "phase", "result", "kind")
+_VB_OUTCOME_ALIASES = {
+    "start": "start", "begin": "start", "retry": "start", "reverify": "start",
+    "enter": "start",
+    "verified": "verified", "pass": "verified", "passed": "verified",
+    "failed": "failed", "fail": "failed",
+    "repair": "repair", "repair_start": "repair",
+}
+
+
+def _consensus_outcome(mapping: Mapping[str, Any], keys: Tuple[str, ...],
+                       aliases: Mapping[str, str]) -> str:
+    """结果类别名一致性（Reviewer Patch 3）：所有**已出现**的键必须是非空 str 且
+    规范化后一致（approve≈approved 等词表内等价视为同值）。
+
+    - 缺省（无任何键出现）→ ``""``（调用方 fail-closed）；
+    - 任一出现键非 str / 空 / 不在词表（未知值）→ ``_OUTCOME_INVALID``（fail-closed）；
+    - 规范化后互不一致（如 outcome=approve 与 decision=deny 同时出现）→
+      ``_OUTCOME_CONFLICT``（typed rejection、零状态变化）——**避免相邻 first-key-wins**。
+    """
+    present = [(k, mapping[k]) for k in keys if k in mapping]
+    if not present:
+        return ""
+    canon: Optional[str] = None
+    for k, v in present:
+        if not isinstance(v, str) or not v.strip():
+            return _OUTCOME_INVALID
+        c = aliases.get(v.strip().lower())
+        if c is None:
+            return _OUTCOME_INVALID
+        if canon is None:
+            canon = c
+        elif c != canon:
+            return _OUTCOME_CONFLICT
+    assert canon is not None
+    return canon
 
 
 def _approval_outcome(payload: Mapping[str, Any]) -> str:
-    """审批结果：approve/deny/timeout（归一化小写；未知 → 'unknown'）。"""
-    raw = _outcome(payload, ("outcome", "decision", "resolution", "result"))
-    if raw in ("approve", "approved", "allow", "granted"):
-        return "approve"
-    if raw in ("deny", "denied", "reject", "rejected"):
-        return "deny"
-    if raw in ("timeout", "expired", "late"):
-        return "timeout"
-    return "unknown"
+    """审批结果：outcome/decision/resolution/result 所有已出现别名规范化一致
+    （approve/approved/allow/granted 等价；deny/denied/reject/rejected 等价；
+    timeout/expired/late 等价）。非 str/空/未知 → ``<invalid>``；别名规范化冲突
+    （approve vs deny/timeout）→ ``<conflict>``；缺省 → ``""``。"""
+    return _consensus_outcome(payload, _APPROVAL_OUTCOME_KEYS, _APPROVAL_OUTCOME_ALIASES)
 
 
 def _vb_outcome(payload: Mapping[str, Any]) -> str:
-    """校验边界结果：start/verified/failed/repair（未知 → 'unknown'）。"""
-    raw = _outcome(payload, ("outcome", "phase", "result", "kind"))
-    if raw in ("start", "begin", "retry", "reverify", "enter"):
-        return "start"
-    if raw in ("verified", "pass", "passed"):
-        return "verified"
-    if raw in ("failed", "fail"):
-        return "failed"
-    if raw in ("repair", "repair_start"):
-        return "repair"
-    return "unknown"
+    """校验边界结果：outcome/phase/result/kind 所有已出现别名规范化一致
+    （start/begin/retry/reverify/enter 等价；verified/pass/passed 等价；
+    failed/fail 等价；repair/repair_start 等价）。非法/未知/冲突同上返回 typed 标志。"""
+    return _consensus_outcome(payload, _VB_OUTCOME_KEYS, _VB_OUTCOME_ALIASES)
 
 
 _TOOL_IDENTITY_KEYS = ("tool", "tool_name", "name", "toolId")
 _TOOL_IDENTITY_MAX_LEN = 128
 _APPROVAL_ID_KEYS = ("approval_id", "approvalId", "request_id", "requestId")
 _APPROVAL_ID_MAX_LEN = 128
+#: approval_id 明确 lexical contract（Reviewer Patch 3）：以字母/数字开头，仅含
+#: ``[A-Za-z0-9._:-]``，总长 <=128。内部空白一律词法非法——control-char 经信封
+#: sanitizer 变成空格后同样被拒（``"ap\\x00bad"`` 清洗为 ``"ap bad"`` → 拒绝），
+#: 不接受内部空白、截断或别名冲突。
+_APPROVAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$")
 
 
-def _tool_identity(payload: Mapping[str, Any]) -> Optional[str]:
-    """payload 中的工具身份：非空 str、无控制字符、<=128、多别名等值。
+def _tool_identity(payload: Mapping[str, Any]) -> Tuple[bool, Optional[str]]:
+    """payload 中的工具身份：返回 ``(present, value)``（Reviewer Patch 3 三态）。
 
-    缺省/非法/别名冲突 → None——TOOL_STARTED 不得建立空 active_tool；
-    TOOL_PROGRESS/TOOL_COMPLETED 缺失或不同身份一律 typed diagnostic。
+    - ``(False, None)``：payload **未携带任何**工具身份字段（generic progress tick）；
+    - ``(True, str)``：唯一合法身份（非空 str、无控制字符、<=128、多别名等值）；
+    - ``(True, None)``：显式携带但**非法**（非 str / 空 / 控制字符 / 超长 /
+      多别名冲突）。
     """
+    present = [k for k in _TOOL_IDENTITY_KEYS if k in payload]
+    if not present:
+        return False, None
     value: Optional[str] = None
-    for k in _TOOL_IDENTITY_KEYS:
-        if k not in payload:
-            continue
+    for k in present:
         v = payload[k]
         if not isinstance(v, str) or not v.strip():
-            return None
+            return True, None
         s = v.strip()
         if _CTRL_RE.search(s) or len(s) > _TOOL_IDENTITY_MAX_LEN:
-            return None
+            return True, None
         if value is not None and s != value:
-            return None
+            return True, None
         value = s
-    return value
+    return True, value
 
 
 def _approval_id(payload: Mapping[str, Any], event_id: str) -> Optional[str]:
     """审批身份：payload 显式合法 approval_id 优先；缺省回退到请求事件自身的
     canonical event_id（确定性绑定，绝不虚构——回退身份即该请求事件的恒等）。
 
-    显式出现但非法（非 str / 空 / 含控制字符 / 超长 >128 / 多别名冲突）→ None，
-    调用方转 typed diagnostic 拒绝——**绝不静默 [:128] 截断**（截断会让第 129
-    字符不同的长 ID 互相批准），也不当作缺失补值。
+    显式出现但非法（非 str / 空 / 超长 >128 / **词法非法**——含内部空白，
+    control-char 经信封清洗为空格后同样词法非法 / 多别名冲突）→ None，
+    调用方转 typed diagnostic 拒绝——**绝不静默截断、绝不接受内部空白**，
+    也不当作缺失补值。
     """
     present = [k for k in _APPROVAL_ID_KEYS if k in payload]
     if not present:
@@ -296,12 +348,21 @@ def _approval_id(payload: Mapping[str, Any], event_id: str) -> Optional[str]:
         if not isinstance(v, str) or not v.strip():
             return None
         s = v.strip()
-        if _CTRL_RE.search(s) or len(s) > _APPROVAL_ID_MAX_LEN:
+        if len(s) > _APPROVAL_ID_MAX_LEN or not _APPROVAL_ID_PATTERN.match(s):
             return None
         if value is not None and s != value:
             return None
         value = s
     return value
+
+
+def _request_fingerprint(payload: Mapping[str, Any]) -> str:
+    """挂起请求内容指纹（Reviewer Patch 3）：payload 中**除 approval_id 别名外**的
+    规范化内容（已 sanitized、JSON-safe、确定性排序）。WAITING_PERMISSION 中
+    『同 approval_id + 同请求内容』才是幂等观察；同 approval_id 但 tool/scope/
+    args/其它 payload 不同必须 conflict，**不得覆盖 pending**。"""
+    tree = {k: _plain_tree(v) for k, v in payload.items() if k not in _APPROVAL_ID_KEYS}
+    return json.dumps(tree, sort_keys=True, ensure_ascii=False, default=str)
 
 
 def _plain_tree(obj: Any) -> Any:
@@ -332,10 +393,13 @@ class WorkExecutionReducer:
     ``reduce(event)`` 处理一个 canonical 信封：event_id→fingerprint 去重（同 id
     同内容 duplicate、同 id 不同内容 conflict）；非法转移/终态吸收/审批身份不匹配
     返回 typed diagnostic 且**零状态变更、不烧毁 event_id**（前置条件满足后可重放）；
-    审批 resolved 必须匹配当前挂起 approval_id（精确绑定、无截断；WAITING 中同 id
-    重投幂等观察、异 id 冲突零变更）；工具事件按 active_tool 精确配对；``VERIFICATION_
-    BOUNDARY(verified)`` 在 16E 阶段 fail-closed（VERIFIED 不可由公开事件抵达）。
-    同一事件流在全新 reducer 上重放结果完全一致。
+    审批 resolved 必须匹配当前挂起 approval_id（精确绑定、词法校验、无截断；
+    WAITING 中同 id **且同请求内容**重投幂等观察、同 id 异内容 typed conflict、
+    异 id conflict，均零变更不覆盖 pending）；outcome 别名一致性（冲突
+    outcome_conflict、非法/未知 fail-closed、approve≈approved 等价）；工具事件按
+    active_tool 精确配对（TOOL_PROGRESS 无身份 = generic tick self-loop、显式身份
+    必须匹配）；``VERIFICATION_BOUNDARY(verified)`` 在 16E 阶段 fail-closed
+    （VERIFIED 不可由公开事件抵达）。同一事件流在全新 reducer 上重放结果完全一致。
     """
 
     def __init__(self, run_id: str, contract_id: str, *,
@@ -351,6 +415,10 @@ class WorkExecutionReducer:
         self._view = WorkExecutionView(primary=WorkExecutionState.IDLE)
         self._seen: Dict[str, str] = {}
         self._pending_approval_id: Optional[str] = None
+        #: 挂起请求的 canonical sanitized fingerprint（Reviewer Patch 3）：除
+        #: approval_id 外保存请求内容——WAITING 中『同 approval_id + 同请求内容』
+        #: 才是幂等观察；resolution 后与 pending id 一并清除。
+        self._pending_approval_fingerprint: Optional[str] = None
 
     # -- 身份与快照 --------------------------------------------------------------
     @property
@@ -443,21 +511,27 @@ class WorkExecutionReducer:
                     f"illegal_transition:{primary.value}:{kind.value}"
             rid = _approval_id(event.payload, event.event_id)
             if rid is None:
-                # 显式非法 approval_id：拒绝且**不建立/不覆盖** pending，零状态变更。
+                # 显式非法 approval_id（词法非法/内部空白/超长/别名冲突）：拒绝且
+                # **不建立/不覆盖** pending，零状态变更。
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"approval_id_invalid:{primary.value}:{kind.value}"
             if primary in (WorkExecutionState.STARTING, WorkExecutionState.RUNNING,
                            WorkExecutionState.BLOCKED_APPROVAL):
                 self._pending_approval_id = rid
+                self._pending_approval_fingerprint = _request_fingerprint(event.payload)
                 return WorkExecutionState.WAITING_PERMISSION, False, "", True, ""
-            # WAITING_PERMISSION：同 approval_id 重投 → 幂等观察；不同 approval_id
-            # → typed conflict、零状态变更，**绝不覆盖**挂起的 pending。
+            # WAITING_PERMISSION：幂等观察 = **同 approval_id 且同请求内容**
+            # （Reviewer Patch 3）；异 id → approval_id_conflict、同 id 异内容 →
+            # approval_request_conflict，均零状态变更，**绝不覆盖** pending。
             if rid != self._pending_approval_id:
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"approval_id_conflict:{primary.value}:{kind.value}"
+            if _request_fingerprint(event.payload) != self._pending_approval_fingerprint:
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"approval_request_conflict:{primary.value}:{kind.value}"
             return primary, v.tool_subphase, v.active_tool, True, ""
 
-        # 审批结果（approval_id 精确绑定；outcome 依赖）。
+        # 审批结果（approval_id 精确绑定；outcome 别名一致性——Reviewer Patch 3）。
         if kind is EventKind.APPROVAL_RESOLVED:
             outcome = _approval_outcome(event.payload)
             if primary in (WorkExecutionState.WAITING_PERMISSION,
@@ -470,11 +544,19 @@ class WorkExecutionReducer:
                 if self._pending_approval_id is None or rid != self._pending_approval_id:
                     return primary, v.tool_subphase, v.active_tool, False, \
                         f"approval_id_mismatch:{primary.value}:{kind.value}"
-                if outcome not in ("approve", "deny", "timeout"):
-                    # 畸形 outcome：拒绝且**不消费**挂起请求（pending 保留，可重试）
+                if outcome == _OUTCOME_CONFLICT:
+                    # approve 与 deny/timeout 等别名冲突：typed rejection、零状态
+                    # 变化、**不消费**挂起请求（pending 保留，可重试）。
+                    return primary, v.tool_subphase, v.active_tool, False, \
+                        f"outcome_conflict:{primary.value}:{kind.value}"
+                if outcome in (_OUTCOME_INVALID, ""):
+                    # 非 str / 空 / 未知值：fail-closed 拒绝且不消费挂起请求。
                     return primary, v.tool_subphase, v.active_tool, False, \
                         f"illegal_transition:{primary.value}:{kind.value}:outcome:{outcome}"
-                self._pending_approval_id = None   # 合法消费即销毁（一次性）
+                assert outcome in ("approve", "deny", "timeout")
+                # 合法消费即销毁（一次性）：同时清除 pending id 与 fingerprint。
+                self._pending_approval_id = None
+                self._pending_approval_fingerprint = None
                 if outcome == "approve":
                     return WorkExecutionState.RUNNING, False, "", True, ""
                 return WorkExecutionState.BLOCKED_APPROVAL, False, "", True, ""
@@ -489,6 +571,14 @@ class WorkExecutionReducer:
             if outcome == "verified":
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"unauthorized_verification:{primary.value}:{kind.value}"
+            if outcome == _OUTCOME_CONFLICT:
+                # start/failed/repair 等别名冲突：typed rejection、零状态变化。
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"outcome_conflict:{primary.value}:{kind.value}"
+            if outcome in (_OUTCOME_INVALID, ""):
+                # 非 str / 空 / 未知值：fail-closed 拒绝（零状态变化）。
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"illegal_transition:{primary.value}:{kind.value}:outcome:{outcome}"
             if primary is WorkExecutionState.BACKEND_DONE_UNVERIFIED:
                 if outcome == "start":
                     return WorkExecutionState.VERIFYING, False, "", True, ""
@@ -520,21 +610,36 @@ class WorkExecutionReducer:
                 f"illegal_transition:{primary.value}:{kind.value}"
 
         # 工具子相位（仅 RUNNING 下有效；TOOL_RUNNING 绝不覆盖 primary）。
+        # Reviewer Patch 3：TOOL_STARTED/TOOL_COMPLETED 必须有合法且匹配的工具
+        # 身份（生命周期配对不放宽）；TOOL_PROGRESS 显式携带身份时必须与
+        # active_tool 精确匹配，未携带任何身份时作为 generic stream/progress tick
+        # （RUNNING 中合法 self-loop，不建立/不关闭/不改变 tool_subphase）。
         if kind in (EventKind.TOOL_STARTED, EventKind.TOOL_PROGRESS,
                     EventKind.TOOL_COMPLETED):
             if primary is not WorkExecutionState.RUNNING:
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"illegal_transition:{primary.value}:{kind.value}"
-            identity = _tool_identity(event.payload)
-            if identity is None:
-                # TOOL_STARTED 不得建立空 active_tool；PROGRESS/COMPLETED 缺失身份拒绝。
-                return primary, v.tool_subphase, v.active_tool, False, \
-                    f"illegal_transition:{primary.value}:{kind.value}:tool_identity_invalid"
+            present, identity = _tool_identity(event.payload)
             if kind is EventKind.TOOL_PROGRESS:
+                if not present:
+                    # generic stream/progress tick（message.delta/reasoning 等无
+                    # tool 身份的真实 fixture）：RUNNING 中合法 self-loop，零状态
+                    # 变化，永远不能产生终态或 VERIFIED。
+                    return primary, v.tool_subphase, v.active_tool, True, ""
+                if identity is None:
+                    # 显式携带但类型非法/别名冲突 → 拒绝（零变更）。
+                    return primary, v.tool_subphase, v.active_tool, False, \
+                        f"illegal_transition:{primary.value}:{kind.value}:tool_identity_invalid"
                 if not v.tool_subphase or identity != v.active_tool:
                     return primary, v.tool_subphase, v.active_tool, False, \
                         f"illegal_transition:{primary.value}:{kind.value}:tool_identity_mismatch"
                 return primary, v.tool_subphase, v.active_tool, True, ""   # tick
+            # TOOL_STARTED / TOOL_COMPLETED：必须携带合法工具身份（缺省/非法一律
+            # tool_identity_invalid；TOOL_STARTED 不得建立空 active_tool、TOOL_
+            # COMPLETED 不得在无身份时关闭子相位）。
+            if identity is None:
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"illegal_transition:{primary.value}:{kind.value}:tool_identity_invalid"
             if kind is EventKind.TOOL_STARTED:
                 if v.tool_subphase:
                     return primary, v.tool_subphase, v.active_tool, False, \
