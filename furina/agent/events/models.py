@@ -167,6 +167,9 @@ _SECRET_KEY_PARTS = frozenset({
 _MAX_DEPTH = 8
 _STRING_CAP = 256
 _DEFAULT_MAX_BYTES = 4096
+#: 最小预算：必须能容纳 truncation marker 自身（ASCII，最坏 ~64B，留余量取 128）。
+#: 低于最小预算直接 fail-closed——不允许"声称允许 1 byte 却返回超过 1 byte 的 JSON"。
+_MIN_PAYLOAD_BUDGET = 128
 _MAX_PAYLOAD_BUDGET = 1 << 20     # 1 MiB：防呆上限（拒绝任意巨大预算）
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -209,11 +212,15 @@ def _redact_secret_values(text: str) -> str:
 
 
 def _validate_payload_budget(value: Any) -> int:
-    """max_payload_bytes 严格校验：type-is-int（bool 不算）、有限合理正值。"""
-    if type(value) is not int or value <= 0 or value > _MAX_PAYLOAD_BUDGET:
+    """max_payload_bytes 严格校验：type-is-int（bool 不算）、不低于最小预算、不超上限。
+
+    最小预算保证 truncation marker 自身也落在预算内（fail-closed：不允许声称允许
+    1 byte 却返回超过 1 byte 的 JSON）。
+    """
+    if type(value) is not int or not (_MIN_PAYLOAD_BUDGET <= value <= _MAX_PAYLOAD_BUDGET):
         raise EventNormalizationError(
-            f"max_payload_bytes 必须是 type-int 且 0 < n <= {_MAX_PAYLOAD_BUDGET}"
-            f"（bool/float/非正值/超上限一律拒绝），得到 {value!r}")
+            f"max_payload_bytes 必须是 type-int 且 {_MIN_PAYLOAD_BUDGET} <= n <= "
+            f"{_MAX_PAYLOAD_BUDGET}（bool/float/低于最小预算/超上限一律拒绝），得到 {value!r}")
     return value
 
 
@@ -255,7 +262,13 @@ def _sanitize_value(value: Any, depth: int) -> Any:
 
 
 def sanitize_payload(payload: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Mapping[str, Any]:
-    """payload 脱敏 + 有界大小：返回 JSON-safe dict（总序列化大小 <= max_bytes）。"""
+    """payload 脱敏 + 有界大小：返回 JSON-safe dict（总序列化 **UTF-8 字节** <= max_bytes）。
+
+    - 超限判据是 ``len(encoded.encode("utf-8"))``（真实 UTF-8 字节），不是字符数——
+      多字节字符（如 é）不得以字符数绕过预算；
+    - ``original_bytes`` 记录真实 UTF-8 字节数；
+    - truncation marker 自身也落在预算内（ASCII 形态最坏 ~64B < 最小预算 128）。
+    """
     budget = _validate_payload_budget(max_bytes)
     tree = _sanitize_value(payload if isinstance(payload, Mapping) else {}, 0)
     if not isinstance(tree, dict):
@@ -266,11 +279,12 @@ def sanitize_payload(payload: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Ma
     except Exception as exc:  # noqa: BLE001 —— 防御性：确定性清洗树不应序列化失败
         return {"_truncated": True, "byte_budget": budget,
                 "original_bytes": -1, "reason": type(exc).__name__}
-    if len(encoded) > budget:
+    encoded_bytes = encoded.encode("utf-8")
+    if len(encoded_bytes) > budget:
         return {
             "_truncated": True,
             "byte_budget": budget,
-            "original_bytes": len(encoded),
+            "original_bytes": len(encoded_bytes),
         }
     return tree
 

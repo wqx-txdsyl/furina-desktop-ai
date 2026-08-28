@@ -20,13 +20,20 @@ Master Plan §5A/§10 词表（工作域状态，**绝不写 C7**）：
   不得复活）；
 - 身份绑定：构造绑定 backend_id/run_id/contract_id，事件任一不匹配 raise
   ``WorkExecutionError``（normalizer 对身份不一致同样拒绝，禁止静默改绑）；
-- approval.requested/resolved **必须绑定 approval_id**：resolved 只能作用于当前
-  挂起的请求；deny/timeout 后同 approval_id 的 approve 不得恢复 RUNNING，不相关
-  approval_id 不得改变状态（approval_id_mismatch typed diagnostic，零变更）；
+- approval.requested/resolved **必须绑定 approval_id**（**精确绑定，无 [:128] 截断**：
+  显式非法/超长/control-char/别名冲突 ID 直接 approval_id_invalid 拒绝；resolved
+  只能作用于当前挂起的请求；deny/timeout 后同 approval_id 的 approve 不得恢复
+  RUNNING，不相关 approval_id 不得改变状态（approval_id_mismatch typed diagnostic，
+  零变更）；**WAITING_PERMISSION 中同 approval_id 重投为幂等观察、不同 approval_id
+  请求为 approval_id_conflict（零变更，绝不覆盖 pending）**；BLOCKED_APPROVAL 仍
+  允许新合法请求）；
 - 非法转移返回 typed diagnostic，**零状态变更**；
 - ``TOOL_RUNNING`` 是**子相位**（primary + tool_subphase/active_tool 分离快照），
   绝不覆盖/销毁 enclosing run state；TOOL_STARTED/TOOL_COMPLETED 是不可丢/不可
-  合并的生命周期边界（critical）；
+  合并的生命周期边界（critical）；**工具身份配对**：TOOL_STARTED 必须建立非空
+  active_tool；TOOL_PROGRESS/TOOL_COMPLETED 的工具身份必须与 active_tool 一致
+  （缺失/不同 → tool_identity_invalid/tool_identity_mismatch typed diagnostic、
+  零状态变更——fs.read active 时 fs.delete completed 不得关闭子相位）；
 - 同一事件流重放结果完全一致（确定性：内容寻址 id + 纯转移表 + 注入时钟）。
 
 本模块不执行 Hermes、不写 C6/C7、不实现 verifier/repair/recovery（16F/16H/16G 拥有）。
@@ -44,6 +51,7 @@ from .models import (
     EventKind,
     NormalizedEvent,
     WorkExecutionError,
+    _CTRL_RE,
 )
 
 
@@ -243,22 +251,57 @@ def _vb_outcome(payload: Mapping[str, Any]) -> str:
     return "unknown"
 
 
-def _tool_name(payload: Mapping[str, Any]) -> str:
-    for k in ("tool", "tool_name", "name", "toolId"):
-        v = payload.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()[:128]
-    return ""
+_TOOL_IDENTITY_KEYS = ("tool", "tool_name", "name", "toolId")
+_TOOL_IDENTITY_MAX_LEN = 128
+_APPROVAL_ID_KEYS = ("approval_id", "approvalId", "request_id", "requestId")
+_APPROVAL_ID_MAX_LEN = 128
 
 
-def _approval_id(payload: Mapping[str, Any], event_id: str) -> str:
-    """审批身份：payload 显式 approval_id 优先；缺省回退到请求事件自身的 canonical
-    event_id（确定性绑定，绝不虚构——回退身份即该请求事件的恒等）。"""
-    for k in ("approval_id", "approvalId", "request_id", "requestId"):
-        v = payload.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()[:128]
-    return event_id
+def _tool_identity(payload: Mapping[str, Any]) -> Optional[str]:
+    """payload 中的工具身份：非空 str、无控制字符、<=128、多别名等值。
+
+    缺省/非法/别名冲突 → None——TOOL_STARTED 不得建立空 active_tool；
+    TOOL_PROGRESS/TOOL_COMPLETED 缺失或不同身份一律 typed diagnostic。
+    """
+    value: Optional[str] = None
+    for k in _TOOL_IDENTITY_KEYS:
+        if k not in payload:
+            continue
+        v = payload[k]
+        if not isinstance(v, str) or not v.strip():
+            return None
+        s = v.strip()
+        if _CTRL_RE.search(s) or len(s) > _TOOL_IDENTITY_MAX_LEN:
+            return None
+        if value is not None and s != value:
+            return None
+        value = s
+    return value
+
+
+def _approval_id(payload: Mapping[str, Any], event_id: str) -> Optional[str]:
+    """审批身份：payload 显式合法 approval_id 优先；缺省回退到请求事件自身的
+    canonical event_id（确定性绑定，绝不虚构——回退身份即该请求事件的恒等）。
+
+    显式出现但非法（非 str / 空 / 含控制字符 / 超长 >128 / 多别名冲突）→ None，
+    调用方转 typed diagnostic 拒绝——**绝不静默 [:128] 截断**（截断会让第 129
+    字符不同的长 ID 互相批准），也不当作缺失补值。
+    """
+    present = [k for k in _APPROVAL_ID_KEYS if k in payload]
+    if not present:
+        return event_id
+    value: Optional[str] = None
+    for k in present:
+        v = payload[k]
+        if not isinstance(v, str) or not v.strip():
+            return None
+        s = v.strip()
+        if _CTRL_RE.search(s) or len(s) > _APPROVAL_ID_MAX_LEN:
+            return None
+        if value is not None and s != value:
+            return None
+        value = s
+    return value
 
 
 def _plain_tree(obj: Any) -> Any:
@@ -289,9 +332,10 @@ class WorkExecutionReducer:
     ``reduce(event)`` 处理一个 canonical 信封：event_id→fingerprint 去重（同 id
     同内容 duplicate、同 id 不同内容 conflict）；非法转移/终态吸收/审批身份不匹配
     返回 typed diagnostic 且**零状态变更、不烧毁 event_id**（前置条件满足后可重放）；
-    审批 resolved 必须匹配当前挂起 approval_id；``VERIFICATION_BOUNDARY(verified)``
-    在 16E 阶段 fail-closed（VERIFIED 不可由公开事件抵达）。同一事件流在全新 reducer
-    上重放结果完全一致。
+    审批 resolved 必须匹配当前挂起 approval_id（精确绑定、无截断；WAITING 中同 id
+    重投幂等观察、异 id 冲突零变更）；工具事件按 active_tool 精确配对；``VERIFICATION_
+    BOUNDARY(verified)`` 在 16E 阶段 fail-closed（VERIFIED 不可由公开事件抵达）。
+    同一事件流在全新 reducer 上重放结果完全一致。
     """
 
     def __init__(self, run_id: str, contract_id: str, *,
@@ -392,22 +436,37 @@ class WorkExecutionReducer:
 
         # 审批请求：绑定 approval_id 并进入挂起态（BLOCKED 收到新请求 → 重新挂起）。
         if kind is EventKind.APPROVAL_REQUESTED:
+            if primary not in (WorkExecutionState.STARTING, WorkExecutionState.RUNNING,
+                               WorkExecutionState.BLOCKED_APPROVAL,
+                               WorkExecutionState.WAITING_PERMISSION):
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"illegal_transition:{primary.value}:{kind.value}"
+            rid = _approval_id(event.payload, event.event_id)
+            if rid is None:
+                # 显式非法 approval_id：拒绝且**不建立/不覆盖** pending，零状态变更。
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"approval_id_invalid:{primary.value}:{kind.value}"
             if primary in (WorkExecutionState.STARTING, WorkExecutionState.RUNNING,
                            WorkExecutionState.BLOCKED_APPROVAL):
-                self._pending_approval_id = _approval_id(event.payload, event.event_id)
+                self._pending_approval_id = rid
                 return WorkExecutionState.WAITING_PERMISSION, False, "", True, ""
-            if primary is WorkExecutionState.WAITING_PERMISSION:
-                self._pending_approval_id = _approval_id(event.payload, event.event_id)
-                return primary, v.tool_subphase, v.active_tool, True, ""
-            return primary, v.tool_subphase, v.active_tool, False, \
-                f"illegal_transition:{primary.value}:{kind.value}"
+            # WAITING_PERMISSION：同 approval_id 重投 → 幂等观察；不同 approval_id
+            # → typed conflict、零状态变更，**绝不覆盖**挂起的 pending。
+            if rid != self._pending_approval_id:
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"approval_id_conflict:{primary.value}:{kind.value}"
+            return primary, v.tool_subphase, v.active_tool, True, ""
 
         # 审批结果（approval_id 精确绑定；outcome 依赖）。
         if kind is EventKind.APPROVAL_RESOLVED:
             outcome = _approval_outcome(event.payload)
-            rid = _approval_id(event.payload, event.event_id)
             if primary in (WorkExecutionState.WAITING_PERMISSION,
                            WorkExecutionState.BLOCKED_APPROVAL):
+                rid = _approval_id(event.payload, event.event_id)
+                if rid is None:
+                    # 显式非法 approval_id：直接拒绝（不得截断后匹配任何挂起身份）。
+                    return primary, v.tool_subphase, v.active_tool, False, \
+                        f"approval_id_invalid:{primary.value}:{kind.value}"
                 if self._pending_approval_id is None or rid != self._pending_approval_id:
                     return primary, v.tool_subphase, v.active_tool, False, \
                         f"approval_id_mismatch:{primary.value}:{kind.value}"
@@ -466,17 +525,29 @@ class WorkExecutionReducer:
             if primary is not WorkExecutionState.RUNNING:
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"illegal_transition:{primary.value}:{kind.value}"
+            identity = _tool_identity(event.payload)
+            if identity is None:
+                # TOOL_STARTED 不得建立空 active_tool；PROGRESS/COMPLETED 缺失身份拒绝。
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"illegal_transition:{primary.value}:{kind.value}:tool_identity_invalid"
             if kind is EventKind.TOOL_PROGRESS:
+                if not v.tool_subphase or identity != v.active_tool:
+                    return primary, v.tool_subphase, v.active_tool, False, \
+                        f"illegal_transition:{primary.value}:{kind.value}:tool_identity_mismatch"
                 return primary, v.tool_subphase, v.active_tool, True, ""   # tick
             if kind is EventKind.TOOL_STARTED:
                 if v.tool_subphase:
                     return primary, v.tool_subphase, v.active_tool, False, \
                         f"illegal_transition:{primary.value}:{kind.value}:tool_already_active"
-                return primary, True, _tool_name(event.payload), True, ""
-            # TOOL_COMPLETED
+                return primary, True, identity, True, ""
+            # TOOL_COMPLETED：身份必须与 active_tool 一致（缺失/不同均拒绝、零变更，
+            # 不得关闭子相位——fs.read active 时 fs.delete completed 不得清场）。
             if not v.tool_subphase:
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"illegal_transition:{primary.value}:{kind.value}:no_active_tool"
+            if identity != v.active_tool:
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"illegal_transition:{primary.value}:{kind.value}:tool_identity_mismatch"
             return primary, False, "", True, ""
 
         # 普通转移表。

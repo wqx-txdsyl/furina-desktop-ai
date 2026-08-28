@@ -2,6 +2,11 @@
 
 - **外部词表是输入**（16B BackendEvent / 任意 Mapping；Hermes-shaped fixture 只作
   输入映射测试，生产类型无 Hermes 专属字段）；
+- **别名无歧义**（Reviewer Patch 2）：身份字段所有已出现别名逐一校验等于绑定值；
+  event_id/sequence/时间戳/kind/payload 的多个别名同时出现时等值允许、冲突拒绝；
+  显式出现但类型/范围非法不得当作缺失补值；
+- **fallback event_id 每次到达唯一**（arrival ordinal 独立递增，显式/补序/重复
+  sequence 均不得碰撞；fresh normalizer 重放同一输入流确定性一致）；
 - 未知外部类型映射为 ``UNKNOWN_EVENT``（typed、可观察、**非权威**——normalizer
   绝不抛出、绝不把未知输入当成功）；
 - **归一 ≠ 状态**：normalizer 只产出信封；状态转移唯一由
@@ -15,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any, Mapping, Optional
 
 from furina.agent.backend.models import BackendEvent
@@ -153,61 +159,160 @@ def map_kind(token: Any) -> EventKind:
     return _KIND_ALIASES.get(norm, EventKind.UNKNOWN_EVENT)
 
 
-def _first_str(mapping: Mapping[str, Any], keys: tuple) -> Optional[str]:
-    for k in keys:
-        v = mapping.get(k)
-        if isinstance(v, str) and v.strip():
-            return v
-    return None
+def _present_aliases(mapping: Mapping[str, Any], keys: tuple) -> list:
+    """keys 中所有**出现**的 (key, value)（无论值类型；显式出现即视为携带）。"""
+    return [(k, mapping[k]) for k in keys if k in mapping]
 
 
-def _first_int(mapping: Mapping[str, Any], keys: tuple) -> Optional[int]:
-    for k in keys:
-        v = mapping.get(k)
-        if isinstance(v, bool):
-            continue
-        if type(v) is int and v >= 0:
-            return v
-    return None
+def _kind_token(mapping: Mapping[str, Any]) -> str:
+    """kind 类别名：所有出现的键必须是非空 str 且映射到同一 canonical kind。
+
+    等值允许、冲突值拒绝；显式出现但非法（非 str / 空）直接拒绝——不得当作缺失补值。
+    """
+    present = _present_aliases(mapping, _KIND_KEYS)
+    if not present:
+        return ""
+    token: Optional[str] = None
+    mapped: Optional[EventKind] = None
+    for k, v in present:
+        if not isinstance(v, str) or not v.strip():
+            raise EventNormalizationError(
+                f"raw.{k} 显式出现但非法（必须是非空 str），得到 {v!r}；不得当作缺失补值")
+        s = v.strip()
+        m = map_kind(s)
+        if token is None:
+            token, mapped = s, m
+        elif m is not mapped:
+            raise EventNormalizationError(
+                f"kind 别名冲突：raw.{k}={s!r} 映射 {m.value!r}，"
+                f"与既有 {mapped.value!r} 不一致（等值允许，冲突拒绝）")
+    assert token is not None
+    return token
 
 
-def _first_float(mapping: Mapping[str, Any], keys: tuple) -> Optional[float]:
-    for k in keys:
-        v = mapping.get(k)
-        if isinstance(v, bool):
-            continue
-        if isinstance(v, (int, float)):
-            return float(v)
-    return None
+def _event_id_value(mapping: Mapping[str, Any]) -> Optional[str]:
+    """event_id 类别名：所有出现的键必须是非空 str 且等值；冲突拒绝。
+
+    显式出现但类型非法（非 str / 空）直接拒绝——不得当作缺失自动补值（非法值不
+    回退到派生 id）。词法/长度由 NormalizedEvent 构造再校验。
+    """
+    present = _present_aliases(mapping, _EVENT_ID_KEYS)
+    if not present:
+        return None
+    value: Optional[str] = None
+    for k, v in present:
+        if not isinstance(v, str) or not v.strip():
+            raise EventNormalizationError(
+                f"raw.{k} 显式出现但非法（必须是非空 str），得到 {v!r}；不得当作缺失补值")
+        s = v.strip()
+        if value is None:
+            value = s
+        elif s != value:
+            raise EventNormalizationError(
+                f"event_id 别名冲突：raw.{k}={s!r} != {value!r}（等值允许，冲突拒绝）")
+    assert value is not None
+    return value
 
 
-def _first_mapping(mapping: Mapping[str, Any], keys: tuple) -> Optional[Mapping[str, Any]]:
-    for k in keys:
-        v = mapping.get(k)
-        if isinstance(v, Mapping):
-            return v
-    return None
+def _sequence_value(mapping: Mapping[str, Any]) -> Optional[int]:
+    """sequence 类别名：所有出现的键必须是非 bool int >= 0 且等值；冲突拒绝。
+
+    显式出现但类型/范围非法直接拒绝——不得当作缺失自动补序。
+    """
+    present = _present_aliases(mapping, _SEQ_KEYS)
+    if not present:
+        return None
+    value: Optional[int] = None
+    for k, v in present:
+        if isinstance(v, bool) or type(v) is not int or v < 0:
+            raise EventNormalizationError(
+                f"raw.{k} 显式出现但非法（必须是非 bool int >= 0），得到 {v!r}；"
+                "不得当作缺失补值")
+        if value is None:
+            value = v
+        elif v != value:
+            raise EventNormalizationError(
+                f"sequence 别名冲突：raw.{k}={v!r} != {value!r}（等值允许，冲突拒绝）")
+    assert value is not None
+    return value
+
+
+def _ts_value(mapping: Mapping[str, Any]) -> Optional[float]:
+    """时间戳类别名：所有出现的键必须是非 bool 有限数值 >= 0 且等值；冲突拒绝。
+
+    显式出现但类型/范围非法直接拒绝——不得当作缺失自动取 now。
+    """
+    present = _present_aliases(mapping, _TS_KEYS)
+    if not present:
+        return None
+    value: Optional[float] = None
+    for k, v in present:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise EventNormalizationError(
+                f"raw.{k} 显式出现但非法（必须是非 bool 数值），得到 {v!r}；"
+                "不得当作缺失补值")
+        f = float(v)
+        if not math.isfinite(f) or f < 0:
+            raise EventNormalizationError(
+                f"raw.{k} 显式出现但非法（必须有限且 >= 0），得到 {v!r}；不得当作缺失补值")
+        if value is None:
+            value = f
+        elif f != value:
+            raise EventNormalizationError(
+                f"时间戳别名冲突：raw.{k}={v!r} != {value!r}（等值允许，冲突拒绝）")
+    assert value is not None
+    return value
+
+
+def _payload_mapping(mapping: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """payload 类别名：所有出现的键必须是 Mapping 且等值；冲突拒绝。
+
+    显式出现但类型非法直接拒绝——不得当作缺失自动取空。
+    """
+    present = _present_aliases(mapping, _PAYLOAD_KEYS)
+    if not present:
+        return None
+    value: Optional[Mapping[str, Any]] = None
+    for k, v in present:
+        if not isinstance(v, Mapping):
+            raise EventNormalizationError(
+                f"raw.{k} 显式出现但非法（必须是 Mapping），得到 {type(v).__name__!r}；"
+                "不得当作缺失补值")
+        if value is None:
+            value = v
+        elif v != value:
+            raise EventNormalizationError(
+                f"payload 别名冲突：raw.{k} 与既有 payload 不等（等值允许，冲突拒绝）")
+    assert value is not None
+    return value
 
 
 def _derive_event_id(backend_id: str, run_id: str, token: str, payload: Any,
-                     sequence: int) -> str:
+                     sequence: int, arrival: int) -> str:
     """内容寻址的派生事件 id（缺上游稳定 event_id 时的 fallback）。
 
-    派生 id 纳入 ``sequence``：同内容的两次事件（如两次相同 tool.started）是
-    两次**不同**事件（sequence 不同 → id 不同），不得被误去重；只有上游显式
-    提供的稳定 event_id 才享有强重投幂等。
+    派生 id 纳入 **arrival ordinal**（每次 normalize 到达独立递增）：保证同一归一化
+    会话内每次到达唯一——显式 sequence 后接缺 sequence（补序可能与显式值重复）、
+    重复显式 sequence、混合流均不得碰撞；同内容的两次事件是两次**不同**事件，不得
+    被误去重。fresh normalizer 重放同一完整输入流（arrival 递增顺序相同）→ 派生 id
+    完全一致（确定性）。只有上游显式提供的稳定 event_id 才享有强重投幂等。
     """
     try:
         canon = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     except Exception as exc:  # noqa: BLE001 —— 防御性：非 JSON-safe 载荷退化
         canon = f"<unserializable:{type(exc).__name__}>"
-    digest = hashlib.sha256(f"{token}|{sequence}|{canon}".encode()).hexdigest()[:16]
+    digest = hashlib.sha256(
+        f"{token}|{arrival}|{sequence}|{canon}".encode()).hexdigest()[:16]
     return f"bev_{backend_id[:16]}_{run_id[:16]}_{digest}"
 
 
 def _check_mapping_identity(normalizer_backend_id: str, normalizer_contract_id: str,
                             normalizer_run_id: str, raw: Mapping[str, Any]) -> None:
-    """Mapping 若携带身份字段，与 normalizer 绑定不一致/非 str 一律拒绝（不静默改绑）。"""
+    """Mapping 若携带身份字段，**所有已出现别名**都必须是非空 str 且等于绑定值。
+
+    逐一校验全部别名（不得检查第一个后 break）：任一别名非 str / 值不一致一律
+    EventNormalizationError，禁止静默改绑。
+    """
     for field, keys in _IDENTITY_KEYS.items():
         for k in keys:
             if k not in raw:
@@ -223,17 +328,18 @@ def _check_mapping_identity(normalizer_backend_id: str, normalizer_contract_id: 
                 raise EventNormalizationError(
                     f"raw.{k}={v.strip()!r} 与 normalizer 绑定 {field}={bound!r} 不一致"
                     "（禁止静默改绑）")
-            break
 
 
 class BackendEventNormalizer:
     """backend-neutral 归一器：16B BackendEvent / Mapping → NormalizedEvent。
 
     构造绑定 backend_id/contract_id/run_id（信封恒等）；**身份不一致直接拒绝**：
-    BackendEvent 的 backend_id/run_id、Mapping 携带的身份字段都必须与绑定一致，
-    不静默改绑。缺 event_id 时按到达顺序内容寻址派生（fallback id 含 sequence，
-    同内容两次事件 = 两次不同事件）；缺 sequence 时按到达顺序补序——同一输入流
-    重复归一结果完全一致。
+    BackendEvent 的 backend_id/run_id、Mapping 携带的身份字段（所有已出现别名）
+    都必须与绑定一致，不静默改绑。**别名无歧义**：event_id/sequence/时间戳/kind/
+    payload 的多个别名同时出现时等值允许、冲突值拒绝；显式出现但类型/范围非法
+    不得当作缺失补值。缺 event_id 时按到达顺序内容寻址派生（fallback id 含
+    **arrival ordinal**——每次到达唯一，显式/补序/重复 sequence 均不得碰撞）；
+    缺 sequence 时按到达顺序补序——同一输入流重复归一结果完全一致。
     """
 
     def __init__(
@@ -255,19 +361,21 @@ class BackendEventNormalizer:
         self._now_fn = now_fn
         self._max_payload_bytes = _validate_payload_budget(max_payload_bytes)
         self._seq_counter = 0
+        self._arrival_counter = 0   # 每次 normalize 到达独立递增（fallback id 唯一性）
 
     # -- 公共入口 ----------------------------------------------------------------
     def normalize(self, raw: Any) -> NormalizedEvent:
         """任意外部事件 → canonical 信封。未知类型 → UNKNOWN_EVENT（非权威，不抛）。"""
+        self._arrival_counter += 1
         if isinstance(raw, BackendEvent):
-            return self._from_backend_event(raw)
+            return self._from_backend_event(raw, self._arrival_counter)
         if isinstance(raw, Mapping):
-            return self._from_mapping(raw)
+            return self._from_mapping(raw, self._arrival_counter)
         raise EventNormalizationError(
             f"raw 必须是 BackendEvent 或 Mapping，得到 {type(raw).__name__}")
 
     # -- 16B typed 引用 ----------------------------------------------------------
-    def _from_backend_event(self, be: BackendEvent) -> NormalizedEvent:
+    def _from_backend_event(self, be: BackendEvent, arrival: int) -> NormalizedEvent:
         if be.backend_id != self._backend_id:
             raise EventNormalizationError(
                 f"BackendEvent.backend_id={be.backend_id!r} 与 normalizer 绑定 "
@@ -283,7 +391,7 @@ class BackendEventNormalizer:
         sequence = self._next_seq()
         return NormalizedEvent(
             event_id=_derive_event_id(self._backend_id, self._run_id, token, payload,
-                                      sequence),
+                                      sequence, arrival),
             backend_id=self._backend_id,
             contract_id=self._contract_id,
             run_id=self._run_id,
@@ -297,20 +405,20 @@ class BackendEventNormalizer:
         )
 
     # -- 通用 Mapping 形状（含 Hermes-shaped fixture）-----------------------------
-    def _from_mapping(self, raw: Mapping[str, Any]) -> NormalizedEvent:
+    def _from_mapping(self, raw: Mapping[str, Any], arrival: int) -> NormalizedEvent:
         _check_mapping_identity(self._backend_id, self._contract_id, self._run_id, raw)
-        token = _first_str(raw, _KIND_KEYS) or ""
+        token = _kind_token(raw)
         kind = map_kind(token)
-        payload = _first_mapping(raw, _PAYLOAD_KEYS) or {}
+        payload = _payload_mapping(raw) or {}
         now = self._now_fn()
-        sequence = _first_int(raw, _SEQ_KEYS)
+        sequence = _sequence_value(raw)
         if sequence is None:
             sequence = self._next_seq()
-        event_id = _first_str(raw, _EVENT_ID_KEYS)
+        event_id = _event_id_value(raw)
         if event_id is None:
             event_id = _derive_event_id(self._backend_id, self._run_id, token, payload,
-                                        sequence)
-        occurred_at = _first_float(raw, _TS_KEYS)
+                                        sequence, arrival)
+        occurred_at = _ts_value(raw)
         if occurred_at is None:
             occurred_at = now
         provenance = raw.get("provenance")

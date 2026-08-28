@@ -33,6 +33,21 @@ Reviewer Patch 1 否证（test_patch1a–1g）：
   恢复 RUNNING；不相关 id 不得改变状态）；
 - TOOL_STARTED/TOOL_COMPLETED 不可丢、不可合并（critical）；只有 TOOL_PROGRESS/
   token delta 可 drop/coalesce。
+
+Reviewer Patch 2 否证（test_patch2a–2e）：
+- Mapping 别名无歧义（身份字段所有已出现别名逐一校验等于绑定值；event_id/sequence/
+  时间戳/kind/payload 多别名同时出现等值允许、冲突拒绝；显式出现但类型/范围非法
+  不得当作缺失补值）；
+- fallback event_id 每次到达唯一（arrival ordinal 独立递增；显式 sequence 后接缺
+  sequence、重复显式 sequence、混合流均不得碰撞；fresh normalizer 重放确定性一致）；
+- max_payload_bytes 是真实 UTF-8 byte 上限（len(encoded.encode("utf-8"))；truncation
+  marker 自身不超预算；低于最小预算 fail-closed；original_bytes 记录真实 UTF-8 bytes）；
+- approval_id 精确绑定（禁止 [:128] 静默截断；非法/超长/control-char 直接拒绝；
+  WAITING 同 id 重投幂等观察、异 id typed conflict 零变更不覆盖 pending；
+  BLOCKED 仍允许新合法请求；长 ID 第 129 字符不同不得互相批准）；
+- tool lifecycle 身份配对（TOOL_STARTED 必须建立非空 active_tool；TOOL_PROGRESS/
+  TOOL_COMPLETED 身份必须与 active_tool 一致，缺失/不同均 typed diagnostic 零变更；
+  fs.read active 时 fs.delete completed 不得关闭子相位）。
 """
 from __future__ import annotations
 
@@ -105,14 +120,6 @@ def _feed(n: BackendEventNormalizer, r: WorkExecutionReducer,
     return [r.reduce(n.normalize(raw)) for raw in raws]
 
 
-def _tokens(r: WorkExecutionReducer, *kinds: EventKind) -> List[ReduceResult]:
-    """按 kind 顺序驱动给定 reducer（event_id 自动去重；sequence 递增）。"""
-    out: List[ReduceResult] = []
-    for i, k in enumerate(kinds):
-        out.append(r.reduce(_mk(k, event_id=f"ev_{i}", sequence=i)))
-    return out
-
-
 def _drive(r: WorkExecutionReducer, state: WorkExecutionState) -> Optional[str]:
     """按 _PATH_TO 驱动 reducer 到指定 primary 状态（含 outcome 依赖事件）。
 
@@ -176,8 +183,14 @@ def test_01_full_legal_transition_table():
     for src, row in LEGAL_TRANSITIONS.items():
         for kind, target in row.items():
             r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
-            _drive(r, src)
-            res = r.reduce(_mk(kind, event_id=f"t_{src.value}_{kind.value}"))
+            pending = _drive(r, src)
+            payload = {}
+            # WAITING_PERMISSION 中新的 APPROVAL_REQUESTED 必须是同 approval_id
+            # 重投（幂等观察）——不同 id 是 approval_id_conflict 而非合法自环。
+            if kind is EventKind.APPROVAL_REQUESTED and \
+                    src is WorkExecutionState.WAITING_PERMISSION:
+                payload = {"approval_id": pending}
+            res = r.reduce(_mk(kind, event_id=f"t_{src.value}_{kind.value}", payload=payload))
             assert res.applied, f"{src.value} --{kind.value}--> 未应用: {res.diagnostic}"
             assert res.view.primary is target, \
                 f"{src.value} --{kind.value}--> 期望 {target.value}，实际 {res.view.primary.value}"
@@ -247,12 +260,12 @@ def test_01d_tool_running_subphase_transitions():
     assert res.view.state is WorkExecutionState.TOOL_RUNNING
     assert res.view.primary is WorkExecutionState.RUNNING
     assert res.view.tool_subphase is True and res.view.active_tool == "fs.read_file"
-    # tool.progress → 子相位保持（tick）
-    res = r.reduce(_mk(EventKind.TOOL_PROGRESS, "t2"))
+    # tool.progress → 子相位保持（tick；工具身份必须与 active_tool 一致）
+    res = r.reduce(_mk(EventKind.TOOL_PROGRESS, "t2", payload={"tool": "fs.read_file"}))
     assert res.applied and res.view.state is WorkExecutionState.TOOL_RUNNING
     assert res.view.primary is WorkExecutionState.RUNNING
-    # tool.completed → 子相位退出，primary 恢复可见
-    res = r.reduce(_mk(EventKind.TOOL_COMPLETED, "t3"))
+    # tool.completed（身份匹配）→ 子相位退出，primary 恢复可见
+    res = r.reduce(_mk(EventKind.TOOL_COMPLETED, "t3", payload={"tool": "fs.read_file"}))
     assert res.applied
     assert res.view.state is WorkExecutionState.RUNNING
     assert res.view.tool_subphase is False and res.view.active_tool == ""
@@ -319,10 +332,14 @@ def test_02b_tool_subphase_illegal_cases():
 def test_03_completed_never_verified():
     """§7.3：backend completed → BACKEND_DONE_UNVERIFIED，全路径永不 VERIFIED。"""
     r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
-    res = _tokens(
-        r,
-        EventKind.RUN_ACCEPTED, EventKind.RUN_STARTED,
-        EventKind.TOOL_STARTED, EventKind.TOOL_COMPLETED, EventKind.BACKEND_COMPLETED)
+    steps = [
+        _mk(EventKind.RUN_ACCEPTED, "ev_0", sequence=0),
+        _mk(EventKind.RUN_STARTED, "ev_1", sequence=1),
+        _mk(EventKind.TOOL_STARTED, "ev_2", sequence=2, payload={"tool": "fs.read_file"}),
+        _mk(EventKind.TOOL_COMPLETED, "ev_3", sequence=3, payload={"tool": "fs.read_file"}),
+        _mk(EventKind.BACKEND_COMPLETED, "ev_4", sequence=4),
+    ]
+    res = [r.reduce(ev) for ev in steps]
     assert r.view.primary is WorkExecutionState.BACKEND_DONE_UNVERIFIED
     for step in res:
         assert step.view.primary is not WorkExecutionState.VERIFIED
@@ -598,8 +615,9 @@ def test_10b_no_workexecution_state_written_to_c7_c6(tmp_path):
         {"event_id": "z1", "type": "queued"},
         {"event_id": "z2", "type": "running"},
         {"event_id": "z3", "type": "tool.started", "payload": {"tool": "fs.read_file"}},
-        {"event_id": "z4", "type": "tool.progress", "payload": {"delta": "..."}},
-        {"event_id": "z5", "type": "tool.completed"},
+        {"event_id": "z4", "type": "tool.progress",
+         "payload": {"tool": "fs.read_file", "delta": "..."}},
+        {"event_id": "z5", "type": "tool.completed", "payload": {"tool": "fs.read_file"}},
         {"event_id": "z6", "type": "waiting_for_approval", "payload": {"approval_id": "z_ap"}},
         {"event_id": "z7", "type": "approval.resolved",
          "payload": {"decision": "approve", "approval_id": "z_ap"}},
@@ -637,7 +655,7 @@ def test_11_native_and_hermes_shaped_same_semantics():
         {"event_id": "n1", "type": "run.submitted"},
         {"event_id": "n2", "type": "run.started"},
         {"event_id": "n3", "type": "tool.started", "payload": {"tool": "fs.read_file"}},
-        {"event_id": "n4", "type": "tool.completed"},
+        {"event_id": "n4", "type": "tool.completed", "payload": {"tool": "fs.read_file"}},
         {"event_id": "n5", "type": "backend.completed"},
     ]
     # Hermes-shaped fixture（_set_run_status 词表 + SSE 事件面）
@@ -645,7 +663,7 @@ def test_11_native_and_hermes_shaped_same_semantics():
         {"event_id": "h1", "status": "queued"},
         {"event_id": "h2", "status": "running"},
         {"event_id": "h3", "type": "tool.started", "payload": {"tool": "fs.read_file"}},
-        {"event_id": "h4", "type": "tool.completed"},
+        {"event_id": "h4", "type": "tool.completed", "payload": {"tool": "fs.read_file"}},
         {"event_id": "h5", "type": "run.completed", "payload": {"completed": True}},
     ]
     n1, r1 = _fresh()
@@ -683,8 +701,9 @@ def test_12_repeated_replay_deterministic():
         {"event_id": "r1", "type": "queued"},
         {"event_id": "r2", "type": "running"},
         {"event_id": "r3", "type": "tool.started", "payload": {"tool": "fs.organize"}},
-        {"event_id": "r4", "type": "tool.progress", "payload": {"delta": "t"}},
-        {"event_id": "r5", "type": "tool.completed"},
+        {"event_id": "r4", "type": "tool.progress",
+         "payload": {"tool": "fs.organize", "delta": "t"}},
+        {"event_id": "r5", "type": "tool.completed", "payload": {"tool": "fs.organize"}},
         {"event_id": "r6", "type": "waiting_for_approval", "payload": {"approval_id": "r_ap"}},
         {"event_id": "r7", "type": "approval.resolved",
          "payload": {"decision": "approve", "approval_id": "r_ap"}},
@@ -927,9 +946,9 @@ def test_patch1d_fallback_event_id_sequence_distinct():
         {"type": "queued"},
         {"type": "running"},
         {"type": "tool.started", "payload": {"tool": "fs.read_file"}},
-        {"type": "tool.completed"},
+        {"type": "tool.completed", "payload": {"tool": "fs.read_file"}},
         {"type": "tool.started", "payload": {"tool": "fs.read_file"}},   # 完全相同
-        {"type": "tool.completed"},
+        {"type": "tool.completed", "payload": {"tool": "fs.read_file"}},
     ]
     evs = [n.normalize(raw) for raw in double_session]
     ids = [ev.event_id for ev in evs]
@@ -949,8 +968,8 @@ def test_patch1d_fallback_event_id_sequence_distinct():
         {"type": "running"},
         {"type": "tool.started", "payload": {"tool": "fs.read_file"}},
         {"type": "tool.started", "payload": {"tool": "fs.read_file"}},
-        {"type": "tool.completed"},
-        {"type": "tool.completed"},
+        {"type": "tool.completed", "payload": {"tool": "fs.read_file"}},
+        {"type": "tool.completed", "payload": {"tool": "fs.read_file"}},
     ]
     reses = _feed(n2, r2, back_to_back)
     assert not reses[3].applied and reses[3].diagnostic.endswith("tool_already_active")
@@ -996,15 +1015,16 @@ def test_patch1e_secret_value_redaction_and_budget_validation():
     p2 = _plain(ev2.payload)
     assert p2["headers"]["x-api-key"] == "[REDACTED]"
     assert p2["headers"]["X-Authorization"] == "[REDACTED]"
-    # max_payload_bytes 严格校验（信封构造 + sanitize_payload 双入口）
-    for bad in (True, False, 0, -5, 1.5, "4096", None, (1 << 20) + 1):
+    # max_payload_bytes 严格校验（信封构造 + sanitize_payload 双入口）：
+    # 低于最小预算（1/127）同样 fail-closed——不允许"声称允许 1 byte 却返回超预算 JSON"
+    for bad in (True, False, 0, -5, 1.5, "4096", None, 1, 127, (1 << 20) + 1):
         with pytest.raises(EventNormalizationError, match="max_payload_bytes"):
             _mk(EventKind.TOOL_PROGRESS, "v3", payload={"x": 1},
                 max_payload_bytes=bad)
     with pytest.raises(EventNormalizationError, match="max_payload_bytes"):
         sanitize_payload({"x": 1}, max_bytes=0.5)
-    # 合法边界值可用
-    _mk(EventKind.TOOL_PROGRESS, "v4", payload={"x": 1}, max_payload_bytes=1)
+    # 合法边界值可用（最小预算 128 与上限 1 MiB）
+    _mk(EventKind.TOOL_PROGRESS, "v4", payload={"x": 1}, max_payload_bytes=128)
     _mk(EventKind.TOOL_PROGRESS, "v5", payload={"x": 1}, max_payload_bytes=1 << 20)
 
 
@@ -1098,3 +1118,313 @@ def test_patch1g_tool_boundary_not_droppable_not_coalescible():
     for k in (EventKind.TRANSPORT_RECONNECTED, EventKind.UNKNOWN_EVENT):
         assert not EventBackpressurePolicy.drop_allowed(k, under_pressure=True)
         assert EventBackpressurePolicy.coalesce_allowed(k)
+
+
+# ================================================================ Reviewer Patch 2 否证
+# P2-1. Mapping 别名无歧义
+def test_patch2a_mapping_alias_exactness():
+    """reviewer P2-1：backend_id/backendId、contract_id/contractId、run_id/runId
+    所有已出现别名都必须是合法 str 且等于绑定值（不得检查第一个后 break）；
+    event_id/eventId/id、sequence/seq/number、时间、kind/status 同时出现时等值
+    允许、冲突值拒绝；显式出现但类型/范围非法的 event_id/sequence/timestamp/
+    payload 不得当作缺失自动补值。"""
+    n = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+
+    # --- 身份别名：所有已出现别名逐一校验（不得第一个 break 后放过后面的不一致）---
+    with pytest.raises(EventNormalizationError, match="backend_id"):
+        n.normalize({"event_id": "a1", "type": "queued",
+                     "backend_id": BACKEND, "backendId": "other_backend"})
+    with pytest.raises(EventNormalizationError, match="contract_id"):
+        n.normalize({"event_id": "a2", "type": "queued",
+                     "contractId": "wc_other", "contract_id": CONTRACT})
+    with pytest.raises(EventNormalizationError, match="run_id"):
+        n.normalize({"event_id": "a3", "type": "queued",
+                     "run_id": RUN, "runId": "run_other"})
+    with pytest.raises(EventNormalizationError, match="backendId"):
+        n.normalize({"event_id": "a4", "type": "queued",
+                     "backend_id": BACKEND, "backendId": 123})
+    # 全部别名一致且等于绑定 → 合法
+    ev = n.normalize({"event_id": "a5", "type": "queued",
+                      "backend_id": BACKEND, "backendId": BACKEND,
+                      "contract_id": CONTRACT, "contractId": CONTRACT,
+                      "run_id": RUN, "runId": RUN})
+    assert ev.backend_id == BACKEND and ev.contract_id == CONTRACT and ev.run_id == RUN
+
+    # --- event_id 别名：等值允许 / 冲突拒绝 / 显式非法不得补值 ---
+    ev = n.normalize({"event_id": "b1", "eventId": "b1", "id": "b1", "type": "queued"})
+    assert ev.event_id == "b1"
+    with pytest.raises(EventNormalizationError, match="event_id"):
+        n.normalize({"event_id": "b2", "id": "b2_other", "type": "queued"})
+    with pytest.raises(EventNormalizationError, match="eventId"):
+        n.normalize({"eventId": 7, "type": "queued"})          # 显式但非法类型 → 拒绝
+    with pytest.raises(EventNormalizationError, match="event_id"):
+        n.normalize({"event_id": "", "type": "queued"})        # 显式但空 → 拒绝（不补值）
+
+    # --- sequence 别名 ---
+    ev = n.normalize({"event_id": "c1", "type": "queued", "sequence": 5, "seq": 5})
+    assert ev.sequence == 5
+    with pytest.raises(EventNormalizationError, match="sequence"):
+        n.normalize({"event_id": "c2", "type": "queued", "sequence": 5, "number": 6})
+    with pytest.raises(EventNormalizationError, match="seq"):
+        n.normalize({"event_id": "c3", "type": "queued", "seq": True})
+    with pytest.raises(EventNormalizationError, match="sequence"):
+        n.normalize({"event_id": "c4", "type": "queued", "sequence": -1})
+
+    # --- 时间戳别名 ---
+    ev = n.normalize({"event_id": "d1", "type": "queued", "occurred_at": 1.0,
+                      "timestamp": 1.0})
+    assert ev.occurred_at == 1.0
+    with pytest.raises(EventNormalizationError, match="时间戳"):
+        n.normalize({"event_id": "d2", "type": "queued", "occurred_at": 1.0, "ts": 2.0})
+    with pytest.raises(EventNormalizationError, match="timestamp"):
+        n.normalize({"event_id": "d3", "type": "queued", "timestamp": "2026-08-28"})
+    with pytest.raises(EventNormalizationError, match="occurred_at"):
+        n.normalize({"event_id": "d4", "type": "queued", "occurred_at": float("nan")})
+
+    # --- kind/status 别名：等值允许 / 冲突拒绝 / 显式非法类型拒绝 ---
+    ev = n.normalize({"event_id": "e1", "type": "queued", "status": "queued"})
+    assert ev.kind is EventKind.RUN_ACCEPTED
+    with pytest.raises(EventNormalizationError, match="kind"):
+        n.normalize({"event_id": "e2", "type": "queued", "status": "running"})
+    with pytest.raises(EventNormalizationError, match="kind"):
+        n.normalize({"event_id": "e3", "type": "queued", "kind": 42})
+
+    # --- payload 别名：等值允许 / 冲突拒绝 / 显式非法不得补值 ---
+    ev = n.normalize({"event_id": "f1", "type": "queued",
+                      "payload": {"a": 1}, "data": {"a": 1}})
+    assert _plain(ev.payload) == {"a": 1}
+    with pytest.raises(EventNormalizationError, match="payload"):
+        n.normalize({"event_id": "f2", "type": "queued",
+                     "payload": {"a": 1}, "data": {"a": 2}})
+    with pytest.raises(EventNormalizationError, match="payload"):
+        n.normalize({"event_id": "f3", "type": "queued", "payload": "not-a-mapping"})
+
+
+# P2-2. fallback event_id 每次到达唯一
+def test_patch2b_fallback_event_id_arrival_unique():
+    """reviewer P2-2：fallback event_id 每次到达唯一（arrival ordinal 独立递增）。
+
+    显式 sequence 后接缺 sequence（补序可能重复）、重复显式 sequence、混合流
+    均不得碰撞；fresh normalizer 重放同一完整输入流仍须确定性一致。
+    """
+    stream = [
+        {"event_id": "s0", "type": "queued"},
+        {"event_id": "s1", "type": "running"},
+        {"event_id": "s2", "type": "tool.started", "payload": {"tool": "fs.read_file"}},
+        # --- 以下全部无显式 event_id（fallback 派生）---
+        {"type": "tool.progress", "payload": {"tool": "fs.read_file", "delta": "x"},
+         "sequence": 0},                       # 显式 sequence 0
+        {"type": "tool.progress", "payload": {"tool": "fs.read_file", "delta": "x"}},
+                                               # 缺 sequence → 补序也到 0
+        {"type": "tool.progress", "payload": {"tool": "fs.read_file", "delta": "x"},
+         "sequence": 0},                       # 重复显式 sequence 0
+        {"type": "tool.progress", "payload": {"tool": "fs.read_file", "delta": "y"}},
+                                               # 混合流（无显式）
+        {"type": "tool.completed", "payload": {"tool": "fs.read_file"}},
+    ]
+
+    def _run():
+        n = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+        r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+        outs = []
+        for raw in stream:
+            ev = n.normalize(raw)
+            res = r.reduce(ev)
+            outs.append((ev.event_id, ev.sequence, res.applied, res.diagnostic))
+        return outs, r.view
+
+    outs1, view1 = _run()
+    ids = [o[0] for o in outs1]
+    # 三个"同内容 + sequence 0"的 progress（显式/补序/重复显式）必须是**三次不同事件**
+    assert ids[3] != ids[4] and ids[4] != ids[5] and ids[3] != ids[5]
+    assert len(set(ids[3:7])) == 4, "fallback id 每次到达必须唯一（混合流亦不碰撞）"
+    # 全部应用（progress 身份与 active_tool 匹配 → tick；completed 关闭子相位）
+    for o in outs1[3:]:
+        assert o[2], f"fallback 事件未被应用: {o[3]}"
+    assert view1.primary is WorkExecutionState.RUNNING
+    assert view1.processed_count == len(stream)
+    # 确定性：fresh normalizer 重放同一完整输入流 → 同一 fallback id 序列
+    outs2, _ = _run()
+    assert [o[0] for o in outs2] == ids
+
+
+# P2-3. max_payload_bytes 真实 UTF-8 上限
+def test_patch2c_max_payload_bytes_utf8_bound():
+    """reviewer P2-3：max_payload_bytes 是真实 UTF-8 byte 上限。
+
+    使用 len(encoded.encode("utf-8"))——字符数 <= 预算但 UTF-8 字节超预算的载荷
+    必须截断；truncation marker 自身也不得超过预算；低于最小预算 fail-closed
+    （不得声称允许 1 byte 却返回超过 1 byte 的 JSON）；original_bytes 记录真实
+    UTF-8 bytes。
+    """
+    from furina.agent.events.models import _MIN_PAYLOAD_BUDGET
+
+    # 72 个字符但 136 个 UTF-8 字节（é 为 2 字节）：字符数 <= 128 而字节数 > 128
+    tree = {"x": "\u00e9" * 64}
+    p = sanitize_payload(tree, max_bytes=128)
+    assert p["_truncated"] is True
+    assert p["byte_budget"] == 128
+    assert p["original_bytes"] == 136          # 真实 UTF-8 字节（不是字符数 72）
+    marker_bytes = len(json.dumps(_plain(p), sort_keys=True, ensure_ascii=False,
+                                  separators=(",", ":")).encode("utf-8"))
+    assert marker_bytes <= 128                 # truncation marker 自身不超预算
+    # 信封入口同样有界
+    ev = _mk(EventKind.TOOL_PROGRESS, "m1", payload=tree, max_payload_bytes=128)
+    pe = _plain(ev.payload)
+    assert pe["_truncated"] is True and pe["original_bytes"] == 136
+    # 纯 ASCII 超限（字符 == 字节）同样截断，original_bytes 与真实序列化字节一致
+    p2 = sanitize_payload({"y": "z" * 300}, max_bytes=128)
+    assert p2["_truncated"] is True
+    expected2 = len(json.dumps({"y": "z" * 256}, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":")).encode("utf-8"))
+    assert p2["original_bytes"] == expected2
+    # 预算内载荷不截断（多字节字符按真实字节计，未超预算即放行）
+    p3 = sanitize_payload({"x": "\u00e9"}, max_bytes=128)
+    assert "_truncated" not in p3 and _plain(p3) == {"x": "\u00e9"}
+    # 低于最小预算 fail-closed（1 byte 也不例外）
+    for bad in (1, 127, _MIN_PAYLOAD_BUDGET - 1):
+        with pytest.raises(EventNormalizationError, match="max_payload_bytes"):
+            sanitize_payload({"x": 1}, max_bytes=bad)
+        with pytest.raises(EventNormalizationError, match="max_payload_bytes"):
+            _mk(EventKind.TOOL_PROGRESS, "m2", payload={"x": 1}, max_payload_bytes=bad)
+
+
+# P2-4. approval_id 精确绑定
+def test_patch2d_approval_id_exact_binding():
+    """reviewer P2-4：approval_id 精确绑定——禁止 [:128] 静默截断；非法/超长/
+    control-char ID 直接拒绝；WAITING_PERMISSION 同 id 重投幂等观察、异 id typed
+    conflict 零变更不覆盖 pending；BLOCKED_APPROVAL 仍允许新合法请求；长 ID
+    第 129 字符不同不得互相批准。"""
+    # 长 ID 锁定：前 128 字符相同、第 129 字符不同的 resolved 不得批准挂起请求
+    n, r = _fresh()
+    _feed(n, r, [
+        {"event_id": "a1", "type": "queued"},
+        {"event_id": "a2", "type": "running"},
+        {"event_id": "a3", "type": "waiting_for_approval",
+         "payload": {"approval_id": "A" * 128}},
+    ])
+    assert r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    res = r.reduce(n.normalize({"event_id": "a4", "type": "approval.resolved",
+                                "payload": {"decision": "approve",
+                                            "approval_id": "A" * 128 + "x"}}))
+    assert not res.applied and res.diagnostic.startswith("approval_id_invalid:")
+    assert r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    # 精确匹配 → approve（合法消费）
+    res = r.reduce(n.normalize({"event_id": "a5", "type": "approval.resolved",
+                                "payload": {"decision": "approve",
+                                            "approval_id": "A" * 128}}))
+    assert res.applied and r.view.primary is WorkExecutionState.RUNNING
+    # 非法/超长请求：拒绝且 pending 不建立（零变更）
+    r2 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r2, WorkExecutionState.RUNNING)
+    res = r2.reduce(_mk(EventKind.APPROVAL_REQUESTED, "b1",
+                        payload={"approval_id": "B" * 129}))
+    assert not res.applied and res.diagnostic.startswith("approval_id_invalid:")
+    assert r2.view.primary is WorkExecutionState.RUNNING
+    res = r2.reduce(_mk(EventKind.APPROVAL_REQUESTED, "b2",
+                        payload={"approval_id": 123}))
+    assert not res.applied and res.diagnostic.startswith("approval_id_invalid:")
+    assert r2.view.primary is WorkExecutionState.RUNNING
+    # 别名冲突（approval_id vs approvalId 不等）→ 拒绝
+    res = r2.reduce(_mk(EventKind.APPROVAL_REQUESTED, "b3",
+                        payload={"approval_id": "ap_1", "approvalId": "ap_2"}))
+    assert not res.applied and res.diagnostic.startswith("approval_id_invalid:")
+    assert r2.view.primary is WorkExecutionState.RUNNING
+    # control-char 在信封层被确定性清洗（绝不静默截断/回退——绑定的是清洗后的值）
+    ev_ctrl = _mk(EventKind.APPROVAL_REQUESTED, "b4",
+                  payload={"approval_id": "ap\x00bad"})
+    assert _plain(ev_ctrl.payload)["approval_id"] == "ap bad"
+    # WAITING_PERMISSION：同 approval_id 重投 → 幂等观察（pending 不变）
+    n3, r3 = _fresh()
+    _feed(n3, r3, [
+        {"event_id": "w1", "type": "queued"},
+        {"event_id": "w2", "type": "running"},
+        {"event_id": "w3", "type": "waiting_for_approval",
+         "payload": {"approval_id": "ap_x"}},
+    ])
+    res = r3.reduce(n3.normalize({"event_id": "w3b", "type": "waiting_for_approval",
+                                  "payload": {"approval_id": "ap_x"}}))
+    assert res.applied and not res.diagnostic          # 幂等观察
+    assert r3.view.primary is WorkExecutionState.WAITING_PERMISSION
+    # 不同 approval_id 请求 → typed conflict、零状态变化、**不得覆盖 pending**
+    before = r3.view
+    res = r3.reduce(n3.normalize({"event_id": "w4", "type": "waiting_for_approval",
+                                  "payload": {"approval_id": "ap_y"}}))
+    assert not res.applied and res.diagnostic.startswith("approval_id_conflict:")
+    assert r3.view is before
+    assert r3.view.primary is WorkExecutionState.WAITING_PERMISSION
+    # pending 仍是 ap_x：以 ap_x approve 仍可恢复 RUNNING（未被 ap_y 覆盖）
+    res = r3.reduce(n3.normalize({"event_id": "w5", "type": "approval.resolved",
+                                  "payload": {"decision": "approve",
+                                              "approval_id": "ap_x"}}))
+    assert res.applied and r3.view.primary is WorkExecutionState.RUNNING
+    # BLOCKED_APPROVAL：仍允许新合法 approval 请求（新 id → 重新挂起）
+    n4, r4 = _fresh()
+    _feed(n4, r4, [
+        {"event_id": "d1", "type": "queued"},
+        {"event_id": "d2", "type": "running"},
+        {"event_id": "d3", "type": "waiting_for_approval",
+         "payload": {"approval_id": "ap_1"}},
+        {"event_id": "d4", "type": "approval.resolved",
+         "payload": {"decision": "deny", "approval_id": "ap_1"}},
+    ])
+    assert r4.view.primary is WorkExecutionState.BLOCKED_APPROVAL
+    res = r4.reduce(n4.normalize({"event_id": "d5", "type": "waiting_for_approval",
+                                  "payload": {"approval_id": "ap_2"}}))
+    assert res.applied and r4.view.primary is WorkExecutionState.WAITING_PERMISSION
+
+
+# P2-5. tool lifecycle 身份配对
+def test_patch2e_tool_lifecycle_identity_pairing():
+    """reviewer P2-5：TOOL_STARTED 必须建立非空 active_tool；TOOL_PROGRESS/
+    TOOL_COMPLETED 的工具身份必须与 active_tool 一致（缺失或不同均 typed
+    diagnostic、零状态变化）；fs.read active 时 fs.delete completed 不得关闭
+    子相位。"""
+    r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r, WorkExecutionState.RUNNING)
+    # TOOL_STARTED 缺工具名 → 拒绝，子相位不建立
+    res = r.reduce(_mk(EventKind.TOOL_STARTED, "s1"))
+    assert not res.applied
+    assert res.diagnostic.startswith("illegal_transition:")
+    assert "tool_identity_invalid" in res.diagnostic
+    assert r.view.tool_subphase is False and r.view.active_tool == ""
+    # TOOL_STARTED 空工具名 → 拒绝
+    res = r.reduce(_mk(EventKind.TOOL_STARTED, "s2", payload={"tool": "   "}))
+    assert not res.applied and "tool_identity_invalid" in res.diagnostic
+    assert r.view.tool_subphase is False
+    # 合法 TOOL_STARTED → 建立非空 active_tool
+    res = r.reduce(_mk(EventKind.TOOL_STARTED, "s3", payload={"tool": "fs.read_file"}))
+    assert res.applied and r.view.tool_subphase is True
+    assert r.view.active_tool == "fs.read_file"
+    # TOOL_PROGRESS 缺身份 → 拒绝（tick 也必须归因）
+    before = r.view
+    res = r.reduce(_mk(EventKind.TOOL_PROGRESS, "s4"))
+    assert not res.applied and "tool_identity_invalid" in res.diagnostic
+    assert r.view is before
+    # TOOL_PROGRESS 不同身份（fs.delete）→ 拒绝（零变更）
+    res = r.reduce(_mk(EventKind.TOOL_PROGRESS, "s5", payload={"tool": "fs.delete"}))
+    assert not res.applied and "tool_identity_mismatch" in res.diagnostic
+    assert r.view is before and r.view.active_tool == "fs.read_file"
+    # TOOL_PROGRESS 匹配身份 → tick（应用）
+    res = r.reduce(_mk(EventKind.TOOL_PROGRESS, "s6", payload={"tool": "fs.read_file"}))
+    assert res.applied and r.view.active_tool == "fs.read_file"
+    # fs.read active 时 fs.delete completed → 拒绝，**不得关闭子相位**
+    before = r.view
+    res = r.reduce(_mk(EventKind.TOOL_COMPLETED, "s7", payload={"tool": "fs.delete"}))
+    assert not res.applied and "tool_identity_mismatch" in res.diagnostic
+    assert r.view is before and r.view.tool_subphase is True
+    assert r.view.active_tool == "fs.read_file"
+    # 匹配身份的 completed → 关闭子相位
+    res = r.reduce(_mk(EventKind.TOOL_COMPLETED, "s8", payload={"tool": "fs.read_file"}))
+    assert res.applied
+    assert r.view.tool_subphase is False and r.view.active_tool == ""
+    # 无活动工具时 TOOL_PROGRESS（带身份）→ 拒绝
+    res = r.reduce(_mk(EventKind.TOOL_PROGRESS, "s9", payload={"tool": "fs.read_file"}))
+    assert not res.applied and "tool_identity_mismatch" in res.diagnostic
+    # 超长工具名不得截断配对（129 字符的不同名不得被误认为同一工具）
+    r2 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r2, WorkExecutionState.RUNNING)
+    long_tool = "t" * 129
+    res = r2.reduce(_mk(EventKind.TOOL_STARTED, "l1", payload={"tool": long_tool}))
+    assert not res.applied and "tool_identity_invalid" in res.diagnostic
+    assert r2.view.tool_subphase is False
