@@ -140,7 +140,10 @@ USER_PROVENANCE_REQUIRED       = true（**Patch 3 fix 3：typed EvidenceContext 
                                  未消费重复请求幂等（复用 nonce）、同 event+不同 context 拒绝、
                                  已消费/超窗/验证失败后事件锁定（不得再次创建新 nonce 或新
                                  grant，grant 撤销后同一旧 event 亦不得重建替代授权，有否证
-                                 测试 test_patch4b/4c 锁定）；公开 verify_user_evidence 已
+                                 测试 test_patch4b/4c 锁定）；**事件锁定语义（精确）**：
+                                 成功预绑定后，消费重查失败、超时或完成消费会锁定 event；
+                                 首次预验证拒绝不建立 binding，因此不声明其已被锁定；公开
+                                 verify_user_evidence 已
                                  删除；手工 VerifiedUserEvidence / 跨 broker nonce / 无关
                                  真实事件一律拒绝；未配置验证器 fail-closed；**测试 verifier
                                  逐字段比较完整 EvidenceContext payload（不得只检查
