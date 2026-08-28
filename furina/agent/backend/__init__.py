@@ -4,6 +4,7 @@
 verifier(16F)、持久化 ledger(16H)、C7 commit(16G)；无 MCP backend；无安装/卸载；
 无 C1–C7 / DB 变更。本包为纯数据 + 协议 + 确定性路由，无任何持久化行为。
 """
+from .hermes import HermesConfigurationError, HermesExecutionBackend, HermesProtocolError, HermesTransportError
 from .models import (
     PROTOCOL_VERSION,
     BackendCapabilities,
@@ -39,6 +40,10 @@ __all__ = [
     "DispatchResult",
     "ExecutionBackend",
     "ExecutionBackendRegistry",
+    "HermesConfigurationError",
+    "HermesExecutionBackend",
+    "HermesProtocolError",
+    "HermesTransportError",
     "NativeAgentRuntimeBackend",
     "RouteDecision",
     "RoutingPolicy",
