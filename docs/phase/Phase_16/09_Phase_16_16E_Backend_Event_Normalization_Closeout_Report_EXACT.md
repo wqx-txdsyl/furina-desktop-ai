@@ -2,15 +2,62 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED（Reviewer Patch 3 修复完成 + 全量测试通过，
+STATUS                         = EXECUTED（Reviewer Patch 4 修复完成 + 全量测试通过，
                                  等待外部验收；不声明 16E_PASS）
-BASE_SHA                       = e50d2af3849465f802a9c05a7cc5763269600155
-                                 （Reviewer Patch 2 FINAL_SHA；Patch 3 以此为基；
-                                 Patch 2 基线 a691b59… / 初版基线 7658ab30… 见
-                                 REVIEWER_PATCH_1/2 记录）
+BASE_SHA                       = 73f601ac827a41ca4ca601e76c8c71c76d6f03df
+                                 （Reviewer Patch 3 FINAL_SHA；Patch 4 以此为基；
+                                 Patch 3 基线 e50d2af… / Patch 2 基线 a691b59… /
+                                 初版基线 7658ab30… 见 REVIEWER_PATCH_1/2/3 记录）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，沿用 16A/16B/16D 惯例）
 BRANCH                         = feature/phase16-16e-event-normalization
 LOCAL_REMOTE_MATCH             = push 后核验，结论记录于外部 handoff
+
+REVIEWER_PATCH_4               = 3 组 blocker 全部修复并逐一否证锁定（test_patch4a–4f）：
+                                 1) fallback event_id 不得依赖原始敏感 payload：
+                                    _derive_event_id 改为只由 backend/run 身份、
+                                    canonical kind、sequence 与独立递增的 arrival
+                                    ordinal 派生——**绝不包含/散列/派生自 raw
+                                    payload**（password AAA vs BBB 在同一位置 →
+                                    fallback ID 完全一致；同一 normalizer 连续两个
+                                    相同事件因 arrival 不同而 ID 不同；完整输入流
+                                    重放确定；event_id 摘要结构证明只含非敏感字段；
+                                    event_id/to_dict/provenance 中不存在原始秘密或
+                                    其可公开枚举的普通摘要）；显式上游 event_id
+                                    行为不变；删除"内容寻址"这一不再准确的文档措辞
+                                    （normalizer/reducer/测试/closeout 全部更新）；
+                                 2) lossy sanitization 身份碰撞修复（选择保守方案
+                                    A）：payload 清洗是否丢失/改写了任何原始信息
+                                    （秘密键脱敏、秘密值形态、第 256 字符后截断、
+                                    整体超预算截断、深度/非法值丢弃、控制字符替换、
+                                    bytes 解码类型擦除）由信封 lossy_payload 布尔
+                                    判据明确携带（**只保存布尔判据，绝不保存/导出
+                                    raw secret 或其普通未加密摘要，不使用 keyed
+                                    discriminator——不破坏 fresh normalizer/reducer
+                                    重放确定性**）；event_id 去重与 approval request
+                                    幂等对 lossy 内容保守返回 typed ambiguous
+                                    （event_id_ambiguous / approval_request_ambiguous，
+                                    零状态变更、绝不覆盖 pending）：同 approval_id
+                                    的 password AAA→BBB、仅第 257 字符不同都不得
+                                    判定幂等；同 event_id 不同 secret-bearing
+                                    payload 不得返回 duplicate_event；完全相同、
+                                    非 lossy payload 重投仍保持现有幂等；失败后
+                                    pending 不被覆盖、仍可由原 approval_id resolve；
+                                    不伪造 16D operation_digest、16E 非授权 owner；
+                                 3) 工具身份 lexical contract：tool/tool_name/name/
+                                    toolId 所有别名 strip 后必须规范化一致，且以
+                                    字母/数字开头、仅含 [A-Za-z0-9._:-]、总长
+                                    <=128——内部空白（control-char 经 sanitizer 变为
+                                    空格后同样词法非法）、斜杠、下划线开头及其它
+                                    非法字符一律 tool_identity_invalid
+                                    （TOOL_STARTED/显式 TOOL_PROGRESS/
+                                    TOOL_COMPLETED 共用同一规则）；app.launch/
+                                    browser.open/fs.read_file/fs.write_text/
+                                    doc.create/comm.send_message 正样本通过；
+                                    generic message.delta/reasoning 无工具身份仍为
+                                    合法 self-loop（无回归）；非法事件失败后
+                                    tool_subphase/active_tool/processed_count 不变
+                                 适配：既有 42 项测试全数保留零改动，新增 6 项
+                                 reviewer-locked 否证（test_patch4a–4f），专项 48
 
 REVIEWER_PATCH_3               = 4 组 blocker 全部修复并逐一否证锁定（test_patch3a–3i）：
                                  1) NormalizedEvent 真正 API-immutable（构造完成后
@@ -139,9 +186,16 @@ EVENT_ENVELOPE_MODULE          = furina/agent/events/models.py（NormalizedEvent
                                  backend-neutral 不可变信封，字段至少含 event_id /
                                  backend_id / contract_id / run_id / sequence /
                                  occurred_at / received_at / kind / sanitized payload /
-                                 terminal / critical / provenance；**terminal/critical
+                                 lossy_payload / terminal / critical / provenance；
+                                 **terminal/critical
                                  为派生字段**（由 kind 决定，来源方不得自报，防止
-                                 "完成/成功"自证）；payload 构造时自动脱敏（秘密键
+                                 "完成/成功"自证）；**lossy_payload 为派生判据
+                                 （Reviewer Patch 4）**：payload 清洗是否丢失/改写
+                                 了任何原始信息（秘密键脱敏、秘密值形态、字符串
+                                 第 256 字符后截断、整体超预算截断、深度/非法值
+                                 丢弃、控制字符替换、bytes 解码类型擦除）——只携带
+                                 布尔判据，**绝不保存/导出 raw secret 或其普通未
+                                 加密摘要**；payload 构造时自动脱敏（秘密键
                                  精确词表 + **秘密值形态脱敏**（message/stdout/error/
                                  list 内 Bearer/authorization/password/token/secret/
                                  api_key 键值/头/凭证形态 → [REDACTED]）+ 控制字符
@@ -190,8 +244,11 @@ STATE_REDUCER_MODULE           = furina/agent/events/reducer.py（WorkExecutionR
                                  别名逐一校验等于绑定值；event_id/sequence/时间戳/
                                  kind/payload 多别名同时出现等值允许、冲突值拒绝；
                                  显式出现但类型/范围非法不得当作缺失补值——有否证
-                                 测试）；缺 event_id 时**按到达顺序内容寻址派生
-                                 （fallback id 纳入独立递增的 arrival ordinal——每次
+                                 测试）；缺 event_id 时**按到达顺序派生（fallback id
+                                 只纳入 backend/run 身份、canonical kind、sequence
+                                 与独立递增的 arrival ordinal——**绝不包含/散列/派生
+                                 自 raw payload**（Reviewer Patch 4：低熵秘密不得
+                                 成为可枚举指纹）；每次
                                  到达唯一：显式 sequence 后接缺 sequence、重复显式
                                  sequence、混合流均不得碰撞；同内容两次事件 = 两次
                                  不同事件，不得被误去重）**、缺 sequence 按到达
@@ -230,11 +287,17 @@ DUPLICATE_IDEMPOTENT           = true 且精确化（**event_id→canonical fing
                                  去重：同 id 同内容（身份+kind+清洗后 payload）=
                                  duplicate_event；同 id 不同内容 =
                                  event_id_conflict（typed diagnostic、零变更）；
+                                 **lossy payload 同 id 同 sanitized 内容 →
+                                 event_id_ambiguous（Reviewer Patch 4：秘密脱敏/
+                                 截断/深度或非法值丢弃不得静默当作幂等重投——
+                                 同 event_id 不同 secret-bearing payload 不得返回
+                                 duplicate_event，有否证测试）**；
                                  **被拒绝的事件不烧毁 id**——先非法后满足前置条件
                                  的同一事件可重放（有否证测试）；**只有上游显式
-                                 提供的稳定 event_id 才声明强重投幂等**——内容寻址
-                                 fallback id 已纳入 sequence，仅在同一归一化流位置
-                                 稳定，同内容两次事件是两次不同事件，不得被误去重）
+                                 提供的稳定 event_id 才声明强重投幂等**——fallback
+                                 id 由非敏感字段（backend/run/kind/sequence/arrival）
+                                 派生，仅在同一归一化流位置稳定，同内容两次事件是
+                                 两次不同事件，不得被误去重）
 OUT_OF_ORDER_FAIL_SAFE         = true（终态 CANCELLED/FAILED/VERIFIED/UNKNOWN 吸收：
                                  任何事件（除精确重复 id 与 UNKNOWN/PROTOCOL 纯观察）
                                  → terminal_absorbing:<state>:<kind> typed diagnostic
@@ -255,7 +318,17 @@ TOOL_RUNNING_SUBPHASE          = true 且精确化（TOOL_RUNNING 是子相位�
                                  active_tool 一致（缺失 → tool_identity_invalid、不同
                                  → tool_identity_mismatch，均 typed diagnostic 零变更；
                                  **fs.read active 时 fs.delete completed 不得关闭
-                                 子相位**；工具名不做 [:128] 截断配对，超长拒绝）；
+                                 子相位**；工具名不做 [:128] 截断配对，超长拒绝；
+                                 **工具身份明确 lexical contract（Reviewer Patch 4）：
+                                 tool/tool_name/name/toolId 所有别名 strip 后必须
+                                 规范化一致，且以字母/数字开头、仅含
+                                 [A-Za-z0-9._:-]、总长 <=128——内部空白（control-
+                                 char 经 sanitizer 变为空格后同样词法非法）、斜杠、
+                                 下划线开头及其它非法字符一律 tool_identity_invalid；
+                                 TOOL_STARTED/显式 TOOL_PROGRESS/TOOL_COMPLETED
+                                 共用同一规则；app.launch/browser.open/fs.read_file/
+                                 fs.write_text/doc.create/comm.send_message 正样本
+                                 通过，有否证测试**）；
                                  **TOOL_PROGRESS 无工具身份 = generic stream/progress
                                  tick（Reviewer Patch 3，取代 Patch 2 的"tick 也必须
                                  归因"）**：payload 未携带任何工具身份时在 RUNNING
@@ -293,7 +366,14 @@ PAYLOAD_BOUNDED_REDACTED       = true 且精确化（秘密**键**（password/ap
                                  len(encoded.encode("utf-8"))**——字符数 <= 预算但
                                  字节数超预算的载荷必须截断，original_bytes 记录
                                  真实 UTF-8 bytes；truncation marker 自身也不超
-                                 预算——有否证测试））
+                                 预算——有否证测试）；**lossy 判据（Reviewer
+                                 Patch 4）**：清洗是否丢失/改写原始信息（秘密键
+                                 脱敏、秘密值形态、第 256 字符后截断、整体超预算
+                                 截断、深度/非法值丢弃、控制字符替换、bytes 解码
+                                 类型擦除）由信封 lossy_payload 明确携带——**只保存
+                                 布尔判据，绝不保存/导出 raw secret 或其普通未加密
+                                 摘要**；去重/幂等层对 lossy 内容保守 ambiguous
+                                 （有否证测试））
 APPROVAL_ID_BOUND              = true 且精确化（Reviewer Patch 2 + 3：**approval_id
                                  明确 lexical contract（Patch 3）**——以字母/数字
                                  开头、仅含 [A-Za-z0-9._:-]、总长 <=128；**内部空白/
@@ -313,7 +393,12 @@ APPROVAL_ID_BOUND              = true 且精确化（Reviewer Patch 2 + 3：**ap
                                  pending 除 approval_id 外保存 canonical sanitized
                                  request fingerprint；同 id 但 tool/scope/args/其它
                                  payload 不同 → approval_request_conflict 零变更，
-                                 绝不覆盖 pending，以原请求仍可 approve）**；不同
+                                 绝不覆盖 pending，以原请求仍可 approve；**Patch 4：
+                                 lossy 内容（秘密脱敏/第 256 字符后截断/整体截断/
+                                 深度或非法值丢弃）同 id 同 sanitized 内容 →
+                                 approval_request_ambiguous 零变更、绝不覆盖
+                                 pending——同 approval_id 的 password AAA→BBB、仅
+                                 第 257 字符不同都不得判定幂等，有否证测试）**；不同
                                  approval_id 请求为 approval_id_conflict（零变更，
                                  **绝不覆盖 pending**）；**resolution 后同时清除
                                  pending id 与 fingerprint（Patch 3）**；
@@ -346,28 +431,33 @@ DETERMINISTIC_REPLAY           = true 且精确化（同一事件流在全新 re
                                  有否证测试）+ fingerprint 去重 + 纯转移表 + 注入
                                  时钟；同 reducer 重投整流（上游稳定 id）→ 全部
                                  duplicate 且状态与计数不变；processed_count/
-                                 max_sequence 确定性观测）
+                                 max_sequence 确定性观测；**lossy 判据不破坏确定性
+                                 （Reviewer Patch 4）**：lossy_payload 由清洗树
+                                 确定性推导（无实例随机 key——选择保守方案 A 而非
+                                 keyed discriminator），fresh normalizer/reducer
+                                 重放同一完整事件流产生相同状态转移结果，有否证
+                                 测试）
 
 C1_C7_SCHEMA_CHANGED           = false
 PRODUCTION_FILES_CHANGED       = 仅 furina/agent/events/ 包内自有模块
                                  （models.py / normalizer.py / reducer.py）——
-                                 Reviewer Patch 3 只修改这三个生产模块 + 16E 测试；
-                                 未修改任何其它生产文件（16A work_contract.py /
-                                 16B backend/ / 16D approval/ / agent_runtime.py /
-                                 permission.py / app.py 等零改动；16A/16B/16D
-                                 frozen contracts 未触碰）
+                                 Reviewer Patch 4 只修改这三个生产模块 + 16E 测试
+                                 + closeout；未修改任何其它生产文件（16A
+                                 work_contract.py / 16B backend/ / 16D approval/ /
+                                 agent_runtime.py / permission.py / app.py 等零改动；
+                                 16A/16B/16D frozen contracts 未触碰）
 TEST_FILES_CHANGED             = 仅新增 tests/agent/integration/test_phase16e_event_normalization.py
-                                 （42 个测试函数 = 任务书 §7 十二项 + 额外锁定 4 项
+                                 （48 个测试函数 = 任务书 §7 十二项 + 额外锁定 4 项
                                  + Reviewer Patch 1 否证 7 项 + Reviewer Patch 2
-                                 否证 5 项 + Reviewer Patch 3 否证 9 项；既有 33 项
-                                 全数保留，仅 test_patch2e 一条断言按 Patch 3 强制
-                                 新语义适配——『TOOL_PROGRESS 缺身份 → 拒绝』改为
-                                 『无身份 → generic tick 合法 self-loop』，其余 32 项
-                                 零改动）
+                                 否证 5 项 + Reviewer Patch 3 否证 9 项 + Reviewer
+                                 Patch 4 否证 6 项；既有 42 项全数保留零改动，
+                                 Patch 3 对 test_patch2e 一条断言的语义适配保留）
 TARGETED_TESTS                 = tests/agent/integration/test_phase16e_event_normalization.py：
-                                 42 passed（Reviewer Patch 3 否证 9 项 test_patch3a–3i
-                                 覆盖 4 组 blocker；既有 33 项除上述一条必然语义适配
-                                 外零改动全过）。任务书
+                                 48 passed（Reviewer Patch 4 否证 6 项 test_patch4a–4f
+                                 覆盖 3 组 blocker；Reviewer Patch 3 否证 9 项
+                                 test_patch3a–3i
+                                 覆盖 4 组 blocker；既有 42 项除 Patch 3 那一条必然
+                                 语义适配外零改动全过）。任务书
                                  §7 十二项逐项锁定：
                                  1) 完整合法转移表（LEGAL_TRANSITIONS 逐行 + approval
                                     outcome 分支（approval_id 绑定）+ verification
@@ -418,10 +508,12 @@ TARGETED_TESTS                 = tests/agent/integration/test_phase16e_event_nor
                                  更严格语义的适配说明）
                                  Reviewer Patch 3 否证（9 项，见 REVIEWER_PATCH_3
                                  逐条对应 test_patch3a–3i）
+                                 Reviewer Patch 4 否证（6 项，见 REVIEWER_PATCH_4
+                                 逐条对应 test_patch4a–4f）
 AGENT_EVENT_REGRESSION         = pytest tests/agent tests/test_agent_tools.py
-                                 tests/test_skeleton.py：358 passed
+                                 tests/test_skeleton.py：364 passed
                                  （15 warnings 为既有线程 ResourceWarning 类告警，
-                                 与本阶段无关；16D 的 316 + 16E 专项 42 = 358）；
+                                 与本阶段无关；16D 的 316 + 16E 专项 48 = 364）；
                                  另跑 16A/16B/16D 专项
                                  tests/agent/integration/test_phase16b_execution_backend.py
                                  test_phase16a_work_contract.py
@@ -430,10 +522,10 @@ AGENT_EVENT_REGRESSION         = pytest tests/agent tests/test_agent_tools.py
 COGNITION_SUITE                = pytest tests/cognition：279 passed（Phase 15
                                  cognition/store 契约不变；events 包零 cognition
                                  依赖有专项断言）
-FULL_SUITE                     = .venv/Scripts/python.exe -m pytest -q：1603 passed,
-                                 0 failed（220.29s，exit 0），较 Patch 2 的 1594 恰
-                                 +9（16E Patch 3 新增否证；Patch 2 的 1594 较
-                                 Patch 1 的 1589 恰 +5）。
+FULL_SUITE                     = .venv/Scripts/python.exe -m pytest -q：1609 passed,
+                                 0 failed（235.92s，exit 0），较 Patch 3 的 1603 恰
+                                 +6（16E Patch 4 新增否证；Patch 3 的 1603 较
+                                 Patch 2 的 1594 恰 +9）。
                                  GUI flake 说明：16E 初版曾出现一次
                                  tests/test_gui_integration.py::
                                  test_gui_timer_advances_runtime 失败（Qt 定时器在
@@ -462,7 +554,16 @@ REMAINING_GAPS                 = 1) 按 brief 无 Hermes(16C)/verifier+repair(16
                                    **明确 lexical contract** 拒绝清洗后的内部空格
                                    （"ap\x00bad"→"ap bad"→approval_id_invalid，
                                    有否证测试）——不再有"control-char 经清洗后
-                                   被当作合法 id"的路径
+                                   被当作合法 id"的路径；
+                                   7) 说明（Reviewer Patch 4 更新）：lossy 内容
+                                   （含秘密字段的 payload）重投保守返回 typed
+                                   ambiguous——即使是**完全相同**的含秘密 payload
+                                   重投也不再判定幂等（无法在不保存 raw secret 或
+                                   其普通未加密摘要的前提下确认 raw 相同；这是
+                                   保守方案 A 的有意取舍，任务书明确允许；选择 A
+                                   而非 keyed discriminator 以保持 fresh
+                                   normalizer/reducer 重放确定性；如需强重投幂等，
+                                   上游应提供稳定 event_id + 非 lossy payload）
 READY_FOR_REVIEW               = YES
 ```
 

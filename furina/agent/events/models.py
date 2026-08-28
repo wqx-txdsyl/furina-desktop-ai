@@ -21,7 +21,7 @@ import math
 import re
 import time
 from types import MappingProxyType
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Tuple
 
 from furina.core import FurinaError
 
@@ -199,16 +199,27 @@ _AUTH_SCHEME_TOKEN_RE = re.compile(
     r"(?i)(?<![a-z0-9_])(bearer|basic|digest)\s+([a-z0-9._~+/=-]{3,})")
 
 
-def _redact_secret_values(text: str) -> str:
+def _redact_secret_values_lossy(text: str) -> Tuple[str, bool]:
     """字符串内的秘密值形态脱敏（保留标签、替换秘密部分为 [REDACTED]）。
 
     顺序：authorization 整行优先（贪婪吞掉头值）→ 键值形态 → 独立
-    Bearer/Basic 凭证形态。任何替换后都不含原文秘密。
+    Bearer/Basic 凭证形态。任何替换后都不含原文秘密。返回 ``(脱敏文本, lossy)``
+    ——**任一替换发生即 lossy**（原始值已丢失，脱敏结果无法与字面量文本区分，
+    去重/幂等层不得把这样的 payload 静默当作相同内容）。
     """
-    text = _AUTHORIZATION_LINE_RE.sub(r"\1: [REDACTED]", text)
-    text = _KEY_VALUE_SECRET_RE.sub(r"\1\2 [REDACTED]", text)
-    text = _AUTH_SCHEME_TOKEN_RE.sub(r"\1 [REDACTED]", text)
-    return text
+    changed = False
+    text, n = _AUTHORIZATION_LINE_RE.subn(r"\1: [REDACTED]", text)
+    changed |= n > 0
+    text, n = _KEY_VALUE_SECRET_RE.subn(r"\1\2 [REDACTED]", text)
+    changed |= n > 0
+    text, n = _AUTH_SCHEME_TOKEN_RE.subn(r"\1 [REDACTED]", text)
+    changed |= n > 0
+    return text, changed
+
+
+def _redact_secret_values(text: str) -> str:
+    """兼容包装：只返回脱敏文本（lossy 判定见 *_lossy 变体）。"""
+    return _redact_secret_values_lossy(text)[0]
 
 
 def _validate_payload_budget(value: Any) -> int:
@@ -224,41 +235,103 @@ def _validate_payload_budget(value: Any) -> int:
     return value
 
 
-def _sanitize_value(value: Any, depth: int) -> Any:
-    """递归清洗：秘密脱敏 / 控制字符清除 / 字符串限长 / JSON-safe 化 / 深度有界。"""
+def _sanitize_value_lossy(value: Any, depth: int) -> Tuple[Any, bool]:
+    """递归清洗 + lossy 判定：返回 ``(清洗值, lossy)``。
+
+    秘密脱敏 / 控制字符替换 / 字符串截断 / 深度截断 / 非 JSON-safe 值丢弃 /
+    非有限浮点 / bytes 解码（类型擦除）等任何**原始信息丢失或改写**都记为
+    lossy——清洗结果相同不代表 raw 相同，去重/幂等层必须保守处理。
+    """
     if depth > _MAX_DEPTH:
-        return None
+        return None, True
     if isinstance(value, str):
-        s = _redact_secret_values(value)
-        s = _CTRL_RE.sub(" ", s)
-        return s[:_STRING_CAP] if len(s) > _STRING_CAP else s
+        s, l_redact = _redact_secret_values_lossy(value)
+        cleaned, n_ctrl = _CTRL_RE.subn(" ", s)
+        truncated = len(cleaned) > _STRING_CAP
+        return (cleaned[:_STRING_CAP] if truncated else cleaned), \
+            (l_redact or n_ctrl > 0 or truncated)
     if isinstance(value, bool):
-        return value
+        return value, False
     if isinstance(value, int):
-        return value
+        return value, False
     if isinstance(value, float):
-        return value if math.isfinite(value) else None
+        return (value, False) if math.isfinite(value) else (None, True)
     if value is None:
-        return None
+        return None, False
     if isinstance(value, Mapping):
         out: dict = {}
+        lossy = False
         for k, v in value.items():
             if not isinstance(k, str):
+                lossy = True
                 continue
-            key = _CTRL_RE.sub(" ", k)[:128]
+            cleaned_key, n_ctrl = _CTRL_RE.subn(" ", k)
+            key = cleaned_key[:128]
+            if n_ctrl > 0 or len(cleaned_key) > 128:
+                lossy = True
             if _is_secret_key(key):
                 out[key] = "[REDACTED]"
+                lossy = True
             else:
-                cleaned = _sanitize_value(v, depth + 1)
+                cleaned, lv = _sanitize_value_lossy(v, depth + 1)
                 if cleaned is None and v is not None:
-                    continue   # 非 JSON-safe 值丢弃整键（不把任意 repr 泄入信封）
+                    lossy = True   # 非 JSON-safe 值丢弃整键（不把任意 repr 泄入信封）
+                    continue
                 out[key] = cleaned
-        return out
+                lossy = lossy or lv
+        return out, lossy
     if isinstance(value, (list, tuple)):
-        return [_sanitize_value(v, depth + 1) for v in value]
+        out_list = []
+        lossy = False
+        for v in value:
+            cleaned, lv = _sanitize_value_lossy(v, depth + 1)
+            out_list.append(cleaned)
+            lossy = lossy or lv
+        return out_list, lossy
     if isinstance(value, (bytes, bytearray)):
-        return _sanitize_value(value.decode("utf-8", errors="replace"), depth + 1)
-    return None   # 其它对象一律丢弃（不把任意 repr 泄入信封）
+        try:
+            s = value.decode("utf-8")
+        except UnicodeDecodeError:
+            s = value.decode("utf-8", errors="replace")
+        cleaned, lv = _sanitize_value_lossy(s, depth + 1)
+        return cleaned, True   # bytes→str 类型擦除：raw 无法从清洗结果唯一复原
+    return None, True   # 其它对象一律丢弃（类型已丢失，一律 lossy）
+
+
+def _sanitize_payload_lossy(payload: Any, *, max_bytes: int) -> Tuple[Mapping[str, Any], bool]:
+    """payload 脱敏 + 有界大小 + lossy 判定：返回 ``(JSON-safe dict, lossy)``。
+
+    ``sanitize_payload`` 的 lossy 变体：清洗的同时判定是否丢失/改写了任何原始
+    信息（秘密脱敏、截断、深度/非法值丢弃、bytes 解码等）。超预算截断与序列化
+    失败同样记为 lossy。lossy 判定由信封携带（``NormalizedEvent.lossy_payload``），
+    供去重/幂等层保守处理——**绝不保存或导出 raw secret 或其普通未加密摘要**。
+    """
+    budget = _validate_payload_budget(max_bytes)
+    if payload is None:
+        tree: dict = {}
+        lossy = False
+    elif not isinstance(payload, Mapping):
+        raise EventNormalizationError(
+            f"payload 必须是 Mapping 或 None，得到 {type(payload).__name__}"
+            "（非 Mapping 显式载荷一律拒绝，不静默替换为 {}）")
+    else:
+        tree, lossy = _sanitize_value_lossy(payload, 0)
+    if not isinstance(tree, dict):
+        tree, lossy = {}, True
+    try:
+        encoded = json.dumps(tree, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                             default=str)
+    except Exception as exc:  # noqa: BLE001 —— 防御性：确定性清洗树不应序列化失败
+        return {"_truncated": True, "byte_budget": budget,
+                "original_bytes": -1, "reason": type(exc).__name__}, True
+    encoded_bytes = encoded.encode("utf-8")
+    if len(encoded_bytes) > budget:
+        return {
+            "_truncated": True,
+            "byte_budget": budget,
+            "original_bytes": len(encoded_bytes),
+        }, True
+    return tree, lossy
 
 
 def sanitize_payload(payload: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Mapping[str, Any]:
@@ -271,31 +344,10 @@ def sanitize_payload(payload: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Ma
     - payload 必须是 **Mapping 或 None**（None = 合法空 payload）；list/str/int/
       任意对象等非 Mapping 显式载荷一律 EventNormalizationError——**不静默替换为 {}**
       （Reviewer Patch 3：Typed BackendEvent payload exactness）。
+    - 清洗是否丢失原始信息（lossy）由 :func:`_sanitize_payload_lossy` 判定并供
+      信封携带（Reviewer Patch 4）；本函数保持既有契约只返回清洗树。
     """
-    budget = _validate_payload_budget(max_bytes)
-    if payload is None:
-        tree: dict = {}
-    elif not isinstance(payload, Mapping):
-        raise EventNormalizationError(
-            f"payload 必须是 Mapping 或 None，得到 {type(payload).__name__}"
-            "（非 Mapping 显式载荷一律拒绝，不静默替换为 {}）")
-    else:
-        tree = _sanitize_value(payload, 0)
-    if not isinstance(tree, dict):
-        tree = {}
-    try:
-        encoded = json.dumps(tree, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
-                             default=str)
-    except Exception as exc:  # noqa: BLE001 —— 防御性：确定性清洗树不应序列化失败
-        return {"_truncated": True, "byte_budget": budget,
-                "original_bytes": -1, "reason": type(exc).__name__}
-    encoded_bytes = encoded.encode("utf-8")
-    if len(encoded_bytes) > budget:
-        return {
-            "_truncated": True,
-            "byte_budget": budget,
-            "original_bytes": len(encoded_bytes),
-        }
+    tree, _ = _sanitize_payload_lossy(payload, max_bytes=max_bytes)
     return tree
 
 
@@ -354,6 +406,7 @@ class NormalizedEvent:
         "_critical",
         "_event_id",
         "_kind",
+        "_lossy_payload",
         "_occurred_at",
         "_payload",
         "_provenance",
@@ -392,8 +445,13 @@ class NormalizedEvent:
         object.__setattr__(self, "_occurred_at", _finite_ts(occurred_at, "occurred_at"))
         object.__setattr__(self, "_received_at", _finite_ts(received_at, "received_at"))
         object.__setattr__(self, "_kind", kind)
-        object.__setattr__(self, "_payload", deep_freeze(sanitize_payload(
-            payload, max_bytes=_validate_payload_budget(max_payload_bytes))))
+        sanitized, lossy = _sanitize_payload_lossy(
+            payload, max_bytes=_validate_payload_budget(max_payload_bytes))
+        object.__setattr__(self, "_payload", deep_freeze(sanitized))
+        #: 清洗是否丢失/改写了任何原始信息（秘密脱敏/截断/深度或非法值丢弃等）。
+        #: **只保存布尔判据，绝不保存 raw secret 或其普通未加密摘要**；供去重/
+        #: 幂等层保守处理——lossy 内容不得静默当作幂等重投。
+        object.__setattr__(self, "_lossy_payload", lossy)
         object.__setattr__(self, "_terminal", kind in TERMINAL_KINDS)
         object.__setattr__(self, "_critical", classify_priority(kind) is EventPriority.CRITICAL)
         object.__setattr__(self, "_provenance", _clean_id(provenance, "provenance"))
@@ -445,6 +503,12 @@ class NormalizedEvent:
         return self._payload
 
     @property
+    def lossy_payload(self) -> bool:
+        """payload 清洗是否 lossy（Reviewer Patch 4）：脱敏/截断/丢弃等是否丢失
+        或改写了任何原始信息。只携带布尔判据，**不含 raw secret 或其摘要**。"""
+        return self._lossy_payload
+
+    @property
     def terminal(self) -> bool:
         return self._terminal
 
@@ -469,6 +533,7 @@ class NormalizedEvent:
             "received_at": self._received_at,
             "kind": self._kind.value,
             "payload": deep_freeze(dict(self._payload)),
+            "lossy_payload": self._lossy_payload,
             "terminal": self._terminal,
             "critical": self._critical,
             "provenance": self._provenance,

@@ -14,10 +14,12 @@ Master Plan §5A/§10 词表（工作域状态，**绝不写 C7**）：
   typed diagnostic，零状态变更）——不得以 provenance 字符串或 Python _private 属性
   冒充 authority；16F 建立真实 verifier 后由组合根注入权威通道再开放。
 - duplicate event_id 幂等：``event_id → canonical fingerprint`` 去重——同 id 同内容
-  为 duplicate、同 id 不同内容为 ``event_id_conflict``；**被拒绝的事件（非法转移/
-  终态吸收/冲突等）不烧毁 id**——前置条件满足后同一事件可重放；乱序不能回退终态
-  （终态吸收：CANCELLED/FAILED/VERIFIED/UNKNOWN 不接受任何转移，reconnect/progress
-  不得复活）；
+  为 duplicate、同 id 不同内容为 ``event_id_conflict``；**payload 清洗 lossy
+  （Reviewer Patch 4）时同 id 同 sanitized 内容保守返回 ``event_id_ambiguous``
+  （无法确认 raw 是否相同——秘密脱敏/截断/丢弃不得静默当作幂等重投）**；
+  **被拒绝的事件（非法转移/终态吸收/冲突等）不烧毁 id**——前置条件满足后同一
+  事件可重放；乱序不能回退终态（终态吸收：CANCELLED/FAILED/VERIFIED/UNKNOWN
+  不接受任何转移，reconnect/progress 不得复活）；
 - 身份绑定：构造绑定 backend_id/run_id/contract_id，事件任一不匹配 raise
   ``WorkExecutionError``（normalizer 对身份不一致同样拒绝，禁止静默改绑）；
 - approval.requested/resolved **必须绑定 approval_id**（**精确绑定，无 [:128] 截断**：
@@ -29,7 +31,10 @@ Master Plan §5A/§10 词表（工作域状态，**绝不写 C7**）：
   （approval_id_mismatch typed diagnostic，零变更）；**WAITING_PERMISSION 中
   幂等观察 = 同 approval_id + 同请求内容（除 approval_id 外保存 canonical
   sanitized request fingerprint；同 id 异内容 → approval_request_conflict 零变更
-  —绝不覆盖 pending；resolution 后同时清除 pending id 与 fingerprint）**；不同
+  —绝不覆盖 pending；**payload 清洗 lossy（Reviewer Patch 4）时同 id 同 sanitized
+  内容保守返回 approval_request_ambiguous（秘密脱敏/第 256 字符后截断/整体截断/
+  深度或非法值丢弃不得静默当作幂等重投）**；resolution 后同时清除 pending id 与
+  fingerprint）**；不同
   approval_id 请求为 approval_id_conflict（零变更，绝不覆盖 pending）；
   **outcome/decision/resolution/result 所有已出现别名规范化一致（approve≈approved
   等价；approve 与 deny/timeout 冲突 → outcome_conflict typed rejection 零状态
@@ -39,14 +44,20 @@ Master Plan §5A/§10 词表（工作域状态，**绝不写 C7**）：
 - ``TOOL_RUNNING`` 是**子相位**（primary + tool_subphase/active_tool 分离快照），
   绝不覆盖/销毁 enclosing run state；TOOL_STARTED/TOOL_COMPLETED 是不可丢/不可
   合并的生命周期边界（critical）；**工具身份配对**：TOOL_STARTED 必须建立非空
-  active_tool；TOOL_COMPLETED 的工具身份必须与 active_tool 一致；**TOOL_PROGRESS
+  active_tool；TOOL_COMPLETED 的工具身份必须与 active_tool 一致；**工具身份
+  明确 lexical contract（Reviewer Patch 4）**：tool/tool_name/name/toolId 所有
+  别名 strip 后必须规范化一致，且以字母/数字开头、仅含 [A-Za-z0-9._:-]、总长
+  <=128——内部空白（含 control-char 经 sanitizer 变为空格后）、斜杠、下划线
+  开头及其它非法字符一律 tool_identity_invalid（TOOL_STARTED/显式 TOOL_PROGRESS/
+  TOOL_COMPLETED 共用同一规则）；**TOOL_PROGRESS
   （Reviewer Patch 3）：payload 显式携带工具身份时必须与 active_tool 精确匹配
   （缺失/不同 → tool_identity_invalid/tool_identity_mismatch typed diagnostic、
   零状态变更——fs.read active 时 fs.delete completed 不得关闭子相位）；payload
   未携带任何工具身份时作为 generic stream/progress tick（message.delta/reasoning/
   reasoning.delta 无 tool 字段的真实 fixture）——RUNNING 中合法 self-loop，不建立、
   不关闭、不改变 tool_subphase，永不产生终态或 VERIFIED**；
-- 同一事件流重放结果完全一致（确定性：内容寻址 id + 纯转移表 + 注入时钟）。
+- 同一事件流重放结果完全一致（确定性：非敏感字段派生的 fallback id + 纯转移表
+  + 注入时钟；lossy 判据只影响同一会话内的去重/幂等裁决，不改变状态转移本身）。
 
 本模块不执行 Hermes、不写 C6/C7、不实现 verifier/repair/recovery（16F/16H/16G 拥有）。
 """
@@ -64,7 +75,6 @@ from .models import (
     EventKind,
     NormalizedEvent,
     WorkExecutionError,
-    _CTRL_RE,
 )
 
 
@@ -296,6 +306,12 @@ def _vb_outcome(payload: Mapping[str, Any]) -> str:
 
 _TOOL_IDENTITY_KEYS = ("tool", "tool_name", "name", "toolId")
 _TOOL_IDENTITY_MAX_LEN = 128
+#: 工具身份明确 lexical contract（Reviewer Patch 4）：以字母/数字开头，仅含
+#: ``[A-Za-z0-9._:-]``，总长 <=128（兼容 app.launch / browser.open / fs.read_file /
+#: fs.write_text / doc.create / comm.send_message 等真实工具名）。内部空白一律词法
+#: 非法——control-char 经信封 sanitizer 变成空格后同样被拒（``"fs.read\\x00file"``
+#: 清洗为 ``"fs.read file"`` → 拒绝）；斜杠/下划线开头/其它非法字符一律拒绝。
+_TOOL_IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$")
 _APPROVAL_ID_KEYS = ("approval_id", "approvalId", "request_id", "requestId")
 _APPROVAL_ID_MAX_LEN = 128
 #: approval_id 明确 lexical contract（Reviewer Patch 3）：以字母/数字开头，仅含
@@ -308,9 +324,15 @@ _APPROVAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$")
 def _tool_identity(payload: Mapping[str, Any]) -> Tuple[bool, Optional[str]]:
     """payload 中的工具身份：返回 ``(present, value)``（Reviewer Patch 3 三态）。
 
+    **明确 lexical contract（Reviewer Patch 4）**：以字母/数字开头、仅含
+    ``[A-Za-z0-9._:-]``、总长 <=128；内部空白（control-char 经信封 sanitizer
+    变为空格后同样词法非法）、斜杠、下划线开头及其它非法字符一律拒绝；所有
+    别名（tool/tool_name/name/toolId）strip 后必须规范化一致。TOOL_STARTED /
+    显式 TOOL_PROGRESS / TOOL_COMPLETED 共用同一规则。
+
     - ``(False, None)``：payload **未携带任何**工具身份字段（generic progress tick）；
-    - ``(True, str)``：唯一合法身份（非空 str、无控制字符、<=128、多别名等值）；
-    - ``(True, None)``：显式携带但**非法**（非 str / 空 / 控制字符 / 超长 /
+    - ``(True, str)``：唯一合法身份（非空 str、词法合法、<=128、多别名等值）；
+    - ``(True, None)``：显式携带但**非法**（非 str / 空 / 词法非法 / 超长 /
       多别名冲突）。
     """
     present = [k for k in _TOOL_IDENTITY_KEYS if k in payload]
@@ -322,7 +344,7 @@ def _tool_identity(payload: Mapping[str, Any]) -> Tuple[bool, Optional[str]]:
         if not isinstance(v, str) or not v.strip():
             return True, None
         s = v.strip()
-        if _CTRL_RE.search(s) or len(s) > _TOOL_IDENTITY_MAX_LEN:
+        if len(s) > _TOOL_IDENTITY_MAX_LEN or not _TOOL_IDENTITY_PATTERN.match(s):
             return True, None
         if value is not None and s != value:
             return True, None
@@ -380,6 +402,8 @@ def _event_fingerprint(event: NormalizedEvent) -> str:
     只取**语义内容**（身份 + kind + 清洗后 payload），排除 sequence/时间戳等
     投递元数据——上游稳定 event_id 的重投（到达时间/补序位置不同）仍视为同内容；
     同一 id 复用为不同语义事件（kind/payload/身份变化）则判定 event_id_conflict。
+    **payload 清洗 lossy 时（Reviewer Patch 4），同 id 同 fingerprint 保守判定为
+    event_id_ambiguous 而非 duplicate**——清洗结果相同不代表 raw 相同。
     """
     canon = json.dumps(_plain_tree(event.payload), sort_keys=True, ensure_ascii=False,
                        default=str)
@@ -391,15 +415,18 @@ class WorkExecutionReducer:
     """每 run 一个的确定性工作域状态机（构造绑定 backend_id+run_id+contract_id）。
 
     ``reduce(event)`` 处理一个 canonical 信封：event_id→fingerprint 去重（同 id
-    同内容 duplicate、同 id 不同内容 conflict）；非法转移/终态吸收/审批身份不匹配
+    同内容 duplicate、同 id 不同内容 conflict、**lossy payload 同 id 同内容 →
+    event_id_ambiguous**）；非法转移/终态吸收/审批身份不匹配
     返回 typed diagnostic 且**零状态变更、不烧毁 event_id**（前置条件满足后可重放）；
     审批 resolved 必须匹配当前挂起 approval_id（精确绑定、词法校验、无截断；
-    WAITING 中同 id **且同请求内容**重投幂等观察、同 id 异内容 typed conflict、
+    WAITING 中同 id **且同请求内容**重投幂等观察（**lossy 内容 → 
+    approval_request_ambiguous，不判定幂等**）、同 id 异内容 typed conflict、
     异 id conflict，均零变更不覆盖 pending）；outcome 别名一致性（冲突
     outcome_conflict、非法/未知 fail-closed、approve≈approved 等价）；工具事件按
-    active_tool 精确配对（TOOL_PROGRESS 无身份 = generic tick self-loop、显式身份
-    必须匹配）；``VERIFICATION_BOUNDARY(verified)`` 在 16E 阶段 fail-closed
-    （VERIFIED 不可由公开事件抵达）。同一事件流在全新 reducer 上重放结果完全一致。
+    active_tool 精确配对（**工具身份明确 lexical contract**；TOOL_PROGRESS 无身份
+    = generic tick self-loop、显式身份必须匹配）；``VERIFICATION_BOUNDARY(verified)``
+    在 16E 阶段 fail-closed（VERIFIED 不可由公开事件抵达）。同一事件流在全新
+    reducer 上重放结果完全一致。
     """
 
     def __init__(self, run_id: str, contract_id: str, *,
@@ -414,11 +441,17 @@ class WorkExecutionReducer:
         self._now_fn = now_fn or (lambda: time.time())
         self._view = WorkExecutionView(primary=WorkExecutionState.IDLE)
         self._seen: Dict[str, str] = {}
+        #: 已接受事件是否 lossy 清洗（Reviewer Patch 4）：与 _seen 同步记录——
+        #: lossy 内容的重投不得静默判定 duplicate。
+        self._seen_lossy: Dict[str, bool] = {}
         self._pending_approval_id: Optional[str] = None
         #: 挂起请求的 canonical sanitized fingerprint（Reviewer Patch 3）：除
         #: approval_id 外保存请求内容——WAITING 中『同 approval_id + 同请求内容』
         #: 才是幂等观察；resolution 后与 pending id 一并清除。
         self._pending_approval_fingerprint: Optional[str] = None
+        #: 挂起请求是否 lossy 清洗（Reviewer Patch 4）：lossy 请求（秘密脱敏/截断/
+        #: 深度或非法值丢弃）的重投保守返回 approval_request_ambiguous，不判定幂等。
+        self._pending_approval_lossy: bool = False
 
     # -- 身份与快照 --------------------------------------------------------------
     @property
@@ -458,6 +491,13 @@ class WorkExecutionReducer:
         seen_fp = self._seen.get(event.event_id)
         if seen_fp is not None:
             if seen_fp == _event_fingerprint(event):
+                if self._seen_lossy.get(event.event_id, False) or event.lossy_payload:
+                    # Reviewer Patch 4：同 id 同 sanitized 内容但任一侧经过 lossy
+                    # 清洗（秘密脱敏/截断/深度或非法值丢弃）——无法确认 raw 是否
+                    # 相同，保守 ambiguous 而非 duplicate（低熵秘密不得被静默去重）。
+                    return ReduceResult(view=self._view, applied=False,
+                                        diagnostic=f"event_id_ambiguous:{event.event_id}",
+                                        kind=event.kind)
                 return ReduceResult(view=self._view, applied=False,
                                     diagnostic=f"duplicate_event:{event.event_id}",
                                     kind=event.kind)
@@ -471,6 +511,7 @@ class WorkExecutionReducer:
             return ReduceResult(view=self._view, applied=False, diagnostic=diag,
                                 kind=event.kind)
         self._seen[event.event_id] = _event_fingerprint(event)
+        self._seen_lossy[event.event_id] = event.lossy_payload
         v = self._view
         self._view = WorkExecutionView(
             primary=primary,
@@ -519,6 +560,7 @@ class WorkExecutionReducer:
                            WorkExecutionState.BLOCKED_APPROVAL):
                 self._pending_approval_id = rid
                 self._pending_approval_fingerprint = _request_fingerprint(event.payload)
+                self._pending_approval_lossy = event.lossy_payload
                 return WorkExecutionState.WAITING_PERMISSION, False, "", True, ""
             # WAITING_PERMISSION：幂等观察 = **同 approval_id 且同请求内容**
             # （Reviewer Patch 3）；异 id → approval_id_conflict、同 id 异内容 →
@@ -529,6 +571,13 @@ class WorkExecutionReducer:
             if _request_fingerprint(event.payload) != self._pending_approval_fingerprint:
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"approval_request_conflict:{primary.value}:{kind.value}"
+            # Reviewer Patch 4：同 id 同 sanitized 内容但任一侧经过 lossy 清洗
+            # （secret 字段 → [REDACTED]、第 256 字符后截断、整体截断/深度/非法值
+            # 丢弃）——无法确认 raw 是否相同，保守 ambiguous、零状态变更、绝不覆盖
+            # pending（低熵秘密不得被静默当作幂等重投）。
+            if self._pending_approval_lossy or event.lossy_payload:
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"approval_request_ambiguous:{primary.value}:{kind.value}"
             return primary, v.tool_subphase, v.active_tool, True, ""
 
         # 审批结果（approval_id 精确绑定；outcome 别名一致性——Reviewer Patch 3）。
@@ -554,9 +603,10 @@ class WorkExecutionReducer:
                     return primary, v.tool_subphase, v.active_tool, False, \
                         f"illegal_transition:{primary.value}:{kind.value}:outcome:{outcome}"
                 assert outcome in ("approve", "deny", "timeout")
-                # 合法消费即销毁（一次性）：同时清除 pending id 与 fingerprint。
+                # 合法消费即销毁（一次性）：同时清除 pending id / fingerprint / lossy。
                 self._pending_approval_id = None
                 self._pending_approval_fingerprint = None
+                self._pending_approval_lossy = False
                 if outcome == "approve":
                     return WorkExecutionState.RUNNING, False, "", True, ""
                 return WorkExecutionState.BLOCKED_APPROVAL, False, "", True, ""

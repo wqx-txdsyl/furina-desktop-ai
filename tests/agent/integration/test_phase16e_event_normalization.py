@@ -75,9 +75,35 @@ Reviewer Patch 3 否证（test_patch3a–3i）：
 - Typed BackendEvent payload exactness：payload None = 合法空 payload、Mapping =
   正常归一；list/str/int/任意对象等非 Mapping 显式载荷一律 EventNormalizationError，
   不静默替换为 {}（信封构造与 sanitize_payload 双入口同样 fail-closed）。
+
+Reviewer Patch 4 否证（test_patch4a–4f）：
+- **fallback event_id 不依赖 raw payload**（秘密低熵指纹修复）：fallback id 只由
+  backend/run 身份、canonical kind、sequence 与独立递增的 arrival ordinal 派生，
+  **绝不包含/散列 raw payload**（password AAA vs BBB 在同一位置 → 完全相同 id；
+  同一 normalizer 连续两个相同事件因 arrival 不同而 id 不同；完整输入流重放确定；
+  event_id/to_dict/provenance 中不存在原始秘密或其可公开枚举的普通摘要；"内容寻址"
+  措辞已删除）；
+- **lossy sanitization 身份碰撞修复**：payload 清洗是否丢失原始信息（秘密脱敏 /
+  第 256 字符后截断 / 整体超预算截断 / 深度或非法值丢弃 / 控制字符替换 / bytes
+  解码）由信封 ``lossy_payload`` 明确携带；event_id 去重与 approval request 幂等
+  对 lossy 内容保守返回 typed ambiguous（event_id_ambiguous /
+  approval_request_ambiguous，零状态变更）——同 approval_id 的 password AAA→BBB、
+  仅第 257 字符不同都不得判定幂等；同 event_id 不同 secret-bearing payload 不得
+  返回 duplicate_event；完全相同、非 lossy payload 重投仍保持现有幂等；失败后
+  pending 不被覆盖、仍可由原 approval_id resolve；**绝不保存/导出 raw secret 或
+  其普通未加密摘要**（选择保守方案 A：lossy 重投 ambiguous，不使用 keyed
+  discriminator；不破坏 fresh normalizer/reducer 重放确定性）；
+- **工具身份 lexical contract**：tool/tool_name/name/toolId 所有别名 strip 后必须
+  规范化一致，且以字母/数字开头、仅含 [A-Za-z0-9._:-]、总长 <=128——内部空白
+  （含 control-char 经 sanitizer 变为空格后）、斜杠、下划线开头及其它非法字符一律
+  tool_identity_invalid（TOOL_STARTED/显式 TOOL_PROGRESS/TOOL_COMPLETED 共用同一
+  规则）；app.launch/browser.open/fs.read_file/fs.write_text/doc.create/
+  comm.send_message 正样本通过；generic message.delta/reasoning 无工具身份仍为
+  合法 self-loop；非法事件失败后 tool_subphase/active_tool/processed_count 不变。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -965,8 +991,8 @@ def test_patch1c_event_id_fingerprint_duplicate_conflict_replay():
 # B4. fallback event_id 纳入 sequence
 def test_patch1d_fallback_event_id_sequence_distinct():
     """reviewer B4：fallback event_id 纳入 sequence——两次相同 tool.started/
-    tool.completed 是两次**事件**（不得被内容寻址误去重）；只有上游稳定 event_id
-    才声明强重投幂等。"""
+    tool.completed 是两次**事件**（fallback id 每次到达唯一，不得被误去重）；
+    只有上游稳定 event_id 才声明强重投幂等。"""
     # 两次完整工具会话：完全相同的内容必须各自成事件且全部应用
     n, r = _fresh()
     double_session = [
@@ -988,7 +1014,7 @@ def test_patch1d_fallback_event_id_sequence_distinct():
     assert r.view.primary is WorkExecutionState.RUNNING
     assert r.view.processed_count == len(evs)
     # 背靠背相同 started：第二次是真实的第二次事件（tool_already_active），
-    # **不是** duplicate（此前内容寻址会把它误折叠成 duplicate）
+    # **不是** duplicate（fallback id 每次到达唯一，第二次是真实的新事件）
     n2, r2 = _fresh()
     back_to_back = [
         {"type": "queued"},
@@ -1778,3 +1804,276 @@ def test_patch3i_backend_event_payload_exactness():
     with pytest.raises(EventNormalizationError, match="payload"):
         sanitize_payload([1, 2])
     assert _plain(sanitize_payload(None)) == {}     # None 合法空 payload
+
+
+# ================================================================ Reviewer Patch 4 否证
+# P4-1. fallback event_id 不依赖 raw payload（不散列秘密）
+def test_patch4a_fallback_event_id_not_secret_derived():
+    """reviewer P4-1：fallback event_id 绝不包含/散列/派生自 raw payload。
+
+    相同位置（同 arrival/sequence/kind）秘密值不同（password AAA vs BBB）→
+    fallback ID 完全一致；同一 normalizer 连续两个相同事件 → ID 因 arrival 不同
+    而不同；完整输入流重放确定；event_id/to_dict/provenance 中不存在原始秘密或
+    其可公开枚举的普通摘要（event_id 摘要只来自非敏感字段）。
+    """
+
+    def _run(secret: str):
+        n = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+        raws = [
+            {"type": "queued"},
+            {"type": "running"},
+            {"type": "tool.started",
+             "payload": {"tool": "fs.read_file", "password": secret}},
+            {"type": "tool.progress",
+             "payload": {"tool": "fs.read_file", "token": secret}},
+        ]
+        return [(n.normalize(raw), i + 1) for i, raw in enumerate(raws)]
+
+    evs_a = _run("AAA")
+    evs_b = _run("BBB")
+    # 1. fallback ID 不因秘密值变化（同位置逐一相等——绝不散列 raw payload）
+    assert [ev.event_id for ev, _ in evs_a] == [ev.event_id for ev, _ in evs_b]
+    # 2. 同一 normalizer 连续两个相同事件 → arrival 不同 → ID 不同
+    n = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+    e1 = n.normalize({"type": "tool.progress", "payload": {"password": "AAA"}})
+    e2 = n.normalize({"type": "tool.progress", "payload": {"password": "AAA"}})
+    assert e1.event_id != e2.event_id
+    # 3. 完整输入流重放（fresh normalizer）→ 同一 id 序列（确定性）
+    evs_c = _run("AAA")
+    assert [ev.event_id for ev, _ in evs_c] == [ev.event_id for ev, _ in evs_a]
+    # 4. event_id / to_dict / provenance 中不存在原始秘密或其普通摘要
+    for ev, arrival in evs_a:
+        assert "AAA" not in ev.event_id
+        assert "AAA" not in ev.provenance
+        exported = json.dumps(_plain(ev.to_dict()), ensure_ascii=False, sort_keys=True)
+        assert "AAA" not in exported
+        # event_id 摘要部分只来自非敏感字段（kind|arrival|sequence）——结构证明：
+        # 任何 payload 内容（含秘密）都没有进入 event_id。
+        expected = hashlib.sha256(
+            f"{ev.kind.value}|{arrival}|{ev.sequence}".encode()).hexdigest()[:16]
+        assert ev.event_id.endswith(expected)
+        # 秘密的普通 SHA-256 摘要（或其前 16 位）也不得出现
+        plain_digest = hashlib.sha256(b"AAA").hexdigest()
+        assert plain_digest not in ev.event_id
+        assert plain_digest[:16] not in ev.event_id
+    assert _plain(evs_a[2][0].payload)["password"] == "[REDACTED]"
+
+
+# P4-2a. 同 approval_id、不同 secret 字段 → 不得判定幂等
+def test_patch4b_approval_lossy_secret_collision_not_idempotent():
+    """reviewer P4-2a：同 approval_id、secret 字段不同（password AAA→BBB，都变为
+    [REDACTED]）→ 不得判定幂等（approval_request_ambiguous 零变更）；失败后
+    pending 不被覆盖，仍可由原 approval_id 正常 resolve；导出诊断无原始秘密。"""
+    n, r = _fresh()
+    _feed(n, r, [
+        {"event_id": "b1", "type": "queued"},
+        {"event_id": "b2", "type": "running"},
+        {"event_id": "b3", "type": "waiting_for_approval",
+         "payload": {"approval_id": "ap_b", "command": "fs.rm", "password": "AAA"}},
+    ])
+    assert r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    before = r.view
+    res = r.reduce(n.normalize({"event_id": "b4", "type": "waiting_for_approval",
+                                "payload": {"approval_id": "ap_b", "command": "fs.rm",
+                                            "password": "BBB"}}))
+    assert not res.applied
+    assert res.diagnostic.startswith("approval_request_ambiguous:")
+    assert "AAA" not in res.diagnostic and "BBB" not in res.diagnostic
+    assert r.view is before
+    assert r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    # pending 未被覆盖：仍可由原 approval_id resolve（合法消费）
+    res = r.reduce(n.normalize({"event_id": "b5", "type": "approval.resolved",
+                                "payload": {"decision": "approve",
+                                            "approval_id": "ap_b"}}))
+    assert res.applied and r.view.primary is WorkExecutionState.RUNNING
+    # lossy 判据在信封上明确可观察（秘密键脱敏 → lossy）
+    ev = n.normalize({"event_id": "b6", "type": "waiting_for_approval",
+                      "payload": {"approval_id": "ap_b2", "password": "AAA"}})
+    assert ev.lossy_payload is True
+    assert "AAA" not in json.dumps(_plain(ev.to_dict()), ensure_ascii=False)
+
+
+# P4-2b. 同 approval_id、仅第 257 字符不同 → 不得判定幂等
+def test_patch4c_approval_lossy_truncation_collision_not_idempotent():
+    """reviewer P4-2b：同 approval_id、字符串只在第 256 字符后不同（截断为同一
+    前 256 字符）→ 不得判定幂等（approval_request_ambiguous 零变更、绝不覆盖
+    pending）；原请求仍可由原 approval_id resolve。"""
+    n, r = _fresh()
+    _feed(n, r, [
+        {"event_id": "c1", "type": "queued"},
+        {"event_id": "c2", "type": "running"},
+        {"event_id": "c3", "type": "waiting_for_approval",
+         "payload": {"approval_id": "ap_c", "note": "x" * 256 + "A"}},
+    ])
+    assert r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    before = r.view
+    res = r.reduce(n.normalize({"event_id": "c4", "type": "waiting_for_approval",
+                                "payload": {"approval_id": "ap_c", "note": "x" * 256 + "B"}}))
+    assert not res.applied and res.diagnostic.startswith("approval_request_ambiguous:")
+    assert r.view is before
+    # pending 未被覆盖：原 approval_id 仍可 approve
+    res = r.reduce(n.normalize({"event_id": "c5", "type": "approval.resolved",
+                                "payload": {"decision": "approve",
+                                            "approval_id": "ap_c"}}))
+    assert res.applied and r.view.primary is WorkExecutionState.RUNNING
+    # 截断发生在信封层：两个不同 note 都只保留前 256 字符
+    ev = n.normalize({"event_id": "c6", "type": "waiting_for_approval",
+                      "payload": {"note": "y" * 300}})
+    assert _plain(ev.payload)["note"] == "y" * 256
+    assert ev.lossy_payload is True
+
+
+# P4-3. 同 event_id、不同 secret-bearing payload → 不得 duplicate
+def test_patch4d_event_id_lossy_dedup_not_duplicate():
+    """reviewer P4-3：同 event_id、不同 secret-bearing payload → 不得返回
+    duplicate_event（保守 event_id_ambiguous 零变更）；完全相同、非 lossy payload
+    重投仍保持现有幂等（duplicate_event）；同 id 不同内容（非 lossy）仍为
+    event_id_conflict。"""
+    # 同 id 不同 secret（都 [REDACTED]）→ ambiguous，零变更
+    n, r = _fresh()
+    _feed(n, r, [
+        {"event_id": "d1", "type": "queued"},
+        {"event_id": "d2", "type": "running"},
+        {"event_id": "dup", "type": "tool.started",
+         "payload": {"tool": "fs.read_file", "password": "AAA"}},
+    ])
+    assert r.view.state is WorkExecutionState.TOOL_RUNNING
+    before = r.view
+    res = r.reduce(n.normalize({"event_id": "dup", "type": "tool.started",
+                                "payload": {"tool": "fs.read_file",
+                                            "password": "BBB"}}))
+    assert not res.applied and res.diagnostic.startswith("event_id_ambiguous:")
+    assert "AAA" not in res.diagnostic and "BBB" not in res.diagnostic
+    assert r.view is before and r.view.active_tool == "fs.read_file"
+    # 非 lossy 完全相同 payload 重投 → 仍 duplicate（现有幂等保持）
+    n2, r2 = _fresh()
+    _feed(n2, r2, [
+        {"event_id": "e1", "type": "queued"},
+        {"event_id": "e2", "type": "running"},
+        {"event_id": "ok", "type": "tool.started", "payload": {"tool": "fs.read_file"}},
+    ])
+    res = r2.reduce(n2.normalize({"event_id": "ok", "type": "tool.started",
+                                  "payload": {"tool": "fs.read_file"}}))
+    assert not res.applied and res.diagnostic.startswith("duplicate_event:")
+    # 同 id 不同内容（非 lossy）→ event_id_conflict（既有语义不变）
+    res = r2.reduce(n2.normalize({"event_id": "ok", "type": "tool.started",
+                                  "payload": {"tool": "fs.write_text"}}))
+    assert not res.applied and res.diagnostic.startswith("event_id_conflict:")
+    # lossy 事件的 event_id 不含原始秘密
+    ev = n.normalize({"event_id": "dup", "type": "tool.started",
+                      "payload": {"tool": "fs.read_file", "password": "AAA"}})
+    assert ev.lossy_payload is True
+    assert "AAA" not in ev.event_id
+
+
+# P4-4. lossy 判据明确覆盖所有丢失路径
+def test_patch4e_lossy_detection_covers_all_drop_paths():
+    """reviewer P4-4：lossy 判据明确识别——秘密键脱敏 / 秘密值形态 / 字符串截断 /
+    整体超预算截断 / 深度丢弃 / 非法值丢弃 / 控制字符替换全部为 lossy 并在信封上
+    可观察；普通非 lossy JSON payload 为 False。"""
+    assert _mk(EventKind.TOOL_PROGRESS, "f1", payload={"a": 1}).lossy_payload is False
+    assert _mk(EventKind.TOOL_PROGRESS, "f2",
+               payload={"tool": "fs.read_file"}).lossy_payload is False
+    # 秘密键脱敏 → lossy
+    assert _mk(EventKind.TOOL_PROGRESS, "f3",
+               payload={"password": "x"}).lossy_payload is True
+    assert _mk(EventKind.TOOL_PROGRESS, "f4",
+               payload={"api_key": "sk-1"}).lossy_payload is True
+    # 秘密值形态 → lossy
+    assert _mk(EventKind.TOOL_PROGRESS, "f5",
+               payload={"message": "Authorization: Bearer abc"}).lossy_payload is True
+    # 字符串截断 → lossy
+    assert _mk(EventKind.TOOL_PROGRESS, "f6",
+               payload={"note": "x" * 300}).lossy_payload is True
+    # 控制字符替换 → lossy
+    assert _mk(EventKind.TOOL_PROGRESS, "f7",
+               payload={"note": "ok\x00ctrl"}).lossy_payload is True
+    # 整体超预算截断 → lossy（且信封出现 _truncated）
+    big = {"items": ["y" * 250 for _ in range(300)]}
+    ev = _mk(EventKind.TOOL_PROGRESS, "f8", payload=big)
+    assert _plain(ev.payload).get("_truncated") is True
+    assert ev.lossy_payload is True
+    # 深度丢弃（>8 层的子键被丢）→ lossy
+    deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": {"j": 1}}}}}}}}}}
+    ev = _mk(EventKind.TOOL_PROGRESS, "f9", payload=deep)
+    assert ev.lossy_payload is True
+    # 非法值丢弃（object() → 整键丢弃）→ lossy
+    assert _mk(EventKind.TOOL_PROGRESS, "f10",
+               payload={"blob": object()}).lossy_payload is True
+    # 非有限浮点 → lossy
+    assert _mk(EventKind.TOOL_PROGRESS, "f11",
+               payload={"x": float("nan")}).lossy_payload is True
+    # to_dict 导出包含 lossy 布尔判据（不含任何秘密）
+    d = _mk(EventKind.TOOL_PROGRESS, "f12",
+            payload={"password": "AAA"}).to_dict()
+    assert d["lossy_payload"] is True
+    assert "AAA" not in json.dumps(_plain(d), ensure_ascii=False)
+
+
+# P4-5. 工具身份 lexical contract
+def test_patch4f_tool_identity_lexical_contract():
+    """reviewer P4-5：tool/tool_name/name/toolId 明确词法规则——字母/数字开头、
+    仅含 [A-Za-z0-9._:-]、总长 <=128；内部空白（control-char 经 sanitizer 变为
+    空格后同样词法非法）、斜杠、下划线开头及其它非法字符拒绝；多别名冲突拒绝；
+    TOOL_STARTED/显式 TOOL_PROGRESS/TOOL_COMPLETED 共用同一规则；真实工具名
+    正样本通过；generic message.delta/reasoning 无工具身份继续合法；非法事件
+    失败后 tool_subphase/active_tool/processed_count 不变。"""
+    r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r, WorkExecutionState.RUNNING)
+    before = r.view
+    # 1. control-char 经 normalizer 清洗为空格 → 词法非法（fs.read\x00file）
+    n = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+    ev = n.normalize({"event_id": "t1", "type": "tool.started",
+                      "payload": {"tool": "fs.read\x00file"}})
+    assert _plain(ev.payload)["tool"] == "fs.read file"   # sanitizer 已清洗
+    res = r.reduce(ev)
+    assert not res.applied and "tool_identity_invalid" in res.diagnostic
+    # 2. 内部空白 / 斜杠 / 下划线开头 → 拒绝
+    for i, bad in enumerate(("fs.read file", "fs/read", "_fs.read")):
+        res = r.reduce(_mk(EventKind.TOOL_STARTED, f"t2_{i}", payload={"tool": bad}))
+        assert not res.applied and "tool_identity_invalid" in res.diagnostic, bad
+    # 3. 多别名冲突（tool vs tool_name 不等）→ 拒绝
+    res = r.reduce(_mk(EventKind.TOOL_STARTED, "t3",
+                       payload={"tool": "fs.read_file", "tool_name": "fs.other"}))
+    assert not res.applied and "tool_identity_invalid" in res.diagnostic
+    # 4. 非法事件失败后 tool_subphase/active_tool/processed_count 不变
+    assert r.view is before
+    assert r.view.tool_subphase is False and r.view.active_tool == ""
+    assert r.view.processed_count == before.processed_count
+    # 5. 当前真实工具名正样本全部通过（TOOL_STARTED 建立 active_tool）
+    for i, tool in enumerate(("app.launch", "browser.open", "fs.read_file",
+                              "fs.write_text", "doc.create", "comm.send_message")):
+        r2 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+        _drive(r2, WorkExecutionState.RUNNING)
+        res = r2.reduce(_mk(EventKind.TOOL_STARTED, f"ok_{i}", payload={"tool": tool}))
+        assert res.applied, tool
+        assert r2.view.active_tool == tool
+    # TOOL_PROGRESS / TOOL_COMPLETED 显式携带非法工具身份 → 同一规则拒绝
+    r3 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r3, WorkExecutionState.RUNNING)
+    r3.reduce(_mk(EventKind.TOOL_STARTED, "tp0", payload={"tool": "fs.read_file"}))
+    res = r3.reduce(_mk(EventKind.TOOL_PROGRESS, "tp1", payload={"tool": "fs/read"}))
+    assert not res.applied and "tool_identity_invalid" in res.diagnostic
+    res = r3.reduce(_mk(EventKind.TOOL_COMPLETED, "tp2", payload={"tool": "fs.read file"}))
+    assert not res.applied and "tool_identity_invalid" in res.diagnostic
+    assert r3.view.tool_subphase is True and r3.view.active_tool == "fs.read_file"
+    # 6. generic message.delta / reasoning 无工具身份 → 合法 self-loop（无回归）
+    n4, r4 = _fresh()
+    _feed(n4, r4, [
+        {"event_id": "g1", "type": "queued"},
+        {"event_id": "g2", "type": "running"},
+    ])
+    for i, tok in enumerate(("message.delta", "reasoning", "reasoning.delta")):
+        ev2 = n4.normalize({"event_id": f"g{i+3}", "type": tok,
+                            "data": {"delta": "tick"}})
+        res = r4.reduce(ev2)
+        assert res.applied and not res.diagnostic, tok
+        assert r4.view.primary is WorkExecutionState.RUNNING
+        assert r4.view.tool_subphase is False and r4.view.active_tool == ""
+    # 别名（tool_name/name/toolId）等值合法通过、规范化后精确一致
+    r5 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r5, WorkExecutionState.RUNNING)
+    res = r5.reduce(_mk(EventKind.TOOL_STARTED, "al1",
+                        payload={"tool": "fs.read_file", "tool_name": "fs.read_file",
+                                 "name": "fs.read_file", "toolId": "fs.read_file"}))
+    assert res.applied and r5.view.active_tool == "fs.read_file"

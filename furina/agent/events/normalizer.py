@@ -5,8 +5,11 @@
 - **别名无歧义**（Reviewer Patch 2）：身份字段所有已出现别名逐一校验等于绑定值；
   event_id/sequence/时间戳/kind/payload 的多个别名同时出现时等值允许、冲突拒绝；
   显式出现但类型/范围非法不得当作缺失补值；
-- **fallback event_id 每次到达唯一**（arrival ordinal 独立递增，显式/补序/重复
-  sequence 均不得碰撞；fresh normalizer 重放同一输入流确定性一致）；
+- **fallback event_id 每次到达唯一且不依赖 raw payload**（Reviewer Patch 4）：
+  fallback id 只由 backend/run 身份、canonical kind、sequence 与独立递增的
+  arrival ordinal 派生——**绝不包含/散列 raw payload**（低熵秘密不得成为可枚举
+  指纹）；arrival ordinal 独立递增保证同一 normalizer 内每次到达唯一（显式/补序/
+  重复 sequence 均不得碰撞）；fresh normalizer 重放同一输入流确定性一致；
 - 未知外部类型映射为 ``UNKNOWN_EVENT``（typed、可观察、**非权威**——normalizer
   绝不抛出、绝不把未知输入当成功）；
 - **归一 ≠ 状态**：normalizer 只产出信封；状态转移唯一由
@@ -19,7 +22,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 from typing import Any, Mapping, Optional
 
@@ -287,22 +289,22 @@ def _payload_mapping(mapping: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
     return value
 
 
-def _derive_event_id(backend_id: str, run_id: str, token: str, payload: Any,
+def _derive_event_id(backend_id: str, run_id: str, kind: EventKind,
                      sequence: int, arrival: int) -> str:
-    """内容寻址的派生事件 id（缺上游稳定 event_id 时的 fallback）。
+    """非敏感字段派生的 fallback 事件 id（缺上游稳定 event_id 时使用）。
 
-    派生 id 纳入 **arrival ordinal**（每次 normalize 到达独立递增）：保证同一归一化
-    会话内每次到达唯一——显式 sequence 后接缺 sequence（补序可能与显式值重复）、
-    重复显式 sequence、混合流均不得碰撞；同内容的两次事件是两次**不同**事件，不得
-    被误去重。fresh normalizer 重放同一完整输入流（arrival 递增顺序相同）→ 派生 id
-    完全一致（确定性）。只有上游显式提供的稳定 event_id 才享有强重投幂等。
+    **绝不包含、散列或以其他方式派生自 raw payload**（payload 可能含
+    password/token 等低熵秘密——对 raw 做普通 SHA-256 会让 event_id 成为可枚举
+    指纹）；只纳入 backend/run 身份、canonical kind、sequence 与独立递增的
+    **arrival ordinal**（每次 normalize 到达独立递增）：保证同一归一化会话内
+    每次到达唯一——显式 sequence 后接缺 sequence（补序可能与显式值重复）、
+    重复显式 sequence、混合流均不得碰撞；同内容的两次事件是两次**不同**事件，
+    不得被误去重。fresh normalizer 重放同一完整输入流（arrival 递增顺序相同）→
+    派生 id 完全一致（确定性）。只有上游显式提供的稳定 event_id 才享有强重投
+    幂等。
     """
-    try:
-        canon = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-    except Exception as exc:  # noqa: BLE001 —— 防御性：非 JSON-safe 载荷退化
-        canon = f"<unserializable:{type(exc).__name__}>"
     digest = hashlib.sha256(
-        f"{token}|{arrival}|{sequence}|{canon}".encode()).hexdigest()[:16]
+        f"{kind.value}|{arrival}|{sequence}".encode()).hexdigest()[:16]
     return f"bev_{backend_id[:16]}_{run_id[:16]}_{digest}"
 
 
@@ -337,8 +339,9 @@ class BackendEventNormalizer:
     BackendEvent 的 backend_id/run_id、Mapping 携带的身份字段（所有已出现别名）
     都必须与绑定一致，不静默改绑。**别名无歧义**：event_id/sequence/时间戳/kind/
     payload 的多个别名同时出现时等值允许、冲突值拒绝；显式出现但类型/范围非法
-    不得当作缺失补值。缺 event_id 时按到达顺序内容寻址派生（fallback id 含
-    **arrival ordinal**——每次到达唯一，显式/补序/重复 sequence 均不得碰撞）；
+    不得当作缺失补值。缺 event_id 时按到达顺序派生（fallback id 只纳入
+    backend/run 身份、canonical kind、sequence 与独立递增的 **arrival ordinal**——
+    每次到达唯一，显式/补序/重复 sequence 均不得碰撞；**绝不散列 raw payload**）；
     缺 sequence 时按到达顺序补序——同一输入流重复归一结果完全一致。
     """
 
@@ -401,7 +404,7 @@ class BackendEventNormalizer:
         now = self._now_fn()
         sequence = self._next_seq()
         return NormalizedEvent(
-            event_id=_derive_event_id(self._backend_id, self._run_id, token, payload,
+            event_id=_derive_event_id(self._backend_id, self._run_id, kind,
                                       sequence, arrival),
             backend_id=self._backend_id,
             contract_id=self._contract_id,
@@ -427,7 +430,7 @@ class BackendEventNormalizer:
             sequence = self._next_seq()
         event_id = _event_id_value(raw)
         if event_id is None:
-            event_id = _derive_event_id(self._backend_id, self._run_id, token, payload,
+            event_id = _derive_event_id(self._backend_id, self._run_id, kind,
                                         sequence, arrival)
         occurred_at = _ts_value(raw)
         if occurred_at is None:
