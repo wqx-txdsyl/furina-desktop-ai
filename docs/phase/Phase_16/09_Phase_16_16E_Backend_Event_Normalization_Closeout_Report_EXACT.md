@@ -2,15 +2,47 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED（Reviewer Patch 4 修复完成 + 全量测试通过，
+STATUS                         = EXECUTED（Reviewer Patch 5 修复完成 + 全量测试通过，
                                  等待外部验收；不声明 16E_PASS）
-BASE_SHA                       = 73f601ac827a41ca4ca601e76c8c71c76d6f03df
-                                 （Reviewer Patch 3 FINAL_SHA；Patch 4 以此为基；
-                                 Patch 3 基线 e50d2af… / Patch 2 基线 a691b59… /
-                                 初版基线 7658ab30… 见 REVIEWER_PATCH_1/2/3 记录）
+BASE_SHA                       = 521dc5a990a2f6b62c9f0d9c1107fe14dcf553e1
+                                 （Reviewer Patch 4 FINAL_SHA；Patch 5 以此为基；
+                                 Patch 3 基线 73f601a… / Patch 2 基线 a691b59… /
+                                 初版基线 7658ab30… 见 REVIEWER_PATCH_1/2/3/4 记录）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，沿用 16A/16B/16D 惯例）
 BRANCH                         = feature/phase16-16e-event-normalization
 LOCAL_REMOTE_MATCH             = push 后核验，结论记录于外部 handoff
+
+REVIEWER_PATCH_5               = 3 组 micro-blocker 全部修复并逐一否证锁定（test_patch5a–5e）：
+                                 1) 嵌入字符串秘密值完整脱敏（models.py 秘密值正则
+                                    重写）：值支持 **1 字符及以上**（password=x /
+                                    password=ab / token=短）、**Unicode**（password=
+                                    秘密）、**常见特殊字符**（p@ss / abc@def）；
+                                    **quoted 值由值自身携带配对引号**（覆盖到闭合
+                                    引号：password="a b" / {"access_token":"x"}）；
+                                    **unquoted 值至少覆盖到空白/行结束/明确结构
+                                    分隔符**（排除集：空白、引号、{}[]()、;,——值内
+                                    含 = / @ / Unicode 一律整段覆盖，**绝不只替换
+                                    前缀残留后缀**：password=abc@def 不得残留 @def）；
+                                    `[` 排除同时保证已插入的 [REDACTED] 标记不会被
+                                    二次匹配；**任一真实替换必须令 lossy_payload
+                                    =true**；导出面（payload/to_dict/repr/event_id/
+                                    diagnostic）无原始秘密；**负向对照零误杀**
+                                    （token_count=5 / author=alice / ordinary
+                                    message 保持原文且 lossy=false）；structured
+                                    secret key（dict 键）脱敏能力无回归；
+                                 2) tuple/list 类型擦除（选择方案 A）：tuple→list
+                                    保持现有输出形态，但 **tuple 路径一律
+                                    lossy_payload=true**（raw 无法唯一复原：(1,) 与
+                                    [1] 清洗后同形）；list JSON payload 保持
+                                    lossy=false；**同 event_id 的 list/tuple 不得被
+                                    静默判 duplicate_event**——任一侧 lossy 时保守
+                                    event_id_ambiguous 零变更（list→tuple 与
+                                    tuple→list 双向均有否证）；fresh replay 结果
+                                    确定；
+                                 3) 静态清理：reducer.py:422 行尾空格删除，git
+                                    diff --check 为空、exit 0
+                                 适配：既有 48 项测试全数保留零改动全过，新增 5 项
+                                 reviewer-locked 否证（test_patch5a–5e），专项 53
 
 REVIEWER_PATCH_4               = 3 组 blocker 全部修复并逐一否证锁定（test_patch4a–4f）：
                                  1) fallback event_id 不得依赖原始敏感 payload：
@@ -190,15 +222,21 @@ EVENT_ENVELOPE_MODULE          = furina/agent/events/models.py（NormalizedEvent
                                  **terminal/critical
                                  为派生字段**（由 kind 决定，来源方不得自报，防止
                                  "完成/成功"自证）；**lossy_payload 为派生判据
-                                 （Reviewer Patch 4）**：payload 清洗是否丢失/改写
+                                 （Reviewer Patch 4 + 5）**：payload 清洗是否丢失/改写
                                  了任何原始信息（秘密键脱敏、秘密值形态、字符串
                                  第 256 字符后截断、整体超预算截断、深度/非法值
-                                 丢弃、控制字符替换、bytes 解码类型擦除）——只携带
+                                 丢弃、控制字符替换、bytes 解码类型擦除、
+                                 **tuple→list 类型擦除（Patch 5）**）——只携带
                                  布尔判据，**绝不保存/导出 raw secret 或其普通未
                                  加密摘要**；payload 构造时自动脱敏（秘密键
                                  精确词表 + **秘密值形态脱敏**（message/stdout/error/
                                  list 内 Bearer/authorization/password/token/secret/
-                                 api_key 键值/头/凭证形态 → [REDACTED]）+ 控制字符
+                                 api_key 键值/头/凭证形态 → [REDACTED]；**Reviewer
+                                 Patch 5：值支持 1 字符及以上/Unicode/常见特殊字符，
+                                 quoted 值覆盖到配对引号（password="a b"），unquoted
+                                 值至少覆盖到空白/行结束/明确结构分隔符——绝不只
+                                 替换前缀残留后缀（password=abc@def 无 @def 残留），
+                                 token_count/author/普通消息零误杀**）+ 控制字符
                                  清除 + 字符串限长 256 + 深度 8 + 总序列化
                                  **UTF-8 字节** <=4096B（len(encoded.encode("utf-8"))，
                                  多字节字符不得以字符数绕过预算）超限 _truncated
@@ -288,9 +326,10 @@ DUPLICATE_IDEMPOTENT           = true 且精确化（**event_id→canonical fing
                                  duplicate_event；同 id 不同内容 =
                                  event_id_conflict（typed diagnostic、零变更）；
                                  **lossy payload 同 id 同 sanitized 内容 →
-                                 event_id_ambiguous（Reviewer Patch 4：秘密脱敏/
-                                 截断/深度或非法值丢弃不得静默当作幂等重投——
-                                 同 event_id 不同 secret-bearing payload 不得返回
+                                 event_id_ambiguous（Reviewer Patch 4 + 5：秘密脱敏/
+                                 截断/深度或非法值丢弃/**tuple→list 类型擦除**不得
+                                 静默当作幂等重投——同 event_id 不同 secret-bearing
+                                 payload 或 list/tuple 形态互投不得返回
                                  duplicate_event，有否证测试）**；
                                  **被拒绝的事件不烧毁 id**——先非法后满足前置条件
                                  的同一事件可重放（有否证测试）；**只有上游显式
@@ -356,8 +395,17 @@ PAYLOAD_BOUNDED_REDACTED       = true 且精确化（秘密**键**（password/ap
                                  list 内 "Authorization: Bearer xyz" /
                                  "password=hunter2" / "api_key: sk-…" / JSON
                                  '{"access_token":"…"}' 等键值/头/凭证形态）→
-                                 标签保留、秘密部分 [REDACTED]；token_count/author
-                                 等含子串合法键与自然语言不误伤；控制字符清除；
+                                 标签保留、秘密部分 [REDACTED]；**Reviewer Patch 5：
+                                 值支持 1 字符及以上（password=x/ab/token=短）、
+                                 Unicode（password=秘密）、常见特殊字符（p@ss/
+                                 abc@def），quoted 值覆盖到配对引号（password=
+                                 "a b"），unquoted 值至少覆盖到空白/行结束/明确
+                                 结构分隔符——绝不只替换前缀残留后缀（password=
+                                 abc@def 无 @def 残留，有否证测试），任一真实替换
+                                 lossy=true**；token_count/author
+                                 等含子串合法键与自然语言不误伤（负向对照
+                                 token_count=5/author=alice/ordinary message 零
+                                 误杀，有否证测试）；控制字符清除；
                                  字符串限长 256；超预算载荷 → 确定性 _truncated
                                  标记；非 JSON-safe 对象整键丢弃；payload 递归
                                  冻结不可变；max_payload_bytes type-is-int 严格
@@ -367,10 +415,11 @@ PAYLOAD_BOUNDED_REDACTED       = true 且精确化（秘密**键**（password/ap
                                  字节数超预算的载荷必须截断，original_bytes 记录
                                  真实 UTF-8 bytes；truncation marker 自身也不超
                                  预算——有否证测试）；**lossy 判据（Reviewer
-                                 Patch 4）**：清洗是否丢失/改写原始信息（秘密键
+                                 Patch 4 + 5）**：清洗是否丢失/改写原始信息（秘密键
                                  脱敏、秘密值形态、第 256 字符后截断、整体超预算
                                  截断、深度/非法值丢弃、控制字符替换、bytes 解码
-                                 类型擦除）由信封 lossy_payload 明确携带——**只保存
+                                 类型擦除、**tuple→list 类型擦除（Patch 5）**）由
+                                 信封 lossy_payload 明确携带——**只保存
                                  布尔判据，绝不保存/导出 raw secret 或其普通未加密
                                  摘要**；去重/幂等层对 lossy 内容保守 ambiguous
                                  （有否证测试））
@@ -440,20 +489,26 @@ DETERMINISTIC_REPLAY           = true 且精确化（同一事件流在全新 re
 
 C1_C7_SCHEMA_CHANGED           = false
 PRODUCTION_FILES_CHANGED       = 仅 furina/agent/events/ 包内自有模块
-                                 （models.py / normalizer.py / reducer.py）——
-                                 Reviewer Patch 4 只修改这三个生产模块 + 16E 测试
-                                 + closeout；未修改任何其它生产文件（16A
+                                 （models.py / reducer.py）——
+                                 Reviewer Patch 5 只修改 models.py（嵌入秘密值正则
+                                 重写 + tuple 类型擦除 lossy）+ reducer.py（422
+                                 行尾空格）+ 16E 测试
+                                 + closeout；normalizer.py 未改；未修改任何其它生产
+                                 文件（16A
                                  work_contract.py / 16B backend/ / 16D approval/ /
                                  agent_runtime.py / permission.py / app.py 等零改动；
                                  16A/16B/16D frozen contracts 未触碰）
 TEST_FILES_CHANGED             = 仅新增 tests/agent/integration/test_phase16e_event_normalization.py
-                                 （48 个测试函数 = 任务书 §7 十二项 + 额外锁定 4 项
+                                 （53 个测试函数 = 任务书 §7 十二项 + 额外锁定 4 项
                                  + Reviewer Patch 1 否证 7 项 + Reviewer Patch 2
                                  否证 5 项 + Reviewer Patch 3 否证 9 项 + Reviewer
-                                 Patch 4 否证 6 项；既有 42 项全数保留零改动，
+                                 Patch 4 否证 6 项 + Reviewer Patch 5 否证 5 项；
+                                 既有 48 项全数保留零改动，
                                  Patch 3 对 test_patch2e 一条断言的语义适配保留）
 TARGETED_TESTS                 = tests/agent/integration/test_phase16e_event_normalization.py：
-                                 48 passed（Reviewer Patch 4 否证 6 项 test_patch4a–4f
+                                 53 passed（Reviewer Patch 5 否证 5 项 test_patch5a–5e
+                                 覆盖 3 组 micro-blocker；Reviewer Patch 4 否证 6 项
+                                 test_patch4a–4f
                                  覆盖 3 组 blocker；Reviewer Patch 3 否证 9 项
                                  test_patch3a–3i
                                  覆盖 4 组 blocker；既有 42 项除 Patch 3 那一条必然
@@ -510,22 +565,24 @@ TARGETED_TESTS                 = tests/agent/integration/test_phase16e_event_nor
                                  逐条对应 test_patch3a–3i）
                                  Reviewer Patch 4 否证（6 项，见 REVIEWER_PATCH_4
                                  逐条对应 test_patch4a–4f）
+                                 Reviewer Patch 5 否证（5 项，见 REVIEWER_PATCH_5
+                                 逐条对应 test_patch5a–5e）
 AGENT_EVENT_REGRESSION         = pytest tests/agent tests/test_agent_tools.py
-                                 tests/test_skeleton.py：364 passed
+                                 tests/test_skeleton.py：369 passed
                                  （15 warnings 为既有线程 ResourceWarning 类告警，
-                                 与本阶段无关；16D 的 316 + 16E 专项 48 = 364）；
+                                 与本阶段无关；16D 的 316 + 16E 专项 53 = 369）；
                                  另跑 16A/16B/16D 专项
                                  tests/agent/integration/test_phase16b_execution_backend.py
                                  test_phase16a_work_contract.py
                                  test_phase16d_permission_approval.py：198 passed
-                                 （161 + 37；与 16E 专项合并跑 240 passed）
+                                 （161 + 37；与 16E 专项合并跑 251 passed）
 COGNITION_SUITE                = pytest tests/cognition：279 passed（Phase 15
                                  cognition/store 契约不变；events 包零 cognition
                                  依赖有专项断言）
-FULL_SUITE                     = .venv/Scripts/python.exe -m pytest -q：1609 passed,
-                                 0 failed（235.92s，exit 0），较 Patch 3 的 1603 恰
-                                 +6（16E Patch 4 新增否证；Patch 3 的 1603 较
-                                 Patch 2 的 1594 恰 +9）。
+FULL_SUITE                     = .venv/Scripts/python.exe -m pytest -q：1614 passed,
+                                 0 failed（198.10s，exit 0），较 Patch 4 的 1609 恰
+                                 +5（16E Patch 5 新增否证；Patch 4 的 1609 较
+                                 Patch 3 的 1603 恰 +6）。
                                  GUI flake 说明：16E 初版曾出现一次
                                  tests/test_gui_integration.py::
                                  test_gui_timer_advances_runtime 失败（Qt 定时器在
@@ -563,7 +620,22 @@ REMAINING_GAPS                 = 1) 按 brief 无 Hermes(16C)/verifier+repair(16
                                    保守方案 A 的有意取舍，任务书明确允许；选择 A
                                    而非 keyed discriminator 以保持 fresh
                                    normalizer/reducer 重放确定性；如需强重投幂等，
-                                   上游应提供稳定 event_id + 非 lossy payload）
+                                   上游应提供稳定 event_id + 非 lossy payload）；
+                                   8) 说明（Reviewer Patch 5 更新）：嵌入秘密值脱敏
+                                     收紧到 **1 字符及以上**（任务书要求 password=x /
+                                     token=短 / Bearer ab 等短值必须完整脱敏），
+                                     unquoted 值至少覆盖到空白/行结束/结构分隔符——
+                                     "Bearer of good news" 等自然语言中位于
+                                     bearer/basic/digest 之后的 1+ 字符单词会被
+                                     （与 password: 后接单词同理，属"密钥+值"形态
+                                     的有意取舍，负向对照 token_count=5 / author=
+                                     alice / ordinary message 不受影响）；
+                                     9) 说明（Reviewer Patch 5 更新）：tuple→list
+                                       类型擦除一律 lossy（方案 A）——同 event_id 的
+                                       list/tuple 互投保守 event_id_ambiguous 而非
+                                       duplicate（无法在不保存 raw 的前提下确认
+                                       raw 相同；若业务需要强幂等，上游应保持 payload
+                                       类型稳定）；
 READY_FOR_REVIEW               = YES
 ```
 

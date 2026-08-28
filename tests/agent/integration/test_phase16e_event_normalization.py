@@ -2077,3 +2077,230 @@ def test_patch4f_tool_identity_lexical_contract():
                         payload={"tool": "fs.read_file", "tool_name": "fs.read_file",
                                  "name": "fs.read_file", "toolId": "fs.read_file"}))
     assert res.applied and r5.view.active_tool == "fs.read_file"
+
+
+# ================================================================ Reviewer Patch 5 否证
+# P5-1. 嵌入字符串秘密值完整脱敏（1+ 字符 / Unicode / 特殊字符 / 无后缀残留）
+_SECRET_VALUE_SAMPLES = (
+    ("password=x", "x"),
+    ("password=ab", "ab"),
+    ("password=p@ss", "p@ss"),
+    ("password=abc@def", "abc@def"),
+    ("password=秘密", "秘密"),
+    ("api_key=x", "x"),
+    ("token=短", "短"),
+    ("Bearer ab", "ab"),
+    ('{"access_token":"x"}', "x"),
+    ('password="a b"', "a b"),
+)
+
+
+def test_patch5a_embedded_secret_values_fully_redacted():
+    """reviewer P5-1：嵌入字符串的密钥值形态必须**完整**替换为 [REDACTED]。
+
+    - 支持 1 字符及以上秘密值（password=x / password=ab / token=短）；
+    - 支持 Unicode 与常见特殊字符（password=秘密 / password=p@ss /
+      password=abc@def）；
+    - **不得只替换秘密的前缀并残留后缀**（password=abc@def 不得残留 @def）；
+    - quoted 值覆盖到配对引号（password="a b" / {"access_token":"x"}）；
+    - 任一真实替换必须令 lossy_payload=true；
+    - 导出面（payload/to_dict/repr/event_id）中不得出现原始秘密。
+    """
+    from furina.agent.events.models import _redact_secret_values_lossy
+
+    # 函数级：每个样本整体脱敏、值字符零残留、lossy 必真
+    for sample, value in _SECRET_VALUE_SAMPLES:
+        out, lossy = _redact_secret_values_lossy(sample)
+        assert lossy is True, f"{sample!r} 替换必须 lossy"
+        assert "[REDACTED]" in out, f"{sample!r} 未脱敏: {out!r}"
+        assert sample not in out, f"{sample!r} 原样残留: {out!r}"
+        assert value not in out, f"{sample!r} 秘密值 {value!r} 残留: {out!r}"
+    # 专项：password=abc@def 不得残留 @def
+    out, lossy = _redact_secret_values_lossy("password=abc@def")
+    assert "@def" not in out and "abc" not in out
+    assert out == "password= [REDACTED]"
+    assert lossy is True
+    # 信封级：嵌入 message 后导出面无秘密、lossy_payload=true
+    for i, (sample, value) in enumerate(_SECRET_VALUE_SAMPLES):
+        ev = _mk(EventKind.TOOL_PROGRESS, f"s5a_{i}", payload={"message": sample})
+        assert ev.lossy_payload is True, f"{sample!r} 信封必须 lossy"
+        assert _plain(ev.payload)["message"] != sample
+        assert "[REDACTED]" in _plain(ev.payload)["message"]
+        exported = json.dumps(_plain(ev.to_dict()), ensure_ascii=False, sort_keys=True)
+        assert sample not in exported, f"{sample!r} 泄漏到 to_dict"
+        assert value not in json.dumps(_plain(ev.payload), ensure_ascii=False,
+                                       sort_keys=True), \
+            f"{sample!r} 值 {value!r} 泄漏到 payload"
+        assert sample not in repr(ev)
+        assert value not in ev.event_id
+
+
+# P5-2. 负向对照不误杀（token_count / author / 普通消息）
+def test_patch5b_negative_controls_preserved():
+    """reviewer P5-2：token_count=5 / author=alice / ordinary message 等普通内容
+    不得被误判为秘密——嵌入字符串与结构化字段双路径均保持原文且 lossy=false。"""
+    from furina.agent.events.models import _redact_secret_values_lossy
+
+    for s in ("token_count=5", "author=alice", "ordinary message"):
+        out, lossy = _redact_secret_values_lossy(s)
+        assert out == s and lossy is False, f"负向样本被误杀: {s!r}"
+    message = "token_count=5 author=alice ordinary message"
+    ev = _mk(EventKind.TOOL_PROGRESS, "s5b", payload={
+        "message": message,
+        "fields": {"token_count": 5, "author": "alice", "note": "ordinary message"},
+    })
+    p = _plain(ev.payload)
+    assert p["message"] == message
+    assert p["fields"] == {"token_count": 5, "author": "alice",
+                           "note": "ordinary message"}
+    assert ev.lossy_payload is False
+
+
+# P5-3. tuple/list 类型擦除 lossy + 不再 false duplicate
+def test_patch5c_tuple_type_erasure_lossy_no_false_duplicate():
+    """reviewer P5-3：tuple→list 类型擦除必须 lossy=true（list JSON payload 保持
+    lossy=false）；同 event_id 的 list/tuple（清洗后同形）不得静默判 duplicate
+    （保守 event_id_ambiguous 零变更）；fresh replay 结果确定。"""
+    # list → lossy=False；tuple → lossy=True（输出形态一致，raw 无法复原）
+    ev_list = _mk(EventKind.TOOL_PROGRESS, "tl_a", payload={"x": [1, 2]})
+    assert ev_list.lossy_payload is False
+    assert _plain(ev_list.payload) == {"x": [1, 2]}
+    ev_tuple = _mk(EventKind.TOOL_PROGRESS, "tl_b", payload={"x": (1, 2)})
+    assert ev_tuple.lossy_payload is True
+    assert _plain(ev_tuple.payload) == {"x": [1, 2]}     # 类型擦除为同一输出形态
+    # 嵌套 tuple 同样 lossy
+    assert _mk(EventKind.TOOL_PROGRESS, "tl_c",
+               payload={"a": {"b": (1,)}}).lossy_payload is True
+    # 同 event_id：list 先 → tuple 后（同 sanitized 内容）→ 不得 duplicate
+    n, r = _fresh()
+    _feed(n, r, [
+        {"event_id": "e1", "type": "queued"},
+        {"event_id": "e2", "type": "running"},
+        {"event_id": "dup", "type": "tool.started",
+         "payload": {"tool": "fs.read_file", "x": [1]}},
+    ])
+    before = r.view
+    res = r.reduce(n.normalize({"event_id": "dup", "type": "tool.started",
+                                "payload": {"tool": "fs.read_file", "x": (1,)}}))
+    assert not res.applied and res.diagnostic.startswith("event_id_ambiguous:")
+    assert r.view is before and r.view.active_tool == "fs.read_file"
+    # tuple 先 → list 后同样 ambiguous（双向不得静默 duplicate）
+    n2, r2 = _fresh()
+    _feed(n2, r2, [
+        {"event_id": "f1", "type": "queued"},
+        {"event_id": "f2", "type": "running"},
+        {"event_id": "dup2", "type": "tool.started",
+         "payload": {"tool": "fs.read_file", "x": (1,)}},
+    ])
+    res = r2.reduce(n2.normalize({"event_id": "dup2", "type": "tool.started",
+                                  "payload": {"tool": "fs.read_file", "x": [1]}}))
+    assert not res.applied and res.diagnostic.startswith("event_id_ambiguous:")
+    # 同形态（list→list）非 lossy 完全相同重投 → 仍 duplicate（无回归）
+    n3, r3 = _fresh()
+    _feed(n3, r3, [
+        {"event_id": "g1", "type": "queued"},
+        {"event_id": "g2", "type": "running"},
+        {"event_id": "ok", "type": "tool.started",
+         "payload": {"tool": "fs.read_file", "x": [1]}},
+    ])
+    res = r3.reduce(n3.normalize({"event_id": "ok", "type": "tool.started",
+                                  "payload": {"tool": "fs.read_file", "x": [1]}}))
+    assert not res.applied and res.diagnostic.startswith("duplicate_event:")
+    # fresh replay 确定性：含 tuple 载荷的完整流重放结果一致
+    stream = [
+        {"event_id": "q1", "type": "queued"},
+        {"event_id": "q2", "type": "running"},
+        {"event_id": "q3", "type": "tool.started",
+         "payload": {"tool": "fs.read_file", "x": (1, 2)}},
+    ]
+
+    def _replay():
+        nz = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+        rz = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+        outs = []
+        for raw in stream:
+            ev = nz.normalize(raw)
+            outs.append((ev.lossy_payload, json.dumps(_plain(ev.payload), sort_keys=True),
+                         rz.reduce(ev).diagnostic, rz.view.primary.value))
+        return outs, (rz.view.primary.value, rz.view.processed_count)
+
+    rep1 = _replay()
+    rep2 = _replay()
+    assert rep1[0] == rep2[0] and rep1[1] == rep2[1]
+    assert rep1[0][2][0] is True          # tuple 事件 lossy 且重放确定
+    assert json.loads(rep1[0][2][1]) == {"tool": "fs.read_file", "x": [1, 2]}
+    assert rep1[1] == (WorkExecutionState.RUNNING.value, 3)
+
+
+# P5-4. 导出面与 diagnostic 无测试秘密
+def test_patch5d_exports_and_diagnostics_clean():
+    """reviewer P5-4：秘密样本经完整信封+归约路径后，payload / to_dict / repr /
+    event_id / reducer diagnostic 中均不得出现原始秘密。"""
+    # 每条样本经 normalizer → reducer 全链路，导出面干净
+    for i, (sample, value) in enumerate(_SECRET_VALUE_SAMPLES):
+        n = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+        ev = n.normalize({"event_id": f"s5d_{i}", "type": "tool.progress",
+                          "payload": {"message": sample}})
+        exported = json.dumps(_plain(ev.to_dict()), ensure_ascii=False, sort_keys=True)
+        assert sample not in exported, sample
+        assert value not in json.dumps(_plain(ev.payload), ensure_ascii=False,
+                                       sort_keys=True), sample
+        assert sample not in repr(ev) and value not in ev.event_id
+    # reducer typed diagnostic 不含原始秘密（secret 碰撞路径）
+    n2, r2 = _fresh()
+    _feed(n2, r2, [
+        {"event_id": "d1", "type": "queued"},
+        {"event_id": "d2", "type": "running"},
+        {"event_id": "dup", "type": "tool.started",
+         "payload": {"tool": "fs.read_file", "password": "AAA"}},
+    ])
+    res = r2.reduce(n2.normalize({"event_id": "dup", "type": "tool.started",
+                                  "payload": {"tool": "fs.read_file",
+                                              "password": "BBB"}}))
+    assert res.diagnostic.startswith("event_id_ambiguous:")
+    assert "AAA" not in res.diagnostic and "BBB" not in res.diagnostic
+
+
+# P5-5. Patch 1–4 关键语义无回归（回归快照）
+def test_patch5e_patch1to4_semantics_no_regression():
+    """reviewer P5-5：Patch 5 收紧嵌入秘密值脱敏与 tuple 类型擦除后，Patch 1–4
+    关键语义保持——secret ambiguous、fallback event_id 不依赖 raw payload、
+    工具身份 lexical contract、generic progress self-loop。"""
+    # (a) Patch 4：同 event_id 不同 secret-bearing payload → event_id_ambiguous
+    n, r = _fresh()
+    _feed(n, r, [
+        {"event_id": "a1", "type": "queued"},
+        {"event_id": "a2", "type": "running"},
+        {"event_id": "amb", "type": "tool.started",
+         "payload": {"tool": "fs.read_file", "password": "AAA"}},
+    ])
+    res = r.reduce(n.normalize({"event_id": "amb", "type": "tool.started",
+                                "payload": {"tool": "fs.read_file", "password": "BBB"}}))
+    assert res.diagnostic.startswith("event_id_ambiguous:")
+    # (b) Patch 4：fallback event_id 不依赖 raw payload（AAA vs BBB 同位置同 id）
+    def _ids(secret):
+        nz = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+        return [nz.normalize(raw).event_id for raw in (
+            {"type": "queued"},
+            {"type": "running"},
+            {"type": "tool.started",
+             "payload": {"tool": "fs.read_file", "password": secret}},
+        )]
+    assert _ids("AAA") == _ids("BBB")
+    # (c) Patch 4：工具身份 lexical contract（斜杠拒绝）
+    r3 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r3, WorkExecutionState.RUNNING)
+    res = r3.reduce(_mk(EventKind.TOOL_STARTED, "lx1", payload={"tool": "fs/read"}))
+    assert not res.applied and "tool_identity_invalid" in res.diagnostic
+    # (d) Patch 3：generic message.delta 无工具身份 → 合法 self-loop
+    n4, r4 = _fresh()
+    _feed(n4, r4, [
+        {"event_id": "g1", "type": "queued"},
+        {"event_id": "g2", "type": "running"},
+    ])
+    ev = n4.normalize({"event_id": "g3", "type": "message.delta",
+                       "data": {"delta": "tick"}})
+    res = r4.reduce(ev)
+    assert res.applied and not res.diagnostic
+    assert r4.view.primary is WorkExecutionState.RUNNING
+    assert r4.view.tool_subphase is False and not r4.view.is_terminal

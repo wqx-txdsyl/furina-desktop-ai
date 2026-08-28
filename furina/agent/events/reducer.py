@@ -419,7 +419,7 @@ class WorkExecutionReducer:
     event_id_ambiguous**）；非法转移/终态吸收/审批身份不匹配
     返回 typed diagnostic 且**零状态变更、不烧毁 event_id**（前置条件满足后可重放）；
     审批 resolved 必须匹配当前挂起 approval_id（精确绑定、词法校验、无截断；
-    WAITING 中同 id **且同请求内容**重投幂等观察（**lossy 内容 → 
+    WAITING 中同 id **且同请求内容**重投幂等观察（**lossy 内容 →
     approval_request_ambiguous，不判定幂等**）、同 id 异内容 typed conflict、
     异 id conflict，均零变更不覆盖 pending）；outcome 别名一致性（冲突
     outcome_conflict、非法/未知 fail-closed、approve≈approved 等价）；工具事件按

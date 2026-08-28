@@ -188,15 +188,26 @@ def _is_secret_key(key: str) -> bool:
 #: 键值形态的标签允许 `_`/`-` 分隔（api_key/api-key/apikey 同义），键名允许被
 #: JSON 引号包裹（``{"access_token":"atk"}``），避免泄漏 "Authorization: Bearer
 #: xyz" / "password=hunter2" / 'token: abc123' 等形态。
+#: 秘密值规则（Reviewer Patch 5）：**1 字符及以上**均算秘密值（支持短值
+#: password=x / token=短）；值字符含 Unicode 与常见特殊字符（p@ss / abc@def /
+#: 秘密）；**quoted 值由值自身携带配对引号**（覆盖到闭合引号，password="a b" /
+#: {"access_token":"x"}），**unquoted 值至少覆盖到空白/行结束/明确结构分隔符**
+#: （[^…] 排除集：空白、引号、{}[]()、;,——值内含 = / @ / Unicode 等一律整段
+#: 覆盖，绝不只替换前缀残留后缀）；`[` 排除同时保证已插入的 [REDACTED] 标记
+#: 不会被二次当作秘密值匹配。
+#: 负向对照（不得误杀）：token_count=5（token 后紧跟 `_`）、author=alice、
+#: ordinary message——普通字段/自然语言保持原文。
 _AUTHORIZATION_LINE_RE = re.compile(
     r"(?i)(?<![a-z0-9_])(authorization)\s*[:=]\s*([^\r\n]+)")
+#: unquoted 秘密值的字符集合（排除：空白/引号/结构分隔符；1 字符及以上）。
+_SECRET_VALUE_CHARS = r"[^\s\"'{}\[\]();,]+"
 _KEY_VALUE_SECRET_RE = re.compile(
     r"(?i)(?<![a-z0-9_])(password|passwd|pwd|secret|bearer|"
     r"api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
-    r"private[_-]?key|cookie|token|auth[_-]?token)\s*[\"']?([:=])\s*[\"']?"
-    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[a-z0-9._~+/=-]{3,})")
+    r"private[_-]?key|cookie|token|auth[_-]?token)\s*[\"']?([:=])\s*"
+    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|" + _SECRET_VALUE_CHARS + ")")
 _AUTH_SCHEME_TOKEN_RE = re.compile(
-    r"(?i)(?<![a-z0-9_])(bearer|basic|digest)\s+([a-z0-9._~+/=-]{3,})")
+    r"(?i)(?<![a-z0-9_])(bearer|basic|digest)\s+(" + _SECRET_VALUE_CHARS + ")")
 
 
 def _redact_secret_values_lossy(text: str) -> Tuple[str, bool]:
@@ -280,9 +291,20 @@ def _sanitize_value_lossy(value: Any, depth: int) -> Tuple[Any, bool]:
                 out[key] = cleaned
                 lossy = lossy or lv
         return out, lossy
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list):
         out_list = []
         lossy = False
+        for v in value:
+            cleaned, lv = _sanitize_value_lossy(v, depth + 1)
+            out_list.append(cleaned)
+            lossy = lossy or lv
+        return out_list, lossy
+    if isinstance(value, tuple):
+        # tuple→list 类型擦除（Reviewer Patch 5）：输出形态与 list 相同但 raw
+        # 无法唯一复原（(1,) 与 [1] 清洗后同为 [1]）→ 一律 lossy，去重/幂等层
+        # 不得把同 event_id 的 list/tuple 静默判为 duplicate。
+        out_list = []
+        lossy = True
         for v in value:
             cleaned, lv = _sanitize_value_lossy(v, depth + 1)
             out_list.append(cleaned)
