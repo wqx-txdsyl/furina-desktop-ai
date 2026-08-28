@@ -31,7 +31,7 @@
   **404 run_not_found 且零副作用**（源码：approval/stop 在状态查索后、任何状态变更前
   返回 404）→ probe 的无副作用主动握手面。
 
-安全边界（任务书 §5 + 16C Reviewer Patch 1 约束）：
+安全边界（任务书 §5 + 16C Reviewer Patch 1/2 约束）：
 
 - **默认仅 loopback**：base_url 必须是 ``http://127.0.0.1|localhost|::1[:port]``；userinfo
   （URL 内凭证）、query、fragment、非 http scheme、非空路径、非法端口一律构造期
@@ -44,25 +44,47 @@
 - **不发送 Persona/SOUL/Memory**：submit 只携带 ``canonical_user_request`` 文本；不用
   自然语言 instructions 假装权限隔离（``instructions`` 字段绝不发送）；
 - **submit 只接受完整 WorkContract**：16A ``WorkContract.from_dict`` exact-schema +
-  content_hash 复核（缺字段/未知字段/篡改 hash/自签扩权 submit 前拒绝）；契约
-  allowed_capabilities 必须与本 backend 不可变 capability envelope **封闭相等**（不只是子集）；
-- **profile identity 绑定**：probe 把 ``/v1/capabilities.model`` 与构造期
-  ``expected_profile_identity`` 精确比对，缺失/不一致 → unhealthy；
+  content_hash **完整性摘要**复核（缺字段/未知字段/摘要与内容不符 submit 前拒绝）；
+  content_hash 是 integrity hash，**不声明 signature/授权真实性**——授权真实性来自构造期
+  注入的可信 contract authorizer（contract_id + content_hash 精确确认该契约已由组合根
+  授权；未知 id、hash 不同、authorizer 异常或返回非 True → submit 前拒绝、零 HTTP）；
+  契约 allowed_capabilities 必须与本 backend 不可变 capability envelope **封闭相等**
+  （不只是子集）；
+- **profile/toolset 精确封闭（Patch 2）**：构造期冻结不可变 ``expected_profile_tools``
+  （每个 expected tool 必须有 tool→capability 归属、归属 capability 集与 envelope 封闭
+  一致）；成功 probe 必须同时满足 ``capabilities.model == expected_profile_identity``、
+  ``toolsets.platform == api_server``、enabled 工具全部合法非空 str、实际 enabled 集 ==
+  expected 集**精确相等**（多/少/未知/坏类型一律 unhealthy）；submit 要求最近一次 probe
+  healthy、未过期且快照精确匹配——未 probe / probe 失败 / probe 过期 → 零 POST
+  （submit 不自动补 probe）；
 - **completed ≠ VERIFIED**：Hermes 终态一律映射 16B ``run.completed`` 等 BackendEvent，
   16E reducer 折算 ``BACKEND_DONE_UNVERIFIED``；本模块不产生任何验证语义；
 - **断线零重复 submit**：submit 幂等账本按 contract_id 原子 reservation（同 id 同 hash
   幂等返回既有 handle，同 id 异 hash 类型化冲突；POST 已发出而结果不确定 → reservation
-  中毒，绝不自动重提）；events/reconcile 路径零 POST /v1/runs；
+  中毒，绝不自动重提）；**run 账本容量在 POST 前原子预留**（容量满 → 零 POST）；202 返回
+  的 run_id 已属另一契约 → 不覆盖既有归属（原 owner/槽位/事件归属不变），本契约 reservation
+  中毒 + typed conflict；events/stop 校验 ``handle.correlation == 契约 id``；events/
+  reconcile 路径零 POST /v1/runs；
 - **approval 只走 16D 公开接口**：SSE approval.request 的 tool 必须映射到构造期
   tool→capability 封闭映射、且该 capability ∈ 契约 allowed_capabilities，否则
   **自动 deny（fail-closed，不向用户制造 16D 审批请求）**；映射成功经
   ``broker.get_or_create_request`` 原子 get-or-create（完整身份含 operation_digest——
-  同 tool 同 preview 不同 command ⇒ 不同 approval）；决议只消费
-  ``broker.wait_for_resolution`` 的**真实 Furina 决议**；转发只允许 ``once``/``deny``——
-  **绝不发送 always/session**（不放宽 16D 决议）；同一 approval 只向 Hermes 转发一次
-  （并发 resolve 单请求获胜；第二次调用 typed no-op）；``once`` 转发成功后真实消费 16D
-  approval；``resolved==1`` 精确才声明成功；409 仅在错误码精确为
+  同 tool 同 preview 不同 command ⇒ 不同 approval）；approval 账本容量/预留/broker 创建/
+  入账为封闭状态机（并发 cap=1 最终索引 ≤1；容量失败不遗留可用 16D request，Hermes 只收
+  fail-closed deny）；决议只消费 ``broker.wait_for_resolution`` 的**真实 Furina 决议**；
+  **once 转发边界 = 16D 真实原子 permit/消费语义（Patch 2）**：经组合根注入的
+  ``PermitIssuer``（决策面 ``create_permit_issuer`` 创建）签发 permit，在发送 once 的
+  **立即边界** ``broker.consume_permit`` 单锁原子复核 contract_id/hash + run_id + tool +
+  capability + 原始 args + approval/grant 状态后单点提交——仅消费成功才 POST once；
+  决议与远端边界之间的撤销 → 消费失败 → fail-closed deny，绝不发送 once（"POST 后
+  broker.consume" 已废除）；转发只允许 ``once``/``deny``——**绝不发送 always/session**
+  （不放宽 16D 决议）；同一 approval 只向 Hermes 转发一次（并发 resolve 单请求获胜；
+  第二次调用 typed no-op）；``resolved==1`` 精确才声明成功；409 仅在错误码精确为
   ``approval_not_pending`` 时视为 no-op；
+- **HTTP 严格边界（Patch 2）**：只接受精确媒体类型 ``application/json``（可带
+  ``; charset=…`` 参数；application/jsonp、text/application/json-evil、非 charset 参数
+  一律拒绝）；全部普通 JSON 响应**流式/有界读取**（> 4 MiB 立即拒绝，超限内容不入
+  异常）；错误码/诊断片段读取同样有界（64 KiB；超限只留标记）；
 - ``hermes proxy`` 不注册、CLI 仅诊断、webhook 不作为结果通道：本模块没有任何对应代码路径。
 
 全部 buffer 有硬上限（SSE 行 256 KiB、单事件 payload 有界、JSON body 有界、
@@ -78,12 +100,12 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
 import httpx
 
-from furina.agent.approval import ApprovalBroker, ApprovalStateError
+from furina.agent.approval import ApprovalBroker, ApprovalStateError, PermitIssuer
 from furina.agent.approval.models import ApprovalDecisionKind, ResolutionStatus
 from furina.agent.permission import Permission
 from furina.agent.work_contract import WorkContract, WorkContractValidationError
@@ -137,8 +159,13 @@ _MAX_SSE_LINE_BYTES = 256 * 1024
 #: 单事件 payload 硬上限（交付 16E 前的预界；16E 信封仍有自己的预算）。
 _MIN_EVENT_BYTES = 1024
 _MAX_EVENT_BYTES = 1 << 20
-#: JSON endpoint 响应 body 硬上限（有限 body；超限 = 协议错误，不解析）。
+#: JSON endpoint 响应 body 硬上限（流式/有界读取；超限 = 协议错误，立即停止读取，
+#: 超限内容绝不进入异常文本）。
 _MAX_JSON_BODY_BYTES = 4 * (1 << 20)
+#: 非 2xx 错误体读取硬上限（错误码/诊断片段同样有界；超限只留标记，不留内容）。
+_MAX_ERROR_BODY_BYTES = 64 * 1024
+#: 唯一合法 JSON 媒体类型（type/subtype 精确相等；参数仅容 charset=<token>）。
+_JSON_MEDIA_TYPE = "application/json"
 
 #: 账本硬容量（满容量 fail-closed；绝不淘汰——淘汰会诱导旧 contract 被重新执行）。
 _MAX_TRACKED_CONTRACTS = 512
@@ -267,6 +294,21 @@ class _RunRecord:
         self.slot_released = False
 
 
+class _ApprovalOpRecord:
+    """approval_id → 帧时刻冻结的完整操作身份（run_id + tool + capability + 原始
+    canonical operation args）——resolve 边界 permit 签发/原子消费的唯一身份来源
+    （禁止在转发时刻重新解释帧或改用 permit 自身字段自证）。"""
+
+    __slots__ = ("run_id", "tool", "capability", "op_args")
+
+    def __init__(self, run_id: str, tool: str, capability: str,
+                 op_args: Mapping[str, Any]) -> None:
+        self.run_id = run_id
+        self.tool = tool
+        self.capability = capability
+        self.op_args = dict(op_args)
+
+
 class _SubmitReservation:
     """contract_id 的原子 submit reservation（并发同契约单 POST 的所有权凭据）。
 
@@ -337,8 +379,11 @@ class HermesExecutionBackend(ExecutionBackend):
         api_key: str,
         approval_broker: ApprovalBroker,
         expected_profile_identity: str,
+        expected_profile_tools: Iterable[str],
         tool_capability_map: Mapping[str, str],
+        contract_authorizer: Callable[[str, str], bool],
         capability_ids: Tuple[str, ...] = (),
+        permit_issuers: Optional[Mapping[str, PermitIssuer]] = None,
         probe_ttl_seconds: float = 30.0,
         max_concurrent_runs: int = 1,
         max_tracked_contracts: int = _MAX_TRACKED_CONTRACTS,
@@ -379,6 +424,63 @@ class HermesExecutionBackend(ExecutionBackend):
                     f"tool_capability_map[{tool!r}] → {cap!r} 不在本 backend 显式 envelope "
                     f"{sorted(envelope)} 内（映射越权，构造期拒绝）")
             frozen_map[tool] = cap
+        # -- expected profile tools（不可变）：probe 工具面封闭比对的构造期权威 ----------
+        try:
+            tools_materialized = tuple(expected_profile_tools)
+        except TypeError as exc:
+            raise HermesConfigurationError(
+                f"expected_profile_tools 必须是 str 可迭代，得到 "
+                f"{type(expected_profile_tools).__name__}") from exc
+        if not tools_materialized:
+            raise HermesConfigurationError(
+                "expected_profile_tools 必须非空（dedicated profile 的完整 enabled 工具面；"
+                "空工具面不可证明，拒绝构造）")
+        seen_tools: Set[str] = set()
+        for tool in tools_materialized:
+            if not isinstance(tool, str) or not tool.strip():
+                raise HermesConfigurationError(
+                    f"expected_profile_tools 条目必须是非空 str，得到 {tool!r}")
+            if tool in seen_tools:
+                raise HermesConfigurationError(
+                    f"expected_profile_tools 出现重复条目 {tool!r}（封闭集合语义，拒绝）")
+            seen_tools.add(tool)
+        unattributed = sorted(seen_tools - set(frozen_map))
+        if unattributed:
+            raise HermesConfigurationError(
+                f"expected_profile_tools 中存在无 tool→capability 归属的工具 {unattributed}"
+                "（每个 expected tool 都必须有封闭映射归属，构造期拒绝）")
+        attributed = {frozen_map[t] for t in seen_tools}
+        if attributed != set(envelope):
+            raise HermesConfigurationError(
+                f"expected 工具的 capability 归属集 {sorted(attributed)} 与本 backend "
+                f"capability envelope {sorted(envelope)} 非封闭一致（每个 envelope 能力都必须"
+                "由至少一个 expected tool 归属，且归属不得越出 envelope）")
+        # -- 可信 contract authorizer（组合根注入；submit 前按 id+integrity hash 精确确认）--
+        if not callable(contract_authorizer):
+            raise HermesConfigurationError(
+                "contract_authorizer 必须是 callable（contract_id, content_hash）→ bool："
+                "由可信组合根确认该契约已获授权；缺失即拒绝构造（integrity hash 不声明"
+                "授权真实性）")
+        # -- permit issuers（16D 决策面创建、组合根注入；外部执行边界的 permit 来源）----
+        if permit_issuers is not None and not isinstance(permit_issuers, Mapping):
+            raise HermesConfigurationError(
+                f"permit_issuers 必须是 contract_id → PermitIssuer Mapping 或 None，得到 "
+                f"{type(permit_issuers).__name__}")
+        frozen_issuers: Dict[str, PermitIssuer] = {}
+        if permit_issuers:
+            for cid, issuer in permit_issuers.items():
+                if not isinstance(cid, str) or not cid.strip():
+                    raise HermesConfigurationError(f"permit_issuers 键非法: {cid!r}")
+                if not isinstance(issuer, PermitIssuer):
+                    raise HermesConfigurationError(
+                        f"permit_issuers[{cid!r}] 必须是 PermitIssuer（经 "
+                        f"broker.create_permit_issuer 于决策面创建），得到 "
+                        f"{type(issuer).__name__}")
+                if issuer.expected_contract_id != cid:
+                    raise HermesConfigurationError(
+                        f"permit_issuers 键 {cid!r} 与 issuer 内部绑定 "
+                        f"{issuer.expected_contract_id!r} 不一致（身份精确绑定，拒绝）")
+                frozen_issuers[cid] = issuer
         if (isinstance(max_concurrent_runs, bool)
                 or not isinstance(max_concurrent_runs, int) or max_concurrent_runs < 1
                 or max_concurrent_runs > 1024):
@@ -402,6 +504,9 @@ class HermesExecutionBackend(ExecutionBackend):
         self._broker = approval_broker
         self._expected_profile = expected_profile_identity.strip()
         self._tool_capability_map: Dict[str, str] = frozen_map
+        self._expected_profile_tools: Tuple[str, ...] = tuple(sorted(seen_tools))
+        self._contract_authorizer = contract_authorizer
+        self._permit_issuers: Dict[str, PermitIssuer] = frozen_issuers
         self._probe_ttl = _finite_positive("probe_ttl_seconds", probe_ttl_seconds, upper=600.0)
         self._request_timeout = _finite_positive("request_timeout_seconds", request_timeout_seconds)
         self._sse_heartbeat_timeout = _finite_positive(
@@ -433,7 +538,9 @@ class HermesExecutionBackend(ExecutionBackend):
         self._lock = threading.RLock()
         self._contract_index: Dict[str, _SubmitReservation] = {}
         self._runs: Dict[str, _RunRecord] = {}
-        self._approval_run_index: Dict[str, str] = {}   # approval_id → run_id（身份精确索引）
+        self._runs_reserved = 0   # POST 前已预留、尚未入账的 run 槽位（容量原子预留）
+        self._approval_ops: Dict[str, _ApprovalOpRecord] = {}   # approval_id → 操作身份
+        self._approvals_reserved = 0   # broker 请求创建在途的容量预留（封闭状态机）
         self._approval_forwarded: Set[str] = set()      # exactly-once 转发守卫
         self._max_tracked_contracts = int(max_tracked_contracts)
         self._max_tracked_runs = int(max_tracked_runs)
@@ -462,6 +569,35 @@ class HermesExecutionBackend(ExecutionBackend):
         """最近一次成功 probe 捕获的 Hermes profile 工具面快照（服务器端
         /v1/toolsets enabled 工具名；不可变派生操作数据，非 C7 真相）。"""
         return self._profile_tools_snapshot
+
+    @property
+    def expected_profile_tools(self) -> Tuple[str, ...]:
+        """构造期冻结的 expected profile 工具面（probe 精确比对的封闭基准；不可变）。"""
+        return self._expected_profile_tools
+
+    def register_permit_issuer(self, issuer: PermitIssuer) -> None:
+        """运行期注册 contract 的 PermitIssuer（**仅 broker owner 线程/决策面**）。
+
+        动态授权新契约时由可信组合根调用：issuer 本身只能经
+        ``broker.create_permit_issuer``（owner 线程）创建，producer 线程无法伪造
+        签发能力；同 contract_id 绑定不同 content hash 的 issuer 拒绝注册。
+        未注册 issuer 的契约在审批边界一律 fail-closed deny（绝不 once）。
+        """
+        if not isinstance(issuer, PermitIssuer):
+            raise HermesConfigurationError(
+                f"issuer 必须是 PermitIssuer，得到 {type(issuer).__name__}")
+        if not self._broker.is_owner():
+            raise HermesConfigurationError(
+                "register_permit_issuer 只允许 broker owner 线程（决策面）——"
+                "producer/executor 线程不得注册审批边界能力")
+        with self._lock:
+            existing = self._permit_issuers.get(issuer.expected_contract_id)
+            if existing is not None and existing is not issuer \
+                    and existing.expected_content_hash != issuer.expected_content_hash:
+                raise HermesConfigurationError(
+                    f"contract {issuer.expected_contract_id!r} 已绑定不同 content hash 的 "
+                    "issuer（换约需新 contract_id，拒绝注册）")
+            self._permit_issuers[issuer.expected_contract_id] = issuer
 
     # -- HTTP 客户端（显式生命周期） ------------------------------------------------
     def _get_client(self) -> httpx.Client:
@@ -496,29 +632,79 @@ class HermesExecutionBackend(ExecutionBackend):
         return HermesTransportError(
             f"hermes {stage} 传输失败: {type(exc).__name__}（细节脱敏）")
 
-    def _redact_body_snippet(self, body: str, *, cap: int = 200) -> str:
-        return self._redact(str(body))[:cap]
-
-    def _require_json_object(self, stage: str, response: httpx.Response) -> Dict[str, Any]:
-        """2xx + application/json + 有限 body + JSON object 严格解析；
-        3xx/非 2xx/content-type 不符/body 超限/坏 JSON 一律类型化错误。"""
-        if 300 <= response.status_code < 400:
-            raise HermesProtocolError(
-                f"hermes {stage} 返回 redirect {response.status_code}"
-                "（非本地重定向 fail-closed）")
-        if response.status_code // 100 != 2:
-            snippet = self._redact_body_snippet(response.text)
-            raise HermesTransportError(
-                f"hermes {stage} HTTP {response.status_code}: {snippet}")
-        content_type = response.headers.get("content-type", "")
-        if "application/json" not in content_type.lower():
-            raise HermesProtocolError(
-                f"hermes {stage} content-type 必须 application/json，得到 {content_type!r}")
-        if len(response.content) > _MAX_JSON_BODY_BYTES:
-            raise HermesProtocolError(
-                f"hermes {stage} 响应 body 超过硬上限 {_MAX_JSON_BODY_BYTES} bytes")
+    # -- HTTP 严格边界（Patch 2）：流式/有界读取 + 精确媒体类型 ----------------------
+    def _open_stream(self, stage: str, method: str, path: str, *,
+                     json_body: Optional[Mapping[str, Any]] = None
+                     ) -> Tuple[httpx.Response, Any]:
+        """打开流式请求（响应体绝不整体缓冲；调用方以 cm.__exit__ 显式关闭）。
+        连接/发送失败 → HermesTransportError（POST 语义下"是否到达服务器"不可判，
+        由调用方按其 reservation 状态机处置）。"""
+        client = self._get_client()
+        cm = client.stream(method, path,
+                           json=dict(json_body) if json_body is not None else None)
         try:
-            body = response.json()
+            response = cm.__enter__()
+        except Exception as exc:
+            try:
+                cm.__exit__(None, None, None)
+            except Exception:
+                pass
+            raise self._transport_failure(stage, exc) from exc
+        return response, cm
+
+    @staticmethod
+    def _close_stream(cm: Any) -> None:
+        try:
+            cm.__exit__(None, None, None)
+        except Exception:
+            pass
+
+    def _bounded_body(self, response: httpx.Response, limit: int) -> Optional[bytes]:
+        """有界读取：累计超过 ``limit`` 立即停止读取并返回 None（超限内容不进入
+        任何返回值/异常）；读途中传输异常 → 返回已读前缀（调用方严格解析后按
+        协议错误 fail-closed）。"""
+        buf = bytearray()
+        try:
+            for chunk in response.iter_bytes():
+                buf.extend(chunk)
+                if len(buf) > limit:
+                    return None
+        except Exception:
+            pass
+        return bytes(buf)
+
+    def _check_json_media_type(self, stage: str, response: httpx.Response) -> None:
+        """精确媒体类型：type/subtype 必须 == application/json（大小写不敏感）；
+        参数**仅**允许 ``charset=<token>``。application/jsonp、
+        text/application/json-evil、无值/非 charset 参数一律类型化拒绝。"""
+        raw = response.headers.get("content-type", "")
+        parts = [p.strip() for p in raw.split(";")] if raw.strip() else []
+        if not parts or not parts[0]:
+            raise HermesProtocolError(
+                f"hermes {stage} content-type 缺失，得到 {raw!r}")
+        if parts[0].lower() != _JSON_MEDIA_TYPE:
+            raise HermesProtocolError(
+                f"hermes {stage} content-type 必须精确 '{_JSON_MEDIA_TYPE}'"
+                f"（仅可带 charset 参数），得到 {raw!r}")
+        for param in parts[1:]:
+            name, sep, value = param.partition("=")
+            if not sep or name.strip().lower() != "charset" or not value.strip():
+                raise HermesProtocolError(
+                    f"hermes {stage} content-type 参数仅允许 charset=<token>，"
+                    f"得到 {raw!r}")
+
+    def _read_json_object(self, stage: str, response: httpx.Response) -> Dict[str, Any]:
+        """2xx 已确认的流式响应体严格解析：精确媒体类型 + 有界读取
+        （> _MAX_JSON_BODY_BYTES 立即拒绝，超限内容不入异常）+ 严格 UTF-8/JSON
+        object；任一违反 → 类型化协议错误。"""
+        self._check_json_media_type(stage, response)
+        raw = self._bounded_body(response, _MAX_JSON_BODY_BYTES)
+        if raw is None:
+            raise HermesProtocolError(
+                f"hermes {stage} 响应 body 超过硬上限 {_MAX_JSON_BODY_BYTES} bytes"
+                "（流式有界读取，立即拒绝；超限内容不入异常）")
+        try:
+            body = json.loads(raw.decode("utf-8"))
         except Exception as exc:
             raise HermesProtocolError(
                 f"hermes {stage} 响应不是合法 JSON: {type(exc).__name__}") from exc
@@ -527,19 +713,33 @@ class HermesExecutionBackend(ExecutionBackend):
                 f"hermes {stage} 响应必须是 JSON object，得到 {type(body).__name__}")
         return body
 
-    def _error_code_of(self, response: httpx.Response) -> Optional[str]:
-        """404/409 特殊路径的真实错误码提取（形状损坏 → None，绝不当作已知码吞掉）。"""
+    def _read_error_payload(self, response: httpx.Response) -> Tuple[Optional[str], str]:
+        """非 2xx 错误体的**有界**读取与解析：返回 (error.code, 脱敏片段)。错误体
+        超 _MAX_ERROR_BODY_BYTES → (None, 固定标记)（内容不留存）；JSON 严格解析，
+        形状损坏 → code=None（绝不当作已知码吞掉）。"""
+        raw = self._bounded_body(response, _MAX_ERROR_BODY_BYTES)
+        if raw is None:
+            return None, "[error body over limit]"
+        if not raw:
+            return None, ""
+        code: Optional[str] = None
         try:
-            body = response.json()
+            body = json.loads(raw.decode("utf-8"))
+            if isinstance(body, dict):
+                err = body.get("error")
+                if isinstance(err, Mapping):
+                    c = err.get("code")
+                    code = c if isinstance(c, str) else None
         except Exception:
-            return None
-        if not isinstance(body, dict):
-            return None
-        err = body.get("error")
-        if not isinstance(err, Mapping):
-            return None
-        code = err.get("code")
-        return code if isinstance(code, str) else None
+            code = None
+        snippet = self._redact(raw.decode("utf-8", "replace"))[:200]
+        return code, snippet
+
+    def _error_code_of(self, response: httpx.Response) -> Optional[str]:
+        """404/409 特殊路径的真实错误码提取（复用有界严格读取；形状损坏/超限 →
+        None，绝不当作已知码吞掉，绝不无界读取 response.text/json）。"""
+        code, _snippet = self._read_error_payload(response)
+        return code
 
     # -- 发现：主动握手 probe -----------------------------------------------------
     def probe(self) -> BackendHealth:
@@ -564,30 +764,39 @@ class HermesExecutionBackend(ExecutionBackend):
             return BackendHealth(installed=installed, reachable=reachable, healthy=False,
                                  checked_at=now, reason=reason, expiry=expiry)
 
-        client = self._get_client()
-        # 1) /health（无认证面）
+        # 1) /health（无认证面；流式有界读取）
         try:
-            resp = client.get(_PATH_HEALTH)
-        except Exception as exc:
+            response, cm = self._open_stream("health", "GET", _PATH_HEALTH)
+        except HermesTransportError as exc:
             return _fail(f"health_unreachable:{type(exc).__name__}", reachable=False)
         try:
-            body = self._require_json_object("health", resp)
-        except BackendError as exc:
-            return _fail(f"health_bad_response:{type(exc).__name__}")
+            if response.status_code != 200:
+                return _fail(f"health_http_{response.status_code}")
+            try:
+                body = self._read_json_object("health", response)
+            except BackendError:
+                return _fail("health_bad_response")
+        finally:
+            self._close_stream(cm)
         if body.get("status") != "ok" or body.get("platform") != "hermes-agent" \
                 or not isinstance(body.get("version"), str) or not body.get("version"):
             return _fail("health_shape_contradiction")
         # 2) /v1/capabilities（Bearer；广告是必要条件 + profile identity 精确绑定）
         try:
-            resp = client.get(_PATH_CAPABILITIES)
-        except Exception as exc:
+            response, cm = self._open_stream("capabilities", "GET", _PATH_CAPABILITIES)
+        except HermesTransportError as exc:
             return _fail(f"capabilities_unreachable:{type(exc).__name__}", reachable=False)
-        if resp.status_code == 401:
-            return _fail("auth_rejected")
         try:
-            body = self._require_json_object("capabilities", resp)
-        except BackendError as exc:
-            return _fail(f"capabilities_bad_response:{type(exc).__name__}")
+            if response.status_code == 401:
+                return _fail("auth_rejected")
+            if response.status_code != 200:
+                return _fail(f"capabilities_http_{response.status_code}")
+            try:
+                body = self._read_json_object("capabilities", response)
+            except BackendError:
+                return _fail("capabilities_bad_response")
+        finally:
+            self._close_stream(cm)
         if body.get("object") != "hermes.api_server.capabilities":
             return _fail("capabilities_object_contradiction")
         auth = body.get("auth")
@@ -609,31 +818,46 @@ class HermesExecutionBackend(ExecutionBackend):
                 return _fail(f"capability_missing:{name}")
         # 3) /v1/toolsets（Bearer）：dedicated profile/toolset 边界的权威证据面 ——
         #    api_server 平台实际暴露给 run agent 的工具集（enabled + 具体工具名）。
+        #    Patch 2：platform 必须 api_server；enabled 工具必须全部合法非空 str；
+        #    实际工具面与构造期 expected_profile_tools **精确相等**（多/少/未知/坏
+        #    类型一律 unhealthy）。
         try:
-            resp = client.get(_PATH_TOOLSETS)
-        except Exception as exc:
+            response, cm = self._open_stream("toolsets", "GET", _PATH_TOOLSETS)
+        except HermesTransportError as exc:
             return _fail(f"toolsets_unreachable:{type(exc).__name__}", reachable=False)
-        if resp.status_code == 401:
-            return _fail("auth_rejected")
-        if resp.status_code != 200:
-            return _fail(f"toolsets_endpoint_missing:{resp.status_code}")
         try:
-            body = self._require_json_object("toolsets", resp)
-        except BackendError as exc:
-            return _fail(f"toolsets_bad_response:{type(exc).__name__}")
+            if response.status_code == 401:
+                return _fail("auth_rejected")
+            if response.status_code != 200:
+                return _fail(f"toolsets_endpoint_missing:{response.status_code}")
+            try:
+                body = self._read_json_object("toolsets", response)
+            except BackendError:
+                return _fail("toolsets_bad_response")
+        finally:
+            self._close_stream(cm)
         if body.get("object") != "list" or not isinstance(body.get("data"), list):
             return _fail("toolsets_shape_contradiction")
+        if body.get("platform") != "api_server":
+            return _fail("toolsets_platform_contradiction")
         enabled_tools: Set[str] = set()
         for entry in body["data"]:
-            if not isinstance(entry, Mapping):
+            if not isinstance(entry, Mapping) or not isinstance(entry.get("enabled"), bool):
                 return _fail("toolsets_entry_contradiction")
+            tools = entry.get("tools")
+            if not isinstance(tools, list):
+                return _fail("toolsets_tools_contradiction")
             if entry.get("enabled") is True:
-                tools = entry.get("tools")
-                if not isinstance(tools, list):
-                    return _fail("toolsets_tools_contradiction")
                 for tool in tools:
-                    if isinstance(tool, str) and tool.strip():
-                        enabled_tools.add(tool)
+                    if not isinstance(tool, str) or not tool.strip():
+                        return _fail("toolsets_tool_invalid")
+                    enabled_tools.add(tool)
+        expected_tools = set(self._expected_profile_tools)
+        if enabled_tools != expected_tools:
+            missing = sorted(expected_tools - enabled_tools)[:8]
+            extra = sorted(enabled_tools - expected_tools)[:8]
+            return _fail(f"toolset_surface_mismatch:"
+                         f"missing={missing},extra={extra}")
         # 4) runs 面四端点无副作用主动握手：必定不存在的 probe run_id →
         #    全部必须 404 + 精确 run_not_found（required feature 广告与实际 endpoint
         #    一一对应；缺失/认证异常/形状矛盾 → unhealthy）。
@@ -647,24 +871,51 @@ class HermesExecutionBackend(ExecutionBackend):
         )
         for stage, method, path, json_body in handshakes:
             try:
-                resp = client.request(method, path, json=json_body)
-            except Exception as exc:
+                response, cm = self._open_stream(stage, method, path, json_body=json_body)
+            except HermesTransportError as exc:
                 return _fail(f"{stage}_unreachable:{type(exc).__name__}", reachable=False)
-            if resp.status_code == 401:
-                return _fail("auth_rejected")
-            if resp.status_code != 404:
-                return _fail(f"{stage}_endpoint_contradiction:{resp.status_code}")
-            if self._error_code_of(resp) != "run_not_found":
-                return _fail(f"{stage}_handshake_contradiction")
+            try:
+                if response.status_code == 401:
+                    return _fail("auth_rejected")
+                if response.status_code != 404:
+                    return _fail(f"{stage}_endpoint_contradiction:{response.status_code}")
+                if self._error_code_of(response) != "run_not_found":
+                    return _fail(f"{stage}_handshake_contradiction")
+            finally:
+                self._close_stream(cm)
         with self._lock:
             self._profile_tools_snapshot = tuple(sorted(enabled_tools))
         return BackendHealth(installed=True, reachable=True, healthy=True,
                              checked_at=now, reason="", expiry=expiry)
 
     # -- 执行：submit（幂等账本在本 backend，Hermes 不是幂等所有者） -----------------
+    def _require_fresh_healthy_probe(self) -> None:
+        """submit 前置门（Patch 2）：最近一次 probe 必须 healthy 且未过期，且 profile/
+        tool 快照与构造期 expected **精确匹配**。无任何 probe / probe 失败 / probe
+        过期 → 类型化拒绝、零 POST（submit **不自动补 probe**——新鲜事实由调用方
+        主动建立，submit 只消费既有事实）。"""
+        now = self._now_fn()
+        with self._lock:
+            cached = self._probe_cache
+            snapshot = self._profile_tools_snapshot
+        if cached is None:
+            raise HermesProtocolError(
+                "submit 前必须先 probe（本 backend 无任何 probe 事实；fail-closed 零 POST）")
+        if not cached.healthy:
+            raise HermesProtocolError(
+                f"最近一次 probe unhealthy（{cached.reason}）——submit 拒绝，零 POST")
+        if now >= cached.expiry:
+            raise HermesProtocolError(
+                "最近一次 probe 已过期——submit 拒绝（不自动补 probe），零 POST")
+        if snapshot != self._expected_profile_tools:
+            raise HermesProtocolError(
+                "probe 工具面快照与构造期 expected_profile_tools 不精确匹配"
+                "——submit 拒绝，零 POST")
+
     def submit(self, contract_projection: Mapping[str, Any], *,
                run_id: Optional[str] = None) -> BackendRunHandle:
         contract = self._parse_contract(contract_projection)
+        self._require_fresh_healthy_probe()
         reservation = self._acquire_reservation(contract)
         if isinstance(reservation, BackendRunHandle):
             return reservation   # 幂等重放：同契约 → 同 handle，零重复 submit
@@ -676,74 +927,109 @@ class HermesExecutionBackend(ExecutionBackend):
             self._settle_reservation(contract.contract_id, reservation,
                                      error=error, remove=True)
             raise error
-        client = self._get_client()
+        # run 账本容量必须在 POST **前**原子预留（Patch 2）：容量满 → 零 POST。
+        # 预留计数与账本同锁，len(runs) + reserved > cap 的窗口不存在。
+        with self._lock:
+            if len(self._runs) + self._runs_reserved >= self._max_tracked_runs:
+                error = BackendScopeViolation(
+                    f"run 账本硬容量已满（{self._max_tracked_runs}，POST 前预留失败，"
+                    "零 POST；fail-closed 不淘汰既有记录）")
+                self._settle_reservation_locked(contract.contract_id, reservation,
+                                                error=error, remove=True)
+                self._run_slots.release()
+                raise error
+            self._runs_reserved += 1
         try:
-            resp = client.post(_PATH_RUNS, json={"input": contract.canonical_user_request})
-        except Exception as exc:
-            # POST 已发出但结果不确定（连接/读/超时无法区分是否到达服务器）→
-            # reservation 中毒，绝不自动重提（防 Hermes 双跑）。
-            error = HermesTransportError(
-                f"hermes submit 结果不确定（{type(exc).__name__}）：是否已到达服务器"
-                "不可判；同 contract 后续 submit 绝不自动重提")
-            self._settle_reservation(contract.contract_id, reservation,
-                                     error=error, remove=False)
+            try:
+                response, cm = self._open_stream(
+                    "submit", "POST", _PATH_RUNS,
+                    json_body={"input": contract.canonical_user_request})
+            except HermesTransportError as exc:
+                # POST 已发出但结果不确定（连接/读/超时无法区分是否到达服务器）→
+                # reservation 中毒，绝不自动重提（防 Hermes 双跑）。
+                error = HermesTransportError(
+                    f"hermes submit 结果不确定（{exc}）：是否已到达服务器不可判；"
+                    "同 contract 后续 submit 绝不自动重提")
+                self._settle_reservation(contract.contract_id, reservation,
+                                         error=error, remove=False)
+                raise error from exc
+            try:
+                return self._submit_response_to_handle(contract, reservation, response)
+            finally:
+                self._close_stream(cm)
+        except BaseException:
+            # 失败/不确定路径：归还 POST 前预留的 run 槽位计数与并发信号量
+            #（成功路径在 _submit_response_to_handle 内已归还计数并保留信号量）。
+            with self._lock:
+                self._runs_reserved -= 1
             self._run_slots.release()
-            raise error from exc
-        # 零 fallback、零重试：非 202（含 3xx/401/429/5xx）= 服务器明确拒绝（无 run 产生）
-        # → reservation 释放（可由操作方重新尝试）；202 但身份形状损坏 = 不确定 → 中毒。
-        if resp.status_code != 202:
-            if resp.status_code // 100 == 2 or 300 <= resp.status_code < 400:
-                error = HermesProtocolError(
-                    f"hermes submit 必须 202，得到 {resp.status_code}"
-                    + ("（redirect 非本地重定向 fail-closed）" if 300 <= resp.status_code < 400
-                       else "（实测契约）"))
+            raise
+
+    def _submit_response_to_handle(self, contract: WorkContract,
+                                   reservation: _SubmitReservation,
+                                   response: httpx.Response) -> BackendRunHandle:
+        """submit 响应 → handle（在流关闭前完成有界解析与账本提交；成功路径在账本
+        锁内归还预留计数并保留并发信号量——run 已在服务器侧活跃）。
+
+        - 零 fallback、零重试：非 202（含 3xx/401/429/5xx）= 服务器明确拒绝（无 run
+          产生）→ reservation 释放（可由操作方重新尝试）；
+        - 202 但身份形状损坏（content-type/body/JSON/run_id/status）= 不确定 →
+          reservation 中毒（绝不自动重提）；
+        - 202 返回的 run_id 已属于**另一**契约 → 不覆盖既有归属（原 owner、槽位
+          计数、事件归属不变）；本 reservation 中毒 + typed conflict。
+        """
+        status = response.status_code
+        if status != 202:
+            _code, snippet = self._read_error_payload(response)
+            if status // 100 == 2 or 300 <= status < 400:
+                error: BackendError = HermesProtocolError(
+                    f"hermes submit 必须 202，得到 {status}"
+                    + ("（redirect 非本地重定向 fail-closed）" if 300 <= status < 400
+                       else "（实测契约）")
+                    + (f": {snippet}" if snippet else ""))
             else:
-                error = self._transport_failure_status("submit", resp)
+                error = HermesTransportError(
+                    f"hermes submit HTTP {status}: {snippet}")
             self._settle_reservation(contract.contract_id, reservation,
                                      error=error, remove=True)
-            self._run_slots.release()
             raise error
         try:
-            body = self._require_json_object("submit", resp)
+            body = self._read_json_object("submit", response)
             hermes_run_id = body.get("run_id")
-            status = body.get("status")
+            status_word = body.get("status")
             if not isinstance(hermes_run_id, str) or not _RUN_ID_RE.match(hermes_run_id):
                 raise HermesProtocolError(f"hermes submit run_id 非法: {hermes_run_id!r}")
-            if status != "started":
+            if status_word != "started":
                 raise HermesProtocolError(
-                    f"hermes submit status 必须 'started'，得到 {status!r}")
+                    f"hermes submit status 必须 'started'，得到 {status_word!r}")
         except BackendError as exc:
             self._settle_reservation(contract.contract_id, reservation,
                                      error=HermesTransportError(
                                          "hermes submit 202 身份形状损坏：结果不确定，"
                                          "不自动重提；同 contract 后续 submit 一律拒绝"),
                                      remove=False)
-            self._run_slots.release()
             raise exc
         handle = BackendRunHandle(backend_id=BACKEND_ID, run_id=hermes_run_id,
                                   correlation=contract.contract_id)
         with self._lock:
-            if len(self._runs) >= self._max_tracked_runs and hermes_run_id not in self._runs:
-                # run 已在服务器侧启动，但账本硬容量已满 → 拒绝交付（fail-closed，
-                # 不淘汰既有记录）；reservation 中毒防重提。
+            existing = self._runs.get(hermes_run_id)
+            if existing is not None and existing.contract_id != contract.contract_id:
+                # run_id 已属于另一契约：绝不覆盖（原 owner/槽位/事件归属不变）；
+                # 服务器侧确已受理（202）→ 本契约 reservation 中毒，防重提双跑。
+                conflict = HermesProtocolError(
+                    f"hermes submit 202 返回的 run_id {hermes_run_id!r} 已属于另一契约 "
+                    f"{existing.contract_id!r}（typed conflict：不覆盖既有归属；本契约"
+                    "结果不确定，不自动重提）")
                 self._settle_reservation_locked(contract.contract_id, reservation,
-                                                error=HermesTransportError(
-                                                    "run 账本硬容量已满（不淘汰既有记录）"
-                                                    "：结果不确定，不自动重提"),
-                                                remove=False)
-                self._run_slots.release()
-                raise self._runs_full_error()
-            self._runs[hermes_run_id] = _RunRecord(contract.contract_id, contract.content_hash,
-                                                   contract.allowed_capabilities)
+                                                error=conflict, remove=False)
+                raise conflict
+            if existing is None:
+                self._runs[hermes_run_id] = _RunRecord(contract.contract_id,
+                                                       contract.content_hash,
+                                                       contract.allowed_capabilities)
+            self._runs_reserved -= 1
             reservation.finish(handle=handle)
         return handle
-
-    def _runs_full_error(self) -> HermesTransportError:
-        return HermesTransportError("hermes run 账本硬容量已满（fail-closed，不淘汰）")
-
-    def _transport_failure_status(self, stage: str, resp: httpx.Response) -> HermesTransportError:
-        snippet = self._redact_body_snippet(resp.text)
-        return HermesTransportError(f"hermes {stage} HTTP {resp.status_code}: {snippet}")
 
     def _settle_reservation(self, contract_id: str, reservation: _SubmitReservation, *,
                             error: BackendError, remove: bool) -> None:
@@ -810,11 +1096,16 @@ class HermesExecutionBackend(ExecutionBackend):
 
     # -- WorkContract 权威解析（submit 前全部拒绝面） --------------------------------
     def _parse_contract(self, projection: Any) -> WorkContract:
-        """submit 输入唯一权威入口：16A exact-schema + content_hash 复核 + 后端授权。
+        """submit 输入唯一权威入口：16A exact-schema + content_hash **完整性摘要**复核
+        + 可信组合根 authorizer 精确授权确认 + 后端授权边界。
 
         - 非完整 WorkContract projection（缺字段/未知字段/schema marker 不符）→ 拒绝；
-        - content_hash 篡改（from_dict 从不重新签名，摘要不符即拒绝）→ 拒绝；
-        - allowed_backends 不含 hermes（自签扩权）→ 拒绝；
+        - content_hash 是 **integrity hash**（摘要与内容一致才通过；from_dict 从不
+          重新计算或背书摘要）——**不声明 signature/授权真实性**：授权真实性只来自
+          构造期注入的可信 contract authorizer（contract_id + content_hash 精确确认
+          该契约已由组合根授权；未知 id、hash 不同、authorizer 异常或返回非 True →
+          submit 前拒绝、零 HTTP）；
+        - allowed_backends 不含 hermes（越权自报）→ 拒绝；
         - 携带路径 scope（workspace_scoped=False 诚实声明）→ 拒绝；
         - allowed_capabilities 与本 backend envelope 非**封闭相等**（多、少、未知任何
           一侧不匹配）→ 拒绝——不只证明"契约是 backend 声明的子集"。
@@ -827,11 +1118,22 @@ class HermesExecutionBackend(ExecutionBackend):
         except WorkContractValidationError as exc:
             raise BackendScopeViolation(
                 f"contract_projection 未通过 16A canonical 校验（exact-schema + "
-                f"content_hash 复核）: {exc}") from exc
+                f"content_hash 完整性摘要复核）: {exc}") from exc
         if BACKEND_ID not in contract.allowed_backends:
             raise BackendScopeViolation(
                 f"contract.allowed_backends {sorted(contract.allowed_backends)} 不含 "
-                f"'{BACKEND_ID}'（契约不允许本 backend；自签扩权 submit 前拒绝）")
+                f"'{BACKEND_ID}'（契约不允许本 backend；越权自报 submit 前拒绝）")
+        try:
+            authorized = self._contract_authorizer(contract.contract_id, contract.content_hash)
+        except Exception as exc:
+            raise BackendScopeViolation(
+                f"contract authorizer 异常（fail-closed，submit 前拒绝、零 HTTP）: "
+                f"{type(exc).__name__}") from exc
+        if authorized is not True:
+            raise BackendScopeViolation(
+                f"契约 {contract.contract_id!r}@{contract.content_hash[:12]}… 未经可信组合根"
+                "authorizer 精确确认（未知 contract_id / content_hash 不符 / 返回非 True）"
+                "——submit 前拒绝，零 HTTP")
         ws = contract.workspace_scope
         if tuple(ws.read_roots) or tuple(ws.write_roots):
             raise BackendScopeViolation(
@@ -863,6 +1165,10 @@ class HermesExecutionBackend(ExecutionBackend):
         if record is None:
             raise HermesProtocolError(
                 f"未知 hermes run: {run_handle.run_id!r}（仅接受本 backend submit 的 run）")
+        if run_handle.correlation != record.contract_id:
+            raise HermesProtocolError(
+                f"events handle.correlation {run_handle.correlation!r} != run 账本契约 "
+                f"{record.contract_id!r}（伪造 correlation 拒绝；事件归属精确绑定）")
         # 权威生命周期同步：Hermes SSE 面不含 queued/running 生命周期事件（只有
         # tool/approval/终态帧），而权威 status 记录 + 源码次序（先 queued 后 running）
         # 是确认过的事实——同步最小前缀，供 16E 状态机建立合法上下文；绝不臆造终态。
@@ -918,20 +1224,22 @@ class HermesExecutionBackend(ExecutionBackend):
 
     def _read_authoritative_status(self, run_id: str, *, allow: Optional[frozenset],
                                    ) -> Optional[str]:
-        """status GET 严格解析：200 + application/json + 有限 body + object==hermes.run
-        + run_id 精确相等 + 状态词表。违反 → None（调用方自行 protocol.error；
-        **绝不产生终态**）。``allow`` 限定可接受状态（None = 全词表）。"""
-        client = self._get_client()
+        """status GET 严格解析：200 + 精确 application/json + 有界 body + object==
+        hermes.run + run_id 精确相等 + 状态词表。违反 → None（调用方自行
+        protocol.error；**绝不产生终态**）。``allow`` 限定可接受状态（None = 全词表）。"""
         try:
-            resp = client.get(_PATH_RUN.format(run_id=run_id))
-        except Exception:
-            return None
-        if resp.status_code != 200:
+            response, cm = self._open_stream("status", "GET", _PATH_RUN.format(run_id=run_id))
+        except HermesTransportError:
             return None
         try:
-            body = self._require_json_object("status", resp)
-        except BackendError:
-            return None
+            if response.status_code != 200:
+                return None
+            try:
+                body = self._read_json_object("status", response)
+            except BackendError:
+                return None
+        finally:
+            self._close_stream(cm)
         if body.get("object") != "hermes.run":
             return None
         frame_run = body.get("run_id")
@@ -972,11 +1280,8 @@ class HermesExecutionBackend(ExecutionBackend):
         try:
             if response.status_code == 404:
                 # 传输缓冲已被清除（此前断线/终态清扫）→ 交由 status reconcile。
-                # 404 必须携带精确 run_not_found 错误码，否则按协议矛盾可观察。
-                try:
-                    response.read()
-                except Exception:
-                    pass
+                # 404 必须携带精确 run_not_found 错误码，否则按协议矛盾可观察
+                #（错误码经有界严格读取提取）。
                 if self._error_code_of(response) not in (None, "run_not_found"):
                     yield self._make_event(run_id, "protocol.error",
                                            {"reason": "sse_404_wrong_code"})
@@ -1105,77 +1410,98 @@ class HermesExecutionBackend(ExecutionBackend):
         return self._make_event(run_id, token.strip(), payload)
 
     # -- 断线 reconcile：status 轮询（零重复 submit；有界窗口） ----------------------
+    def _reconcile_poll_once(self, run_id: str) -> Tuple[str, Any]:
+        """单次 status 轮询（流式有界；流在返回前关闭）。
+
+        返回 (kind, data)：kind ∈
+        ``swept`` / ``auth_rejected`` / ``terminal``(data=(status_word, payload)) /
+        ``stopping`` / ``approval_gap`` / ``identity_conflict`` / ``bad_word`` /
+        ``reconnected`` / ``retry``。
+        """
+        try:
+            response, cm = self._open_stream("status", "GET",
+                                             _PATH_RUN.format(run_id=run_id))
+        except HermesTransportError:
+            return "retry", None
+        try:
+            if response.status_code == 404:
+                # 终态记录已被 Hermes 清扫（终态 + TTL 3600s 后）：仅当错误码**精确**
+                # 为 run_not_found 才可判 swept；其余 404 形状按协议矛盾继续轮询。
+                if self._error_code_of(response) == "run_not_found":
+                    return "swept", None
+                return "identity_conflict_404", None
+            if response.status_code == 401:
+                return "auth_rejected", None
+            if response.status_code != 200:
+                return "retry", None
+            try:
+                body = self._read_json_object("status", response)
+            except BackendError:
+                return "retry", None
+        finally:
+            self._close_stream(cm)
+        # 身份封闭：object/run_id 不精确（缺失/冲突）→ 绝不产生终态，仅可观察。
+        if body.get("object") != "hermes.run" or body.get("run_id") != run_id:
+            return "identity_conflict", None
+        status = body.get("status")
+        if not isinstance(status, str) or status not in _HERMES_STATUSES:
+            return "bad_word", None
+        if status in _HERMES_TERMINAL_STATUSES:
+            payload = {k: body[k] for k in ("output", "usage", "error") if k in body}
+            return "terminal", (status, payload)
+        if status == "stopping":
+            return "stopping", None
+        if status == "waiting_for_approval":
+            # 审批身份无法从 status 轮询重建（命令身份不在状态记录里）——
+            # fail-closed 可观察；绝不伪造 approval_id。
+            return "approval_gap", None
+        return "reconnected", None   # queued/running：非权威重连观察（16E 不复活终态）
+
     def _reconcile_by_status(self, run_id: str) -> Iterator[BackendEvent]:
-        client = self._get_client()
         deadline = self._now_fn() + self._poll_budget
         reconnected_sent = False
         stopping_sent = False
         approval_gap_sent = False
         identity_error_sent = False
         while self._now_fn() < deadline:
-            try:
-                resp = client.get(_PATH_RUN.format(run_id=run_id))
-            except Exception:
-                time.sleep(self._poll_interval)
-                continue
-            if resp.status_code == 404:
-                # 终态记录已被 Hermes 清扫（终态 + TTL 3600s 后）：仅当错误码**精确**
-                # 为 run_not_found 才可判 swept；其余 404 形状按协议矛盾继续轮询。
-                if self._error_code_of(resp) == "run_not_found":
-                    yield self._make_event(run_id, "transport.disconnected",
-                                           {"reason": "run_record_swept"})
-                    return
+            kind, data = self._reconcile_poll_once(run_id)
+            if kind == "swept":
+                yield self._make_event(run_id, "transport.disconnected",
+                                       {"reason": "run_record_swept"})
+                return
+            if kind == "auth_rejected":
+                yield self._make_event(run_id, "transport.disconnected",
+                                       {"reason": "auth_rejected"})
+                return
+            if kind == "terminal":
+                status_word, payload = data
+                yield self._make_event(run_id, f"run.{status_word}", payload)
+                return
+            if kind == "identity_conflict_404":
                 if not identity_error_sent:
                     identity_error_sent = True
                     yield self._make_event(run_id, "protocol.error",
                                            {"reason": "status_404_wrong_code"})
-                time.sleep(self._poll_interval)
-                continue
-            if resp.status_code == 401:
-                yield self._make_event(run_id, "transport.disconnected",
-                                       {"reason": "auth_rejected"})
-                return
-            if resp.status_code != 200:
-                time.sleep(self._poll_interval)
-                continue
-            try:
-                body = self._require_json_object("status", resp)
-            except BackendError:
-                time.sleep(self._poll_interval)
-                continue
-            # 身份封闭：object/run_id 不精确（缺失/冲突）→ 绝不产生终态，仅可观察。
-            if body.get("object") != "hermes.run" or body.get("run_id") != run_id:
+            elif kind == "identity_conflict":
                 if not identity_error_sent:
                     identity_error_sent = True
                     yield self._make_event(run_id, "protocol.error",
                                            {"reason": "status_identity_conflict"})
-                time.sleep(self._poll_interval)
-                continue
-            status = body.get("status")
-            if not isinstance(status, str) or status not in _HERMES_STATUSES:
+            elif kind == "bad_word":
                 if not identity_error_sent:
                     identity_error_sent = True
                     yield self._make_event(run_id, "protocol.error",
                                            {"reason": "status_word_unknown"})
-                time.sleep(self._poll_interval)
-                continue
-            if status in _HERMES_TERMINAL_STATUSES:
-                payload = {k: body[k] for k in ("output", "usage", "error") if k in body}
-                yield self._make_event(run_id, f"run.{status}", payload)
-                return
-            if status == "stopping":
+            elif kind == "stopping":
                 if not stopping_sent:
                     stopping_sent = True
                     yield self._make_event(run_id, "stopping", {})
-            elif status == "waiting_for_approval":
-                # 审批身份无法从 status 轮询重建（命令身份不在状态记录里）——
-                # fail-closed 可观察；绝不伪造 approval_id。
+            elif kind == "approval_gap":
                 if not approval_gap_sent:
                     approval_gap_sent = True
                     yield self._make_event(run_id, "protocol.error",
                                            {"reason": "approval_pending_not_recoverable_via_poll"})
-            else:
-                # queued/running：非权威重连观察（16E 不复活终态）。
+            elif kind == "reconnected":
                 if not reconnected_sent:
                     reconnected_sent = True
                     yield self._make_event(run_id, "transport.reconnected", {})
@@ -1198,24 +1524,40 @@ class HermesExecutionBackend(ExecutionBackend):
             record = self._runs.get(run_handle.run_id)
         if record is None:
             raise HermesProtocolError(f"未知 hermes run: {run_handle.run_id!r}")
-        client = self._get_client()
+        if run_handle.correlation != record.contract_id:
+            raise HermesProtocolError(
+                f"stop handle.correlation {run_handle.correlation!r} != run 账本契约 "
+                f"{record.contract_id!r}（伪造 correlation 拒绝；停止操作身份精确绑定）")
         try:
-            resp = client.post(_PATH_STOP.format(run_id=run_handle.run_id))
-        except Exception as exc:
+            response, cm = self._open_stream(
+                "stop", "POST", _PATH_STOP.format(run_id=run_handle.run_id))
+        except HermesTransportError as exc:
             raise self._transport_failure("stop", exc) from exc
-        if resp.status_code == 404:
-            # 404 特殊语义只在错误码精确为 run_not_found 时成立；其余 404 形状 = 协议矛盾。
-            if self._error_code_of(resp) != "run_not_found":
+        try:
+            if response.status_code == 404:
+                # 404 特殊语义只在错误码精确为 run_not_found 时成立；其余 404 形状 =
+                # 协议矛盾（错误码经有界严格读取提取）。
+                code, snippet = self._read_error_payload(response)
+                if code != "run_not_found":
+                    raise HermesProtocolError(
+                        f"hermes stop 404 错误码非 run_not_found: {snippet}")
+                raise HermesTransportError(
+                    "hermes stop 404：run 当前无活跃 agent/task（可能已终态）——"
+                    "以 status/SSE 权威终态为准，本方法不声明 CANCELLED")
+            if response.status_code != 200:
+                _code, snippet = self._read_error_payload(response)
+                raise HermesTransportError(
+                    f"hermes stop HTTP {response.status_code}: {snippet}")
+            try:
+                body = self._read_json_object("stop", response)
+            except BackendError as exc:
                 raise HermesProtocolError(
-                    f"hermes stop 404 错误码非 run_not_found: "
-                    f"{self._redact_body_snippet(resp.text)}")
-            raise HermesTransportError(
-                "hermes stop 404：run 当前无活跃 agent/task（可能已终态）——"
-                "以 status/SSE 权威终态为准，本方法不声明 CANCELLED")
-        body = self._require_json_object("stop", resp)
-        if resp.status_code != 200 or body.get("status") != "stopping" \
-                or body.get("run_id") != run_handle.run_id:
-            raise HermesProtocolError("hermes stop 响应形状非法（实测契约：stopping）")
+                    f"hermes stop 响应形状非法（实测契约：stopping）: {type(exc).__name__}"
+                ) from exc
+            if body.get("status") != "stopping" or body.get("run_id") != run_handle.run_id:
+                raise HermesProtocolError("hermes stop 响应形状非法（实测契约：stopping）")
+        finally:
+            self._close_stream(cm)
         with self._lock:
             record.stopped = True
         # 注意：此处**绝不**产生 run.cancelled —— CANCELLED 只能来自 Hermes 权威终态。
@@ -1233,14 +1575,21 @@ class HermesExecutionBackend(ExecutionBackend):
           （``approval_tool_unmapped``）；
         - 映射 capability 不在本 run 契约 allowed_capabilities 内（防御性复检）
           → 自动 deny（``approval_capability_not_in_contract``）；
-        - approval 身份索引硬容量已满 → 自动 deny（``approval_ledger_full``）。
+        - approval 账本容量（含在途预留）已满 → 自动 deny（``approval_ledger_full``）。
 
         自动 deny 只向 Hermes 转发 ``deny``，**不创建任何 16D 审批请求**。
-        映射成功 → ``broker.get_or_create_request``（producer 公开面）：完整身份
-        （contract/hash/run/tool/capability/scope/risk/policy/operation_digest，其中
-        operation digest 由 16D broker 对**原始完整 args** 现场计算）原子去重——
-        同 tool 同 preview 不同 command 必然不同 approval_id。绝不伪造 USER evidence、
-        绝不签发 grant/permit；决议由 Furina 决策面（broker owner）做出。
+
+        容量封闭状态机（Patch 2）：容量检查、预留、broker 请求创建、approval_id 入账
+        构成单锁协调的封闭状态机——``len(账本) + 在途预留 ≤ cap`` 恒成立；并发
+        cap=1 时最终索引 ≤ 1；容量失败**绝不遗留第二个可用 16D request**（deny 先于
+        broker 创建发生），Hermes 只收到 fail-closed deny；预留的每条失败路径都精确
+        归还一次。映射成功 → ``broker.get_or_create_request``（producer 公开面）：
+        完整身份（contract/hash/run/tool/capability/scope/risk/policy/operation_digest，
+        其中 operation digest 由 16D broker 对**原始完整 args** 现场计算）原子去重——
+        同 tool 同 preview 不同 command 必然不同 approval_id；帧时刻冻结的完整操作
+        身份（tool/capability/原始 args）存入本账本，供 resolve 边界 permit 签发/
+        原子消费使用。绝不伪造 USER evidence、绝不签发 grant/permit；决议由 Furina
+        决策面（broker owner）做出。
         """
         tool = frame.get("tool")
         if not isinstance(tool, str) or not tool.strip():
@@ -1254,8 +1603,12 @@ class HermesExecutionBackend(ExecutionBackend):
         if capability not in record.allowed_capabilities:
             self._forward_auto_deny(run_id)
             return None, "approval_capability_not_in_contract"
+        # 原子容量预留（封闭状态机第一步；网络 I/O 一律在锁外）
         with self._lock:
-            full = len(self._approval_run_index) >= self._max_tracked_approvals
+            full = len(self._approval_ops) + self._approvals_reserved \
+                >= self._max_tracked_approvals
+            if not full:
+                self._approvals_reserved += 1
         if full:
             self._forward_auto_deny(run_id)
             return None, "approval_ledger_full"
@@ -1278,35 +1631,91 @@ class HermesExecutionBackend(ExecutionBackend):
                 contract_hash=record.content_hash,
             )
         except ApprovalStateError:
+            with self._lock:
+                self._approvals_reserved -= 1   # broker 创建失败：精确归还预留
             return None, "approval_forwarding_failed"
         with self._lock:
-            self._approval_run_index.setdefault(request.approval_id, run_id)
+            if request.approval_id in self._approval_ops:
+                # 并发同操作已入账（get-or-create 幂等复用）：归还本侧预留，复用既有
+                self._approvals_reserved -= 1
+            else:
+                self._approval_ops[request.approval_id] = _ApprovalOpRecord(
+                    run_id=run_id, tool=tool, capability=capability, op_args=op_args)
+                self._approvals_reserved -= 1
         return request.approval_id, None
 
     def _forward_auto_deny(self, run_id: str) -> None:
         """fail-closed 自动 deny：直接向 Hermes 转发 deny（不建立 16D 请求）。
 
-        转发失败仅记录（可观察），绝不重试、绝不出 fallback 通道。
+        转发失败仅记录（可观察），绝不重试、绝不出 fallback 通道；响应体不读取
+        （流式打开、只取状态码、立即关闭——零无界缓冲）。
         """
-        client = self._get_client()
         try:
-            resp = client.post(_PATH_APPROVAL.format(run_id=run_id), json={"choice": "deny"})
-            if resp.status_code not in (200, 409):
-                log.warning("hermes run=%s 自动 deny 转发异常 HTTP %s", run_id, resp.status_code)
-        except Exception as exc:
-            log.warning("hermes run=%s 自动 deny 转发失败: %s", run_id, type(exc).__name__)
+            response, cm = self._open_stream(
+                "auto_deny", "POST", _PATH_APPROVAL.format(run_id=run_id),
+                json_body={"choice": "deny"})
+        except HermesTransportError as exc:
+            log.warning("hermes run=%s 自动 deny 转发失败: %s", run_id, exc)
+            return
+        try:
+            if response.status_code not in (200, 409):
+                log.warning("hermes run=%s 自动 deny 转发异常 HTTP %s",
+                            run_id, response.status_code)
+        finally:
+            self._close_stream(cm)
+
+    def _permit_at_boundary(self, approval_id: str,
+                            op: "_ApprovalOpRecord") -> Tuple[bool, str, str]:
+        """**发送 Hermes once 的立即边界**：经组合根注入的 PermitIssuer 签发 permit，
+        并由 16D broker 在单锁内**原子复核+消费**（全部校验通过后单点提交）。
+
+        复核维度（16D consume_permit 权威执行）：contract_id/content_hash（issuer
+        内部绑定 + approval 记录双重复核）、run_id、tool、capability、**原始 args**
+        （broker 密钥对帧时刻冻结的 op_args 重新计算 operation digest 比对）、
+        approval/grant 状态（REVOKED/DENIED/已消费/超窗一律拒绝）。任何失败 →
+        (False, typed reason)——**绝不发送 once**（fail-closed deny）。成功 →
+        消费已提交（approve_once 恰好一次；此后 POST 失败也绝不回滚/重发）。
+        """
+        with self._lock:
+            run_rec = self._runs.get(op.run_id)
+            issuer = self._permit_issuers.get(run_rec.contract_id) if run_rec else None
+        if run_rec is None:
+            return False, "boundary_run_unknown", ""
+        if issuer is None:
+            return False, "boundary_contract_issuer_missing", ""
+        if issuer.expected_content_hash != run_rec.content_hash:
+            return False, "boundary_contract_issuer_hash_mismatch", ""
+        try:
+            permit = issuer.issue(tool=op.tool, capability=op.capability,
+                                  args=dict(op.op_args), run_id=op.run_id,
+                                  approval_id=approval_id)
+        except ApprovalStateError as exc:
+            return False, "boundary_permit_issue_failed", str(exc)
+        try:
+            outcome = self._broker.consume_permit(permit, tool=op.tool,
+                                                  capability=op.capability,
+                                                  args=dict(op.op_args))
+        except ApprovalStateError as exc:
+            return False, "boundary_permit_consume_error", str(exc)
+        if not outcome.ok:
+            return False, "boundary_permit_denied", outcome.reason
+        return True, "", permit.permit_id
 
     def resolve_approval(self, approval_ref: str) -> Dict[str, Any]:
         """等待 16D 真实决议并**恰好一次**转发 Hermes（choice 只允许 once/deny）。
 
-        - ``approval_ref`` 必须是本 backend 经 16D 建立过的 approval_id（身份精确绑定）；
-        - Furina 决议 APPROVE_ONCE / APPROVE_SESSION → ``once``（会话级决议**收窄**为
-          单步转发，绝不放宽到 Hermes session/always）；
+        Patch 2 边界重构——顺序为 **decision → 立即边界原子 permit 消费 → POST**：
+
+        - APPROVE_ONCE / APPROVE_SESSION 决议 → 先经注入的 PermitIssuer 签发 permit、
+          ``broker.consume_permit`` 在发送 once 的**立即边界**原子复核（contract_id/
+          hash + run_id + tool + capability + 原始 args + approval/grant 状态）并单点
+          提交消费；**仅消费成功才 POST once**。决议与远端边界之间的撤销/状态漂移 →
+          消费失败 → fail-closed 转发 deny，绝不发送 once（"POST 后 broker.consume"
+          已废除——它无法封住 ALLOW→远端执行边界之间的撤销窗口）；
         - DENY / TIMEOUT / REVOKED / 未决（LATE/UNKNOWN）→ ``deny``（fail-closed）；
         - **exactly-once**：同一 approval 无论顺序重复还是并发 resolve，只有首个调用
           会 POST；其余调用返回 typed no-op（``forwarded=False``），绝不二次 POST；
-        - ``once`` 转发成功后真实消费 16D approval（approve_once 标记消费）；
-        - 成功必须 ``resolved == 1`` 精确成立，否则类型化协议错误（绝不虚报成功）；
+        - ``resolved == 1`` 精确才声明成功，否则类型化协议错误（绝不虚报成功）；
         - 409 仅当错误码**精确**为 ``approval_not_pending`` 才视为 typed no-op。
         """
         if not self.capabilities.supports_resolve_approval:
@@ -1315,8 +1724,8 @@ class HermesExecutionBackend(ExecutionBackend):
             raise HermesProtocolError("approval_ref 必须是非空 str")
         approval_id = approval_ref.strip()
         with self._lock:
-            run_id = self._approval_run_index.get(approval_id)
-            if run_id is None:
+            op = self._approval_ops.get(approval_id)
+            if op is None:
                 raise HermesProtocolError(
                     f"未知 approval_ref: {approval_id!r}（仅接受本 backend 经 16D 建立的审批）")
             if approval_id in self._approval_forwarded:
@@ -1329,43 +1738,69 @@ class HermesExecutionBackend(ExecutionBackend):
                                                       timeout=self._approval_wait)
         approved = bool(resolution.ok) and resolution.decision in (
             ApprovalDecisionKind.APPROVE_ONCE, ApprovalDecisionKind.APPROVE_SESSION)
-        choice = "once" if approved else "deny"
         resolution_status = str(resolution.status.value
                                 if isinstance(resolution.status, ResolutionStatus)
                                 else resolution.status)
+        choice = "deny"
+        consumed = False
+        permit_id = ""
+        boundary_reason = ""
+        if approved:
+            permitted, boundary_reason, permit_id = self._permit_at_boundary(
+                approval_id, op)
+            if permitted:
+                # permit 已在发送边界**原子消费**（POST 前最后一道状态性操作）；
+                # 此后 POST 失败也绝不回滚消费/绝不重发（fail-closed exactly-once）。
+                choice = "once"
+                consumed = True
+            else:
+                log.warning(
+                    "hermes approval=%s 决议 %s 但远端边界 permit 消费未成立"
+                    "（fail-closed deny）: %s", approval_id,
+                    resolution.decision.value if resolution.decision else "?",
+                    boundary_reason)
         client = self._get_client()
         try:
-            resp = client.post(_PATH_APPROVAL.format(run_id=run_id),
-                               json={"choice": choice})
-        except Exception as exc:
+            response, cm = self._open_stream(
+                "approval", "POST", _PATH_APPROVAL.format(run_id=op.run_id),
+                json_body={"choice": choice})
+        except HermesTransportError as exc:
             raise self._transport_failure("approval", exc) from exc
-        if resp.status_code == 409:
-            if self._error_code_of(resp) != "approval_not_pending":
-                raise HermesProtocolError(
-                    f"hermes approval 409 错误码非 approval_not_pending: "
-                    f"{self._redact_body_snippet(resp.text)}")
-            # Hermes 侧已无挂起审批（已解析/已过期）：类型化 no-op，绝不重试。
-            return {"choice": choice, "resolved": 0, "forwarded": True,
-                    "resolution_status": resolution_status}
-        body = self._require_json_object("approval", resp)
-        if resp.status_code != 200 or body.get("object") != "hermes.run.approval_response" \
-                or body.get("run_id") != run_id:
-            raise HermesProtocolError("hermes approval 响应形状非法（实测契约）")
-        resolved = body.get("resolved")
-        if isinstance(resolved, bool) or not isinstance(resolved, int):
-            raise HermesProtocolError(f"hermes approval resolved 非法: {resolved!r}")
-        if resolved != 1:
-            raise HermesProtocolError(
-                f"hermes approval resolved 必须 == 1 才算成功，得到 {resolved!r}")
-        consumed = False
-        if choice == "once":
-            # APPROVE_ONCE 成功转发后必须真实消费 16D approval（exactly-once 标记）。
+        try:
+            if response.status_code == 409:
+                code, snippet = self._read_error_payload(response)
+                if code != "approval_not_pending":
+                    raise HermesProtocolError(
+                        f"hermes approval 409 错误码非 approval_not_pending: {snippet}")
+                # Hermes 侧已无挂起审批（已解析/已过期）：类型化 no-op，绝不重试。
+                return {"choice": choice, "resolved": 0, "forwarded": True,
+                        "consumed": consumed, "permit_id": permit_id,
+                        "resolution_status": resolution_status}
+            if response.status_code != 200:
+                _code, snippet = self._read_error_payload(response)
+                raise HermesTransportError(
+                    f"hermes approval HTTP {response.status_code}: {snippet}")
             try:
-                consumed = bool(self._broker.consume(approval_id))
-            except ApprovalStateError:
-                consumed = False
-            if not consumed:
-                log.warning("hermes approval=%s 转发 once 后消费未成立（16D 状态复核）",
-                            approval_id)
-        return {"choice": choice, "resolved": resolved, "forwarded": True,
-                "consumed": consumed, "resolution_status": resolution_status}
+                body = self._read_json_object("approval", response)
+            except BackendError as exc:
+                raise HermesProtocolError(
+                    "hermes approval 响应形状非法（实测契约）: "
+                    f"{type(exc).__name__}") from exc
+            if body.get("object") != "hermes.run.approval_response" \
+                    or body.get("run_id") != op.run_id:
+                raise HermesProtocolError("hermes approval 响应形状非法（实测契约）")
+            resolved = body.get("resolved")
+            if isinstance(resolved, bool) or not isinstance(resolved, int):
+                raise HermesProtocolError(f"hermes approval resolved 非法: {resolved!r}")
+            if resolved != 1:
+                raise HermesProtocolError(
+                    f"hermes approval resolved 必须 == 1 才算成功，得到 {resolved!r}")
+        finally:
+            self._close_stream(cm)
+        result: Dict[str, Any] = {"choice": choice, "resolved": resolved,
+                                  "forwarded": True, "consumed": consumed,
+                                  "permit_id": permit_id,
+                                  "resolution_status": resolution_status}
+        if boundary_reason:
+            result["boundary"] = boundary_reason
+        return result

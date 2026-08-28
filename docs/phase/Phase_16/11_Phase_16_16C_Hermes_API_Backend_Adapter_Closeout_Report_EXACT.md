@@ -2,10 +2,11 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED — Reviewer Patch 1（6 组 blocker 修复完成 +
-                                 全量测试通过，等待外部验收；不声明 16C_PASS）
-BASE_SHA                       = 82d594dd7f647484597f702b45723a81adea35e2
-                                 （16C 首版 READY_FOR_REVIEW 提交；本 patch 唯一父提交）
+STATUS                         = EXECUTED — Reviewer Patch 2（审批接口 Recon Gate PASS +
+                                 六组 blocker 修复完成 + 全量测试通过，等待外部验收；
+                                 不声明 16C_PASS）
+BASE_SHA                       = 9e79fc30b02610c5314669eb458572492e63379b
+                                 （16C Reviewer Patch 1 提交；本 patch 唯一父提交）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，
                                  沿用 16A/16B/16D/16E 惯例）
 BRANCH                         = feature/phase16-16c-hermes-api-adapter
@@ -42,17 +43,25 @@ CAPABILITY_ENVELOPE_CLOSED     = true（Reviewer Patch 1：capability envelope �
                                  须命中构造期封闭 tool→capability 映射（值 ∉ envelope
                                  构造期拒绝）且 capability ∈ 契约 allowed_capabilities，
                                  否则自动 deny——不向用户制造 16D 可扩权审批）
-HERMES_CAPABILITY_ISOLATION    = AVAILABLE（0.20.6 可证明 dedicated profile/toolset
-                                 边界：/v1/capabilities.model 绑定 profile 身份 +
-                                 /v1/toolsets 广告 run agent 实际工具面（服务器端
-                                 权威证据）+ envelope 封闭相等 + 审批面工具级封闭
-                                 映射/自动 deny；未触发
-                                 HERMES_CAPABILITY_ISOLATION_UNAVAILABLE 停机条件。
-                                 已知边界如实登记：POST /v1/runs 无 per-run toolset
-                                 参数，run 侧工具面由服务器 profile 配置决定——
-                                 适配器以 probe 快照 + 审批面双向封闭，不做自然语言
-                                 instructions 假装隔离（submit 只发送
-                                 canonical_user_request，无 instructions 字段））
+HERMES_CAPABILITY_ISOLATION    = AVAILABLE（Reviewer Patch 2 收紧为**精确封闭**：
+                                 构造期冻结不可变 expected_profile_tools——每个
+                                 expected tool 必须有 tool→capability 归属、归属
+                                 capability 集与 backend envelope 封闭一致；成功 probe
+                                 必须同时满足 capabilities.model ==
+                                 expected_profile_identity、toolsets.platform ==
+                                 api_server、enabled 工具全部合法非空 str、实际
+                                 enabled 集 == expected 集**精确相等**（多/少/未知/
+                                 坏类型一律 unhealthy）。源码证据（0.20.6 @4e7eb399）：
+                                 run agent 的 enabled_toolsets（api_server.py:3094→
+                                 3136 AIAgent kwargs）与 GET /v1/toolsets（:4092-4147，
+                                 _get_platform_tools(config,"api_server") +
+                                 resolve_toolset 展开具体工具名 + platform:"api_server"
+                                 恒定）**同源**读 config.yaml platform_toolsets.
+                                 api_server——服务器端权威工具面证据。已知边界如实
+                                 登记：POST /v1/runs 无 per-run toolset 参数，run 侧
+                                 工具面由服务器 profile 决定——适配器以 probe 精确
+                                 快照 + submit 前置新鲜 probe 门 + 审批面封闭映射
+                                 双向封闭，不用自然语言 instructions 假装隔离）
 ACTIVE_HANDSHAKE_VERIFIED      = true（Reviewer Patch 1 扩展：probe = /health +
                                  /v1/capabilities（Bearer + profile 绑定）+
                                  /v1/toolsets（Bearer + 工具面快照）+ 不存在 probe
@@ -64,13 +73,21 @@ ACTIVE_HANDSHAKE_VERIFIED      = true（Reviewer Patch 1 扩展：probe = /healt
                                  零 POST /v1/runs、零真实 run）
 AUTH_FAILS_CLOSED              = true（401 → auth_rejected；submit/SSE/approval/
                                  stop/probe 各路径 401 一律类型化失败，零降级）
-SIGNED_CONTRACT_REQUIRED       = true（Reviewer Patch 1：submit 唯一输入权威入口 =
+SIGNED_CONTRACT_REQUIRED       = true（Reviewer Patch 2 重述：submit 唯一输入权威入口 =
                                  16A WorkContract.from_dict exact-schema +
-                                 content_hash 复核（缺字段/未知字段/schema marker
-                                 不符/篡改 hash/自签扩权 submit 前一律
-                                 BackendScopeViolation 拒绝，零 HTTP）；测试合法
-                                 主路径一律使用真实 WorkContract.to_backend_projection，
-                                 手写不完整 dict 仅作负例）
+                                 content_hash **完整性摘要**复核——content_hash 只称
+                                 integrity hash，绝不称 signature，from_dict 从不重新
+                                 计算或背书摘要；缺字段/未知字段/schema marker 不符/
+                                 摘要与内容不符 submit 前一律 BackendScopeViolation
+                                 拒绝（零 HTTP）；测试合法主路径一律使用真实
+                                 WorkContract.to_backend_projection，手写不完整 dict
+                                 仅作负例）
+AUTHORIZED_CONTRACT_BOUND      = true（Reviewer Patch 2：构造期注入可信 contract
+                                 authorizer（callable（contract_id, content_hash）→
+                                 bool，缺失/非 callable 构造期拒绝）——submit 前按
+                                 id+integrity hash **精确确认**该契约已由组合根授权；
+                                 未知 id、hash 不同、authorizer 异常或返回非 True →
+                                 submit 前拒绝、零 HTTP；授权真实性不来自 hash 本身）
 APPROVAL_OPERATION_EXACT       = true（Reviewer Patch 1：(tool, preview) 有损身份
                                  缓存废除；审批身份唯一权威 = 16D broker 完整身份
                                  原子 get-or-create（contract/hash/run/tool/
@@ -78,31 +95,86 @@ APPROVAL_OPERATION_EXACT       = true（Reviewer Patch 1：(tool, preview) 有�
                                  operation digest 由 broker 对**原始完整 args**（帧
                                  全量减传输层字段）现场计算——同 tool 同 preview
                                  不同 command 必然不同 approval_id；相同操作帧幂等
-                                 复用；零 str() coercion、零截断参与授权身份）
+                                 复用；零 str() coercion、零截断参与授权身份；帧时刻
+                                 冻结完整操作身份入账本，resolve 边界以此复核）
+APPROVAL_PERMIT_AT_REMOTE_BOUNDARY = true（Reviewer Patch 2：**审批接口 Recon Gate
+                                 PASS**——frozen 16D 公开 API（决策面
+                                 create_permit_issuer + producer 面 consume_permit，
+                                 与 Gate 的 issuer 注入模式同构）足以表达外部 Hermes
+                                 执行边界，未触发
+                                 BLOCKED_BY_16D_EXTERNAL_ACTION_PERMIT_GAP；once 顺序
+                                 重构为 decision → **立即边界原子 permit 消费** →
+                                 POST：经组合根注入的 PermitIssuer（按 contract_id/
+                                 content_hash 绑定；运行期注册仅 owner 线程）签发
+                                 permit，broker.consume_permit 在发送 once 的立即边界
+                                 单锁原子复核 contract_id/hash + run_id + tool +
+                                 capability + 原始 args（HMAC operation digest 重算）+
+                                 approval/grant 状态后**单点提交**——仅消费成功才
+                                 POST once；决议与远端边界之间撤销 → 消费失败 →
+                                 fail-closed deny 绝不 once；issuer 缺失/hash 绑定
+                                 不符同样绝不 once；"POST 后 broker.consume" 已废除）
+APPROVAL_CAPACITY_ATOMIC       = true（Reviewer Patch 2：approval 容量检查、预留、
+                                 broker 请求创建、approval_id 入账构成单锁协调封闭
+                                 状态机——len(账本)+在途预留 ≤ cap 恒成立；并发 cap=1
+                                 攻击最终索引 ≤1；容量失败**先于** broker 创建 deny，
+                                 绝不遗留第二个可用 16D request；每条失败路径精确
+                                 归还预留恰一次；Hermes 只收到 fail-closed deny）
 APPROVAL_FORWARD_EXACTLY_ONCE  = true（Reviewer Patch 1：同一 approval 顺序重复/
                                  并发 resolve 只有首个调用 POST（先占位守卫）；
                                  其余 typed no-op（forwarded=False）绝不二次 POST；
                                  APPROVE_ONCE/APPROVE_SESSION 收窄转发 "once"，
                                  DENY/TIMEOUT/REVOKED/未决 "deny"，绝不 always/
-                                 session；once 转发成功后真实消费 16D approval
-                                 （broker.consume）；200 成功必须 resolved==1 精确
-                                 （否则 HermesProtocolError，绝不虚报）；409 仅当
-                                 错误码精确 approval_not_pending 才视为 typed no-op）
+                                 session；200 成功必须 resolved==1 精确（否则
+                                 HermesProtocolError，绝不虚报）；409 仅当错误码精确
+                                 approval_not_pending 才视为 typed no-op）
 SUBMIT_ATOMIC_IDEMPOTENT       = true（Reviewer Patch 1：contract_id 在 POST 前建立
                                  原子 reservation；两线程并发提交同契约 → 服务器只收
                                  一个 POST、两者获同一 handle；非 202 = 服务器明确
                                  拒绝 → reservation 释放；POST 已发出而结果不确定
-                                 （传输异常/202 形状损坏/账本满）→ reservation 中毒，
-                                 同 contract 后续 submit 一律类型化拒绝，绝不自动重提）
+                                 （传输异常/202 形状损坏/run_id 冲突 typed conflict）
+                                 → reservation 中毒，同 contract 后续 submit 一律
+                                 类型化拒绝，绝不自动重提）
+RUN_CAPACITY_RESERVED_PRE_POST = true（Reviewer Patch 2：run 账本容量在 POST **前**
+                                 原子预留（预留计数与账本同锁，超容窗口不存在）；
+                                 容量满 → 零 POST（确定性 pre-POST 拒绝，非中毒）；
+                                 预留归还 exactly-once：失败/不确定路径外层统一
+                                 归还，成功路径账本锁内归还并保留并发信号量）
+RUN_ID_COLLISION_BLOCKED       = true（Reviewer Patch 2：202 返回的 run_id 已属另一
+                                 契约 → **不覆盖**（原 owner、槽位计数、事件归属
+                                 不变）；本契约 reservation 中毒 + typed conflict
+                                 （HermesProtocolError），绝不自动重提）
+HANDLE_CORRELATION_BOUND       = true（Reviewer Patch 2：events/stop 校验
+                                 handle.correlation == run 账本契约 id——伪造
+                                 correlation 的 handle 类型化拒绝且零 HTTP）
+FRESH_PROBE_REQUIRED           = true（Reviewer Patch 2：submit 要求最近一次 probe
+                                 healthy、未过期且 profile/tool 快照与构造期
+                                 expected 精确匹配；未 probe / probe 失败 / probe
+                                 过期 → 类型化拒绝、零 POST——submit **不自动补
+                                 probe**，新鲜事实由调用方主动建立）
+PROFILE_TOOLSET_EXACT          = true（Reviewer Patch 2：见 HERMES_CAPABILITY_
+                                 ISOLATION——expected_profile_tools 构造期封闭 +
+                                 probe 精确相等比对 + submit 快照复核三层）
 MAX_CONCURRENCY_ENFORCED       = true（Reviewer Patch 1：max_concurrent_runs 由
                                  BoundedSemaphore 真实执行——submit 占槽，权威终态
                                  交付时恰一次释放；断线/UNKNOWN 诚实保留槽位；
                                  满槽 fail-closed（reservation 同步释放，不占账本））
-LEDGER_CARDINALITY_BOUNDED     = true（Reviewer Patch 1：contract/run/approval
-                                 三个账本全部硬容量（构造期 1..上限校验）；满容量
-                                 fail-closed 拒绝，绝不淘汰——重放同契约仍返回既有
-                                 handle 且零新 POST（不诱导旧 contract 重新执行）；
-                                 approval 满容量新请求自动 deny 且不建立 16D 请求）
+LEDGER_CARDINALITY_BOUNDED     = true（Reviewer Patch 1 + Patch 2：contract/run/
+                                 approval 三个账本全部硬容量（构造期 1..上限校验）；
+                                 满容量 fail-closed 拒绝，绝不淘汰——重放同契约仍
+                                 返回既有 handle 且零新 POST（不诱导旧 contract
+                                 重新执行）；approval 满容量新请求自动 deny 且不
+                                 建立 16D 请求；run 满容量 POST 前预留失败零 POST）
+STRICT_MEDIA_TYPE              = true（Reviewer Patch 2：只接受精确媒体类型
+                                 application/json（type/subtype 精确相等，大小写
+                                 不敏感；参数仅容 charset=<token>）；
+                                 application/jsonp、text/application/json-evil、
+                                 非 charset/无值参数一律类型化拒绝）
+BOUNDED_ERROR_BODY             = true（Reviewer Patch 2：全部普通 JSON 响应**流式/
+                                 有界读取**（> 4 MiB 立即停止读取并拒绝，超限内容
+                                 不入异常）；_error_code_of 复用有界严格 JSON 读取
+                                 （错误体 ≤ 64 KiB，超限只留 [error body over limit]
+                                 标记；JSON 严格解析，形状损坏 → code=None 不吞掉）；
+                                 绝不在检查上限前读取 response.text/json）
 STATUS_RUN_ID_BOUND            = true（Reviewer Patch 1：lifecycle/reconcile 的
                                  status 响应严格封闭——object==hermes.run + run_id
                                  精确相等 + 状态词表校验；缺失/冲突/词表外 →
@@ -110,11 +182,13 @@ STATUS_RUN_ID_BOUND            = true（Reviewer Patch 1：lifecycle/reconcile �
                                  预算耗尽按 UNKNOWN 收口；404 特殊语义仅在错误码
                                  精确 run_not_found 时成立，其余 404/409 形状按
                                  协议矛盾处理不吞掉）
-JSON_CONTENT_TYPE_BOUNDED      = true（Reviewer Patch 1：JSON endpoint 校验
-                                 application/json content-type + body 硬上限
-                                 （4 MiB）+ JSON object + 2xx 精确 status +
-                                 object/run_id/状态词表；text/plain 承载 JSON 拒绝；
-                                 invalid port 等 URL 输入统一折为
+JSON_CONTENT_TYPE_BOUNDED      = true（Reviewer Patch 1 + Patch 2 收紧：JSON endpoint
+                                 **精确媒体类型** application/json（仅容 charset 参数）
+                                 + **流式/有界** body 读取（4 MiB 立即拒绝、超限内容
+                                 不入异常）+ JSON object + 2xx 精确 status +
+                                 object/run_id/状态词表；text/plain、application/jsonp、
+                                 text/application/json-evil、非 charset 参数承载 JSON
+                                 一律拒绝；invalid port 等 URL 输入统一折为
                                  HermesConfigurationError；错误文本**先按精确
                                  API key 值脱敏、再做秘密形态脱敏**——服务端裸回显
                                  key 也不得进入异常（实测断言））
@@ -150,34 +224,41 @@ DIRECT_DIALOGUE_BYPASS         = false（submit 只发送 canonical_user_request
                                  payload 证据，经 16E 信封，绝不直达对话）
 
 PRODUCTION_FILES_CHANGED       = furina/agent/backend/hermes.py（Reviewer Patch 1
-                                 重写：contract 权威解析 + reservation 幂等账本 +
-                                 并发槽位 + 三账本硬容量 + profile/toolsets 双证据
-                                 probe + 审批精确身份与 exactly-once + HTTP/SSE
-                                 身份封闭 + 新增 HermesConfigurationError 使用面；
+                                 重写 + Patch 2 六组收紧：审批边界 permit 化（issuer
+                                 注入 + consume_permit 立即边界原子消费）、
+                                 expected_profile_tools/contract_authorizer/
+                                 permit_issuers 构造期封闭、submit 新鲜 probe 门、
+                                 run 账本 POST 前预留 + run_id 冲突不覆盖、approval
+                                 容量封闭状态机、events/stop correlation 校验、
+                                 精确媒体类型 + 全端点流式有界读取；
                                  furina/agent/backend/__init__.py 零改动）；
-                                 frozen 16A/16B/16D/16E 零改动
+                                 frozen C1–C7/16A/16B/16D/16E 零改动
 TEST_FILES_CHANGED             = tests/agent/integration/test_phase16c_hermes_api_
-                                 adapter.py（Reviewer Patch 1：36 项 = 既有 23 项按
-                                 更严格契约准确升级 + 13 项新增 reviewer 专项；
-                                 fake server 扩展 /v1/toolsets、route_override、
-                                 submit_delay/drop/raw 面板）
-TARGETED_TESTS                 = 16C 专项 36 passed（probe 四端点握手/TTL/profile
-                                 绑定/toolsets 快照、fail-closed 矩阵、真实
-                                 WorkContract projection 篡改/不完整/越权拒绝、
-                                 202 协议形态与幂等 correlation、并发同契约单 POST、
-                                 结果不确定零重提、max_concurrent_runs 与三账本硬
-                                 容量、SSE 分片/心跳/坏帧/行超限/事件超限
-                                 discard-until-blank/非法 UTF-8/重复终态、status
-                                 身份封闭零终态、content-type 与精确错误码、裸 key
-                                 零泄漏、approval 精确身份/同 preview 异 command
-                                 分离/exactly-once/409 精确/resolved==1/自动 deny
-                                 扩权拒绝、lying capabilities probe unhealthy、
-                                 stop 权威终态、身份精确绑定、loopback/非法端口、
-                                 registry/router interop、资源清理、C1–C7 零依赖）
+                                 adapter.py（Reviewer Patch 1 36 项 + Patch 2 新增
+                                 12 项 reviewer 专项 = 48 项；既有用例按新构造面
+                                 （authorizer/expected_profile_tools/issuer 注入/
+                                 preprobe）与 run 容量新语义准确升级）
+TARGETED_TESTS                 = 16C 专项 48 passed（Patch 1 全量 36 项保持通过 +
+                                 Patch 2 新增 12 项：未 probe submit 零 POST、probe
+                                 过期 submit 零 POST、toolsets 多/少/未知/坏类型/
+                                 platform 越界 unhealthy + 精确相等正例、
+                                 expected_profile_tools 构造期封闭矩阵、撤销落在
+                                 decision 与 POST 边界之间绝不 once（consume_permit
+                                 入口注入撤销 + issuer 缺失同样绝不 once）、run
+                                 ledger cap=1 第二次提交零 POST、两 contract 同
+                                 run_id 不覆盖 + 原 owner 事件归属不变、伪造
+                                 correlation events/stop 拒绝零 HTTP、approval
+                                 cap=1 并发攻击最终索引 ≤1 且零第二个 16D request、
+                                 未授权合法自哈希 WorkContract 零 HTTP（含 authorizer
+                                 异常/非 True/hash 不同）、application/jsonp 与
+                                 text/application/json-evil 及非 charset 参数拒绝 +
+                                 charset 正例、202 超 4MiB 与 500 超 64KiB 有界且
+                                 超限内容不入异常 + 小错误体片段正例）
 BACKEND_PERMISSION_REGRESSION  = 16A/16B/16D/16E 四套件 251 passed + tests/agent
-                                 全量回归 368 passed（16C 专项新增 13 项计入）
+                                 全量回归 380 passed（16C 专项 Patch 2 新增 12 项计入；
+                                 frozen 16D 公开 API 零改动即完成外部边界表达）
 COGNITION_SUITE                = 279 passed
-FULL_SUITE                     = 1650 passed（0 failed；一次完整运行；15 条
+FULL_SUITE                     = 1662 passed（0 failed；一次完整运行；15 条
                                  warning 全部来自既有 tests/test_agent_tools.py
                                  子进程 reader 编码问题，与本 patch 无关）
 GIT_DIFF_CHECK                 = clean（git diff --check 零输出）
@@ -199,6 +280,45 @@ REMAINING_GAPS                 = (1) 实机 approval.request SSE 帧未 live 触
                                  TLS 策略在本 brief 默认面之外，未实现。
 READY_FOR_REVIEW               = YES（不声明 16C_PASS）
 ```
+
+## Reviewer Patch 2 修复摘要（BASE 9e79fc3，2026-08-28）
+
+0. **审批接口 Recon Gate（先行判定）**：frozen 16D 公开 API 足以表达外部 Hermes
+   执行边界——决策面 `broker.create_permit_issuer`（owner 线程）创建的
+   `PermitIssuer` 由可信组合根注入本 backend（与 Gate 注入模式同构），producer 面
+   `broker.consume_permit` 在发送 once 的立即边界单锁原子复核 + 单点提交。
+   **未触发** `BLOCKED_BY_16D_EXTERNAL_ACTION_PERMIT_GAP`；16D/WorkContract/
+   C1–C7 零改动。
+1. **审批远端边界 permit 化**：`resolve_approval` 顺序由 decision → POST →
+   broker.consume（POST 后消费无法封住 ALLOW→远端执行边界之间的撤销窗口）重构为
+   decision → **issue + consume_permit 立即边界原子消费** → POST。复核维度 =
+   contract_id/content_hash（issuer 内部绑定 + approval 记录双重复核）+ run_id +
+   tool + capability + 原始 args（broker HMAC operation digest 对帧时刻冻结的
+   op_args 重算）+ approval/grant 状态；消费成功才 POST once，任何失败（含撤销、
+   issuer 缺失、hash 绑定不符）→ fail-closed deny 绝不 once；帧时刻冻结完整操作
+   身份入 approval 账本，转发时刻零重新解释。
+2. **Hermes 工具面封闭**：构造期不可变 `expected_profile_tools`（每个 expected
+   tool 必须有 tool→capability 归属、归属 capability 集与 envelope 封闭一致）；
+   成功 probe 必须 platform==api_server、enabled 工具全部合法非空 str、实际
+   enabled 集 == expected 集**精确相等**（多/少/未知/坏类型 unhealthy）；submit
+   要求最近一次 probe healthy、未过期、快照精确匹配——未 probe/失败/过期 →
+   零 POST（不自动补 probe）。0.20.6 源码确认 run agent 工具面与 /v1/toolsets
+   同源 → 未触发 `HERMES_CAPABILITY_ISOLATION_UNAVAILABLE`。
+3. **WorkContract authority**：content_hash 全文只称 integrity hash（完整性
+   摘要），绝不称 signature；构造期注入可信 `contract_authorizer`
+   （（contract_id, content_hash）→ bool）——未知 id、hash 不同、异常、返回非
+   True → submit 前拒绝、零 HTTP。
+4. **run 账本原子容量**：容量 POST 前原子预留（预留计数与账本同锁）；满 →
+   零 POST；202 返回 run_id 属另一契约 → 不覆盖（原 owner/槽位/事件归属不变），
+   本契约 reservation 中毒 + typed conflict；events/stop 校验
+   handle.correlation == 契约 id。
+5. **approval 账本原子容量**：容量检查→预留→broker 创建→入账封闭状态机
+   （len+reserved ≤ cap 恒成立；每条失败路径精确归还预留恰一次）；并发 cap=1
+   最终索引 ≤1；容量失败先于 broker 创建 deny，不遗留第二个可用 16D request。
+6. **HTTP 严格边界**：精确媒体类型 application/json（仅容 charset=<token>；
+   jsonp/json-evil/非 charset 参数拒绝）；全部普通 JSON 响应流式/有界读取
+   （4 MiB 立即拒绝、超限内容不入异常）；`_error_code_of` 复用有界严格读取
+   （错误体 64 KiB、超限只留标记）。
 
 ## Reviewer Patch 1 修复摘要（BASE 82d594d，2026-08-28）
 
