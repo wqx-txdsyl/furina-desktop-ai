@@ -15,11 +15,28 @@
 11. Native 与 Hermes-shaped fixture 归一为相同语义；
 12. 同一事件流重复重放结果完全一致（确定性）。
 
-额外锁定：信封字段校验 / reducer run_id+contract_id 身份绑定 / sequence 与
-processed_count 观测 / 信封载荷防御复制。
+额外锁定：信封字段校验 / reducer backend_id+run_id+contract_id 身份绑定 / sequence 与
+processed_count 观测 / 信封载荷防御复制 / 背压分类含工具生命周期边界。
+
+Reviewer Patch 1 否证（test_patch1a–1g）：
+- VERIFIED 在 16E 阶段 fail-closed（VB(verified) 一律 unauthorized_verification，
+  provenance 不得冒充 authority；全状态全事件扫描 VERIFIED 不可达）；
+- normalizer/reducer 精确身份绑定（BackendEvent/Mapping 身份不一致拒绝、reducer
+  实际检查 backend_id、构造要求非空 backend_id）；
+- event_id→canonical fingerprint（同 id 同内容 duplicate / 同 id 不同内容
+  event_id_conflict / 非法事件不烧毁 id 可重放）；
+- fallback event_id 纳入 sequence（两次相同 tool.started/completed 是两次事件；
+  只有上游稳定 event_id 才强重投幂等）；
+- payload 秘密值形态脱敏（message/stdout/error/list 内 Bearer/authorization/
+  password/token/secret/api_key 形态）+ max_payload_bytes type-is-int 严格校验；
+- approval.requested/resolved 绑定 approval_id（deny/timeout 后同 id approve 不得
+  恢复 RUNNING；不相关 id 不得改变状态）；
+- TOOL_STARTED/TOOL_COMPLETED 不可丢、不可合并（critical）；只有 TOOL_PROGRESS/
+  token delta 可 drop/coalesce。
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -43,6 +60,7 @@ from furina.agent.events import (
     WorkExecutionState,
     classify_priority,
     map_kind,
+    sanitize_payload,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -56,12 +74,13 @@ RUN = "run_16e_001"
 def _mk(kind: EventKind, event_id: str, sequence: int = 0,
         payload: Optional[Mapping[str, Any]] = None,
         backend_id: str = BACKEND, contract_id: str = CONTRACT,
-        run_id: str = RUN) -> NormalizedEvent:
+        run_id: str = RUN, max_payload_bytes: int = 4096) -> NormalizedEvent:
     """直接构造 canonical 信封（绕过 normalizer，供 reducer 表测试）。"""
     return NormalizedEvent(
         event_id=event_id, backend_id=backend_id, contract_id=contract_id,
         run_id=run_id, sequence=sequence, occurred_at=1000.0, received_at=1000.0,
         kind=kind, payload=payload or {}, provenance="test",
+        max_payload_bytes=max_payload_bytes,
     )
 
 
@@ -94,20 +113,35 @@ def _tokens(r: WorkExecutionReducer, *kinds: EventKind) -> List[ReduceResult]:
     return out
 
 
-def _drive(r: WorkExecutionReducer, state: WorkExecutionState) -> None:
-    """按 _PATH_TO 驱动 reducer 到指定 primary 状态（含 outcome 依赖事件）。"""
+def _drive(r: WorkExecutionReducer, state: WorkExecutionState) -> Optional[str]:
+    """按 _PATH_TO 驱动 reducer 到指定 primary 状态（含 outcome 依赖事件）。
+
+    审批路径自动把 approval_id 注入 resolution 事件；返回路径中最后一个
+    approval.requested 的审批身份（BLOCKED 路径即已消费的旧请求 id；无审批
+    路径返回 None）。
+    """
     tokens = _PATH_TO[state]
+    pending: Optional[str] = None
     for i, tok in enumerate(tokens):
+        if tok in _SPECIAL_TOKENS:
+            kind, payload = _SPECIAL_TOKENS[tok]
+            payload = dict(payload)
+            if kind is EventKind.APPROVAL_RESOLVED:
+                payload["approval_id"] = pending
+        else:
+            kind = map_kind(tok)
+            payload = {}
         ev = NormalizedEvent(
             event_id=f"s{i}_{state.value}", backend_id=BACKEND, contract_id=CONTRACT,
             run_id=RUN, sequence=i, occurred_at=1000.0, received_at=1000.0,
-            kind=_SPECIAL_TOKENS[tok][0] if tok in _SPECIAL_TOKENS else map_kind(tok),
-            payload=_SPECIAL_TOKENS[tok][1] if tok in _SPECIAL_TOKENS else {},
-            provenance="test",
+            kind=kind, payload=payload, provenance="test",
         )
         res = r.reduce(ev)
         assert res.applied, f"驱动到 {state.value} 失败 at {tok}: {res.diagnostic}"
+        if kind is EventKind.APPROVAL_REQUESTED:
+            pending = payload.get("approval_id") or ev.event_id
     assert r.view.primary is state, f"驱动到 {state.value} 失败：实际 {r.view.primary}"
+    return pending
 
 
 #: 各 primary 状态的驱动路径（token 词表）。
@@ -122,8 +156,6 @@ _PATH_TO: Dict[WorkExecutionState, Tuple[str, ...]] = {
     WorkExecutionState.BACKEND_DONE_UNVERIFIED: ("queued", "running", "completed"),
     WorkExecutionState.VERIFYING: ("queued", "running", "completed", "vb.start"),
     WorkExecutionState.REPAIRING: ("queued", "running", "completed", "vb.start", "vb.repair"),
-    WorkExecutionState.VERIFIED: (
-        "queued", "running", "completed", "vb.start", "vb.verified"),
     WorkExecutionState.CANCELLED: ("queued", "running", "cancelled"),
     WorkExecutionState.FAILED: ("queued", "running", "failed"),
     WorkExecutionState.UNKNOWN: ("queued", "running", "transport.disconnected"),
@@ -136,29 +168,6 @@ _SPECIAL_TOKENS = {
     "vb.repair": (EventKind.VERIFICATION_BOUNDARY, {"outcome": "repair"}),
     "vb.verified": (EventKind.VERIFICATION_BOUNDARY, {"outcome": "verified"}),
 }
-
-
-def _drive_raw(token: str) -> Mapping[str, Any]:
-    if token in _SPECIAL_TOKENS:
-        kind, payload = _SPECIAL_TOKENS[token]
-        return {"type": kind.value, "payload": dict(payload)}
-    return {"type": token}
-
-
-def _drive(r: WorkExecutionReducer, state: WorkExecutionState) -> None:
-    """按 _PATH_TO 驱动 reducer 到指定 primary 状态（含 outcome 依赖事件）。"""
-    tokens = _PATH_TO[state]
-    for i, tok in enumerate(tokens):
-        ev = NormalizedEvent(
-            event_id=f"s{i}_{state.value}", backend_id=BACKEND, contract_id=CONTRACT,
-            run_id=RUN, sequence=i, occurred_at=1000.0, received_at=1000.0,
-            kind=_SPECIAL_TOKENS[tok][0] if tok in _SPECIAL_TOKENS else map_kind(tok),
-            payload=_SPECIAL_TOKENS[tok][1] if tok in _SPECIAL_TOKENS else {},
-            provenance="test",
-        )
-        res = r.reduce(ev)
-        assert res.applied, f"驱动到 {state.value} 失败 at {tok}: {res.diagnostic}"
-    assert r.view.primary is state, f"驱动到 {state.value} 失败：实际 {r.view.primary}"
 
 
 # ================================================================ 1. 完整合法转移表
@@ -175,39 +184,48 @@ def test_01_full_legal_transition_table():
 
 
 def test_01b_outcome_dependent_approval_paths():
-    """§7.1：approval.resolved outcome 分支（approve/deny/timeout）。"""
+    """§7.1：approval.resolved outcome 分支（approve/deny/timeout，绑定 approval_id）。"""
     # WAITING_PERMISSION: approve → RUNNING；deny/timeout → BLOCKED_APPROVAL
     for outcome, target in (("approve", WorkExecutionState.RUNNING),
                             ("deny", WorkExecutionState.BLOCKED_APPROVAL),
                             ("timeout", WorkExecutionState.BLOCKED_APPROVAL)):
         r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
-        _drive(r, WorkExecutionState.WAITING_PERMISSION)
-        res = r.reduce(_mk(EventKind.APPROVAL_RESOLVED, "ap1", payload={"outcome": outcome}))
-        assert res.applied and res.view.primary is target
-    # BLOCKED_APPROVAL: approve → RUNNING；再次 deny → 保持 BLOCKED（合法自环）
+        ap = _drive(r, WorkExecutionState.WAITING_PERMISSION)
+        res = r.reduce(_mk(EventKind.APPROVAL_RESOLVED, "ap1",
+                           payload={"outcome": outcome, "approval_id": ap}))
+        assert res.applied and res.view.primary is target, outcome
+    # BLOCKED_APPROVAL：已消费的旧 approval_id 的 approve 不得恢复 RUNNING
     r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
-    _drive(r, WorkExecutionState.BLOCKED_APPROVAL)
-    res = r.reduce(_mk(EventKind.APPROVAL_RESOLVED, "ap2", payload={"outcome": "approve"}))
-    assert res.applied and res.view.primary is WorkExecutionState.RUNNING
-    r2 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
-    _drive(r2, WorkExecutionState.BLOCKED_APPROVAL)
-    res2 = r2.reduce(_mk(EventKind.APPROVAL_RESOLVED, "ap3", payload={"outcome": "deny"}))
-    assert res2.applied and res2.view.primary is WorkExecutionState.BLOCKED_APPROVAL
-    assert res2.diagnostic == "approval_already_blocked"
+    spent = _drive(r, WorkExecutionState.BLOCKED_APPROVAL)
+    res = r.reduce(_mk(EventKind.APPROVAL_RESOLVED, "ap2",
+                       payload={"outcome": "approve", "approval_id": spent}))
+    assert not res.applied
+    assert res.diagnostic.startswith("approval_id_mismatch:")
+    assert r.view.primary is WorkExecutionState.BLOCKED_APPROVAL
+    # 恢复路径：新 approval.requested（新 id）→ approve → RUNNING
+    res = r.reduce(_mk(EventKind.APPROVAL_REQUESTED, "ap3",
+                       payload={"approval_id": "ap_new"}))
+    assert res.applied and r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    res = r.reduce(_mk(EventKind.APPROVAL_RESOLVED, "ap4",
+                       payload={"outcome": "approve", "approval_id": "ap_new"}))
+    assert res.applied and r.view.primary is WorkExecutionState.RUNNING
 
 
 def test_01c_outcome_dependent_verification_boundary():
-    """§7.1：verification.boundary 分支（16F 预留通道）。"""
+    """§7.1：verification.boundary 分支（16F 预留通道；verified 在 16E fail-closed）。"""
     # BDU: start → VERIFYING；repair → REPAIRING
     r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
     _drive(r, WorkExecutionState.BACKEND_DONE_UNVERIFIED)
     res = r.reduce(_mk(EventKind.VERIFICATION_BOUNDARY, "vb1", payload={"outcome": "start"}))
     assert res.applied and res.view.primary is WorkExecutionState.VERIFYING
-    # VERIFYING: verified → VERIFIED；failed → FAILED；repair → REPAIRING
+    # VERIFYING: verified → fail-closed 拒绝（零变更）；failed → FAILED
     r2 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
     _drive(r2, WorkExecutionState.VERIFYING)
-    res2 = r2.reduce(_mk(EventKind.VERIFICATION_BOUNDARY, "vb2", payload={"outcome": "verified"}))
-    assert res2.applied and res2.view.primary is WorkExecutionState.VERIFIED
+    res2 = r2.reduce(_mk(EventKind.VERIFICATION_BOUNDARY, "vb2",
+                         payload={"outcome": "verified"}))
+    assert not res2.applied
+    assert res2.diagnostic.startswith("unauthorized_verification:")
+    assert r2.view.primary is WorkExecutionState.VERIFYING
     r3 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
     _drive(r3, WorkExecutionState.VERIFYING)
     res3 = r3.reduce(_mk(EventKind.VERIFICATION_BOUNDARY, "vb3", payload={"outcome": "failed"}))
@@ -320,11 +338,14 @@ def test_03_completed_never_verified():
         res2 = r2.reduce(ev)
         assert res2.applied and not res2.diagnostic
         assert r2.view.primary is WorkExecutionState.BACKEND_DONE_UNVERIFIED   # 未越权
-    # VERIFIED 只经 16F 校验边界可达（16E 表内唯一路径）
+    # VERIFIED 在 16E 阶段不可由公开事件抵达：VB(verified) fail-closed（16F 建立
+    # 真实 verifier authority 后由注入的权威通道开放）
     r3 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
     _drive(r3, WorkExecutionState.VERIFYING)
     res3 = r3.reduce(_mk(EventKind.VERIFICATION_BOUNDARY, "v1", payload={"outcome": "verified"}))
-    assert res3.view.primary is WorkExecutionState.VERIFIED
+    assert not res3.applied
+    assert res3.diagnostic.startswith("unauthorized_verification:")
+    assert r3.view.primary is WorkExecutionState.VERIFYING
 
 
 # ================================================================ 4. duplicate / out-of-order
@@ -390,26 +411,33 @@ def test_05_unknown_external_event_observable_non_authoritative():
 
 # ================================================================ 6. approval / cancellation
 def test_06_approval_and_cancellation_paths():
-    """§7.6：审批路径与取消路径完整走通。"""
+    """§7.6：审批路径与取消路径完整走通（approval_id 精确绑定）。"""
     n, r = _fresh()
     _feed(n, r, [
         {"event_id": "a1", "type": "queued"},
         {"event_id": "a2", "type": "running"},
-        {"event_id": "a3", "type": "waiting_for_approval", "payload": {"command": "fs.rm"}},
+        {"event_id": "a3", "type": "waiting_for_approval",
+         "payload": {"approval_id": "ap_a", "command": "fs.rm"}},
     ])
     assert r.view.primary is WorkExecutionState.WAITING_PERMISSION
-    _feed(n, r, [{"event_id": "a4", "type": "approval.resolved", "payload": {"decision": "approve"}}])
+    _feed(n, r, [{"event_id": "a4", "type": "approval.resolved",
+                  "payload": {"decision": "approve", "approval_id": "ap_a"}}])
     assert r.view.primary is WorkExecutionState.RUNNING
-    # 拒绝 → BLOCKED_APPROVAL → 再批准 → RUNNING
+    # 拒绝 → BLOCKED_APPROVAL → 新请求（新 approval_id）→ 批准 → RUNNING
     n2, r2 = _fresh()
     _feed(n2, r2, [
         {"event_id": "b1", "type": "queued"},
         {"event_id": "b2", "type": "running"},
-        {"event_id": "b3", "type": "waiting_for_approval"},
-        {"event_id": "b4", "type": "approval.resolved", "payload": {"decision": "deny"}},
+        {"event_id": "b3", "type": "waiting_for_approval", "payload": {"approval_id": "ap_b"}},
+        {"event_id": "b4", "type": "approval.resolved",
+         "payload": {"decision": "deny", "approval_id": "ap_b"}},
     ])
     assert r2.view.primary is WorkExecutionState.BLOCKED_APPROVAL
-    _feed(n2, r2, [{"event_id": "b5", "type": "approval.resolved", "payload": {"decision": "approve"}}])
+    _feed(n2, r2, [
+        {"event_id": "b5", "type": "waiting_for_approval", "payload": {"approval_id": "ap_b2"}},
+        {"event_id": "b6", "type": "approval.resolved",
+         "payload": {"decision": "approve", "approval_id": "ap_b2"}},
+    ])
     assert r2.view.primary is WorkExecutionState.RUNNING
     # 取消路径：stop.requested → CANCELLING → cancelled → CANCELLED
     n3, r3 = _fresh()
@@ -468,7 +496,8 @@ def test_08_critical_event_classification():
                 EventKind.APPROVAL_RESOLVED, EventKind.STOP_REQUESTED,
                 EventKind.STOPPING, EventKind.TRANSPORT_DISCONNECTED,
                 EventKind.VERIFICATION_BOUNDARY, EventKind.RUN_ACCEPTED,
-                EventKind.RUN_STARTED, EventKind.PROTOCOL_ERROR}
+                EventKind.RUN_STARTED, EventKind.PROTOCOL_ERROR,
+                EventKind.TOOL_STARTED, EventKind.TOOL_COMPLETED}
     droppable = {EventKind.TOOL_PROGRESS}
     for k in EventKind:
         pri = classify_priority(k)
@@ -481,6 +510,8 @@ def test_08_critical_event_classification():
     # 信封 critical/terminal 派生字段
     assert _mk(EventKind.BACKEND_COMPLETED, "x1").critical is True
     assert _mk(EventKind.BACKEND_COMPLETED, "x2").terminal is True
+    assert _mk(EventKind.TOOL_STARTED, "x5").critical is True      # 生命周期边界
+    assert _mk(EventKind.TOOL_COMPLETED, "x6").critical is True
     assert _mk(EventKind.TOOL_PROGRESS, "x3").critical is False
     assert _mk(EventKind.TOOL_PROGRESS, "x4").terminal is False
     # 背压策略：critical 永不丢弃；压力下只丢 droppable；coalescible 可合并
@@ -490,9 +521,10 @@ def test_08_critical_event_classification():
     assert EventBackpressurePolicy.drop_allowed(EventKind.TOOL_PROGRESS, under_pressure=True)
     assert not EventBackpressurePolicy.drop_allowed(EventKind.TOOL_PROGRESS, under_pressure=False)
     assert not EventBackpressurePolicy.drop_allowed(EventKind.BACKEND_COMPLETED, under_pressure=True)
-    assert EventBackpressurePolicy.coalesce_allowed(EventKind.TOOL_STARTED)
-    assert EventBackpressurePolicy.coalesce_allowed(EventKind.TOOL_COMPLETED)
+    assert not EventBackpressurePolicy.coalesce_allowed(EventKind.TOOL_STARTED)
+    assert not EventBackpressurePolicy.coalesce_allowed(EventKind.TOOL_COMPLETED)
     assert EventBackpressurePolicy.coalesce_allowed(EventKind.UNKNOWN_EVENT)
+    assert EventBackpressurePolicy.coalesce_allowed(EventKind.TRANSPORT_RECONNECTED)
     assert not EventBackpressurePolicy.coalesce_allowed(EventKind.BACKEND_COMPLETED)
 
 
@@ -568,8 +600,9 @@ def test_10b_no_workexecution_state_written_to_c7_c6(tmp_path):
         {"event_id": "z3", "type": "tool.started", "payload": {"tool": "fs.read_file"}},
         {"event_id": "z4", "type": "tool.progress", "payload": {"delta": "..."}},
         {"event_id": "z5", "type": "tool.completed"},
-        {"event_id": "z6", "type": "waiting_for_approval"},
-        {"event_id": "z7", "type": "approval.resolved", "payload": {"decision": "approve"}},
+        {"event_id": "z6", "type": "waiting_for_approval", "payload": {"approval_id": "z_ap"}},
+        {"event_id": "z7", "type": "approval.resolved",
+         "payload": {"decision": "approve", "approval_id": "z_ap"}},
         {"event_id": "z8", "type": "completed"},
     ]
     for raw in stream:
@@ -652,8 +685,9 @@ def test_12_repeated_replay_deterministic():
         {"event_id": "r3", "type": "tool.started", "payload": {"tool": "fs.organize"}},
         {"event_id": "r4", "type": "tool.progress", "payload": {"delta": "t"}},
         {"event_id": "r5", "type": "tool.completed"},
-        {"event_id": "r6", "type": "waiting_for_approval"},
-        {"event_id": "r7", "type": "approval.resolved", "payload": {"decision": "approve"}},
+        {"event_id": "r6", "type": "waiting_for_approval", "payload": {"approval_id": "r_ap"}},
+        {"event_id": "r7", "type": "approval.resolved",
+         "payload": {"decision": "approve", "approval_id": "r_ap"}},
         {"event_id": "r8", "type": "backend.completed"},
     ]
 
@@ -712,14 +746,19 @@ def test_13_envelope_validation_fail_closed():
 
 
 def test_14_reducer_identity_binding():
-    """reducer 身份绑定：run_id / contract_id 不匹配 → WorkExecutionError。"""
+    """reducer 身份绑定：backend_id / run_id / contract_id 不匹配 → WorkExecutionError。"""
     r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    with pytest.raises(WorkExecutionError, match="backend_id"):
+        r.reduce(_mk(EventKind.RUN_ACCEPTED, "x0", backend_id="backend_other"))
     with pytest.raises(WorkExecutionError, match="run_id"):
         r.reduce(_mk(EventKind.RUN_ACCEPTED, "x1", run_id="run_other"))
     with pytest.raises(WorkExecutionError, match="contract_id"):
         r.reduce(_mk(EventKind.RUN_ACCEPTED, "x2", contract_id="wc_other"))
     with pytest.raises(WorkExecutionError, match="NormalizedEvent"):
         r.reduce({"type": "queued"})     # type: ignore[arg-type] —— 未归一不得直接入状态机
+    # 构造必须绑定非空 backend_id（不得留空绕过绑定）
+    with pytest.raises(WorkExecutionError, match="backend_id"):
+        WorkExecutionReducer(RUN, CONTRACT, backend_id="")
 
 
 def test_15_sequence_and_processed_count_observation():
@@ -740,10 +779,322 @@ def test_16_payload_defensive_export():
     d = ev.to_dict()
     assert isinstance(d, MappingProxyType)
     assert d["kind"] == "tool.started"
-    assert d["terminal"] is False and d["critical"] is False   # 派生字段（coalescible）
+    assert d["terminal"] is False and d["critical"] is True    # 派生字段（工具边界 critical）
     ev2 = _mk(EventKind.BACKEND_COMPLETED, "e2")
     d2 = ev2.to_dict()
     assert d2["terminal"] is True and d2["critical"] is True    # 终态派生为 critical
     with pytest.raises(TypeError):
         d["kind"] = "hacked"      # type: ignore[index]
     assert ev.kind is EventKind.TOOL_STARTED                   # 内部不受影响
+
+
+# ================================================================ Reviewer Patch 1 否证
+# B1. VERIFIED 在 16E 阶段 fail-closed（无 verifier authority）
+def test_patch1a_verified_fail_closed():
+    """reviewer B1：公开 reducer 对 VERIFICATION_BOUNDARY(verified) 一律 fail-closed。
+
+    provenance 字符串（"verifier.trusted"）不得冒充 authority；VERIFIED 在 16E
+    阶段无任何公开可达路径（16F 建立真实 verifier 后由注入权威通道开放）。
+    """
+    # VERIFYING + verified：即使 provenance 自称 verifier 也拒绝且零变更
+    r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r, WorkExecutionState.VERIFYING)
+    before = r.view
+    res = r.reduce(NormalizedEvent(
+        event_id="v_claim", backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN,
+        sequence=99, occurred_at=1000.0, received_at=1000.0,
+        kind=EventKind.VERIFICATION_BOUNDARY,
+        payload={"outcome": "verified"}, provenance="verifier.trusted"))
+    assert not res.applied
+    assert res.diagnostic.startswith("unauthorized_verification:")
+    assert res.view is before and res.view.primary is WorkExecutionState.VERIFYING
+    # 各状态出发（含 BDU/VERIFYING/REPAIRING）一律拒绝
+    for src in (WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+                WorkExecutionState.VERIFYING, WorkExecutionState.REPAIRING,
+                WorkExecutionState.RUNNING):
+        r2 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+        _drive(r2, src)
+        res2 = r2.reduce(_mk(EventKind.VERIFICATION_BOUNDARY, f"v_{src.value}",
+                             payload={"outcome": "verified"}))
+        assert not res2.applied
+        assert res2.diagnostic.startswith("unauthorized_verification:")
+        assert r2.view.primary is src
+    # 全事件扫描：任何可达状态喂任何 EventKind，primary 永不成为 VERIFIED
+    for src in (WorkExecutionState.IDLE, WorkExecutionState.STARTING,
+                WorkExecutionState.RUNNING, WorkExecutionState.WAITING_PERMISSION,
+                WorkExecutionState.BLOCKED_APPROVAL, WorkExecutionState.CANCELLING,
+                WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+                WorkExecutionState.VERIFYING, WorkExecutionState.REPAIRING,
+                WorkExecutionState.CANCELLED, WorkExecutionState.FAILED,
+                WorkExecutionState.UNKNOWN):
+        r3 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+        _drive(r3, src)
+        for k in EventKind:
+            r3.reduce(_mk(k, f"scan_{src.value}_{k.value}"))
+            assert r3.view.primary is not WorkExecutionState.VERIFIED, \
+                f"{src.value.value} --{k.value}--> 竟抵达 VERIFIED"
+
+
+# B2. normalizer/reducer 精确身份绑定
+def test_patch1b_identity_binding_rejected():
+    """reviewer B2：normalizer/reducer 精确绑定 backend_id/run_id/contract_id。
+
+    BackendEvent 身份不一致必须拒绝；Mapping 携带身份字段不一致必须拒绝（不得
+    静默改绑）；reducer 实际检查 backend_id（此前只查 run/contract）。
+    """
+    n = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+    # BackendEvent 身份不一致 → 拒绝
+    with pytest.raises(EventNormalizationError, match="backend_id"):
+        n.normalize(BackendEvent(backend_id="other_backend", run_id=RUN,
+                                 event_type="running", payload={}))
+    with pytest.raises(EventNormalizationError, match="run_id"):
+        n.normalize(BackendEvent(backend_id=BACKEND, run_id="run_other",
+                                 event_type="running", payload={}))
+    # Mapping 携带身份字段但不一致 → 拒绝（backend/contract/run 各自 + 别名键）
+    for key in ("backend_id", "backendId"):
+        with pytest.raises(EventNormalizationError, match="backend_id"):
+            n.normalize({"event_id": "x1", "type": "running", key: "other_backend"})
+    with pytest.raises(EventNormalizationError, match="contract_id"):
+        n.normalize({"event_id": "x2", "type": "running", "contractId": "wc_other"})
+    with pytest.raises(EventNormalizationError, match="run_id"):
+        n.normalize({"event_id": "x3", "type": "running", "run_id": "run_other"})
+    # 非 str 身份字段 → 拒绝（身份不得以非 str 携带）
+    with pytest.raises(EventNormalizationError, match="backend_id"):
+        n.normalize({"event_id": "x4", "type": "running", "backend_id": 123})
+    # 一致的身份字段 → 合法接受（不误伤）
+    ev = n.normalize({"event_id": "x5", "type": "running",
+                      "backend_id": BACKEND, "contract_id": CONTRACT, "run_id": RUN})
+    assert ev.kind is EventKind.RUN_STARTED
+    assert ev.backend_id == BACKEND and ev.run_id == RUN
+    # reducer 实际检查 backend_id
+    r = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    with pytest.raises(WorkExecutionError, match="backend_id"):
+        r.reduce(_mk(EventKind.RUN_ACCEPTED, "b1", backend_id="other_backend"))
+
+
+# B3. event_id → canonical fingerprint 去重
+def test_patch1c_event_id_fingerprint_duplicate_conflict_replay():
+    """reviewer B3：_seen 为 event_id→canonical fingerprint。
+
+    同 id 同内容 = duplicate；同 id 不同内容 = event_id_conflict（零变更）；
+    **非法事件不提前烧毁 id**——先非法后满足前置条件的同事件可重放。
+    """
+    n, r = _fresh()
+    _feed(n, r, [
+        {"event_id": "e1", "type": "queued"},
+        {"event_id": "e2", "type": "running"},
+    ])
+    assert r.view.primary is WorkExecutionState.RUNNING
+    # 同 id 同内容（重投）→ duplicate
+    res = r.reduce(n.normalize({"event_id": "e2", "type": "running"}))
+    assert not res.applied and res.diagnostic.startswith("duplicate_event:")
+    # 同 id 不同内容 → event_id_conflict（不静默当 duplicate，也不改状态）
+    before = r.view
+    res = r.reduce(n.normalize({"event_id": "e2", "type": "failed", "payload": {"x": 1}}))
+    assert not res.applied and res.diagnostic.startswith("event_id_conflict:")
+    assert r.view is before and r.view.primary is WorkExecutionState.RUNNING
+    # 非法事件不烧毁 id：IDLE 中 tool.started 非法 → 驱动到 RUNNING 后同事件重放可应用
+    r2 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    ev = _mk(EventKind.TOOL_STARTED, "tool_x", payload={"tool": "fs.read_file"})
+    res = r2.reduce(ev)
+    assert not res.applied and res.diagnostic.startswith("illegal_transition:")
+    _drive(r2, WorkExecutionState.RUNNING)
+    res = r2.reduce(ev)     # 前置条件满足后同一事件重放 → 应用
+    assert res.applied
+    assert r2.view.state is WorkExecutionState.TOOL_RUNNING
+    assert r2.view.active_tool == "fs.read_file"
+    # 应用后再重投 → duplicate
+    res = r2.reduce(ev)
+    assert not res.applied and res.diagnostic.startswith("duplicate_event:")
+    # 被拒事件不进入 _seen：同一被拒事件再次评估仍按原判据（不变成 duplicate）
+    r3 = WorkExecutionReducer(RUN, CONTRACT, backend_id=BACKEND)
+    _drive(r3, WorkExecutionState.BACKEND_DONE_UNVERIFIED)
+    ev_r = _mk(EventKind.RUN_STARTED, "r3x")   # BDU 中非法
+    res = r3.reduce(ev_r)
+    assert not res.applied and res.diagnostic.startswith("illegal_transition:")
+    res = r3.reduce(ev_r)
+    assert not res.applied and res.diagnostic.startswith("illegal_transition:")
+
+
+# B4. fallback event_id 纳入 sequence
+def test_patch1d_fallback_event_id_sequence_distinct():
+    """reviewer B4：fallback event_id 纳入 sequence——两次相同 tool.started/
+    tool.completed 是两次**事件**（不得被内容寻址误去重）；只有上游稳定 event_id
+    才声明强重投幂等。"""
+    # 两次完整工具会话：完全相同的内容必须各自成事件且全部应用
+    n, r = _fresh()
+    double_session = [
+        {"type": "queued"},
+        {"type": "running"},
+        {"type": "tool.started", "payload": {"tool": "fs.read_file"}},
+        {"type": "tool.completed"},
+        {"type": "tool.started", "payload": {"tool": "fs.read_file"}},   # 完全相同
+        {"type": "tool.completed"},
+    ]
+    evs = [n.normalize(raw) for raw in double_session]
+    ids = [ev.event_id for ev in evs]
+    assert ids[2] != ids[3], "相同内容的两次 tool.started 必须是两次事件"
+    assert ids[3] != ids[4] and ids[4] != ids[5], "两次 tool.completed 也必须是两次事件"
+    assert len(set(ids)) == len(ids), "fallback id 必须互不相同"
+    for ev in evs:
+        res = r.reduce(ev)
+        assert res.applied, f"{ev.kind.value} 未被应用: {res.diagnostic}"
+    assert r.view.primary is WorkExecutionState.RUNNING
+    assert r.view.processed_count == len(evs)
+    # 背靠背相同 started：第二次是真实的第二次事件（tool_already_active），
+    # **不是** duplicate（此前内容寻址会把它误折叠成 duplicate）
+    n2, r2 = _fresh()
+    back_to_back = [
+        {"type": "queued"},
+        {"type": "running"},
+        {"type": "tool.started", "payload": {"tool": "fs.read_file"}},
+        {"type": "tool.started", "payload": {"tool": "fs.read_file"}},
+        {"type": "tool.completed"},
+        {"type": "tool.completed"},
+    ]
+    reses = _feed(n2, r2, back_to_back)
+    assert not reses[3].applied and reses[3].diagnostic.endswith("tool_already_active")
+    assert not reses[5].applied and reses[5].diagnostic.endswith("no_active_tool")
+    assert r2.view.processed_count == 4
+    # 上游稳定 event_id → 强重投幂等（duplicate）
+    n3, r3 = _fresh()
+    _feed(n3, r3, [
+        {"event_id": "s0", "type": "queued"},
+        {"event_id": "s1", "type": "running"},
+        {"event_id": "s2", "type": "tool.started", "payload": {"tool": "fs.read_file"}},
+    ])
+    res = r3.reduce(n3.normalize({"event_id": "s2", "type": "tool.started",
+                                  "payload": {"tool": "fs.read_file"}}))
+    assert not res.applied and res.diagnostic.startswith("duplicate_event:")
+    # fallback 流在同一输入流位置重复归一 → 同一 id（确定性；fresh normalizer 补序一致）
+    n4 = BackendEventNormalizer(backend_id=BACKEND, contract_id=CONTRACT, run_id=RUN)
+    evs2 = [n4.normalize(raw) for raw in double_session]
+    assert [ev.event_id for ev in evs2] == ids
+
+
+# B5. payload 秘密值形态脱敏 + 预算严格校验
+def test_patch1e_secret_value_redaction_and_budget_validation():
+    """reviewer B5：payload 同时做敏感键与秘密**值**形态脱敏（message/stdout/
+    error/list 内 Bearer/authorization/password/token/secret/api_key 形态不得
+    泄漏）；max_payload_bytes 必须 type-is-int、非 bool、有限合理正值。"""
+    ev = _mk(EventKind.TOOL_PROGRESS, "v1", payload={
+        "message": "Authorization: Bearer abc.def-ghi_123",
+        "stdout": "password=hunter2 token=abc123 secret: s3cr3t",
+        "error": "api_key: sk-1234567890",
+        "list": ["Bearer xyz", "client_secret='csec'", '{"access_token":"atk_9"}'],
+        "ok_note": "the token count is 42 and author is furina",
+    })
+    blob = json.dumps(_plain(ev.payload), ensure_ascii=False, sort_keys=True)
+    for leak in ("abc.def-ghi_123", "hunter2", "abc123", "s3cr3t",
+                 "sk-1234567890", "xyz", "csec", "atk_9"):
+        assert leak not in blob, f"秘密值形态泄漏: {leak!r}"
+    assert "[REDACTED]" in blob
+    assert "the token count is 42 and author is furina" in blob   # 自然语言不误伤
+    # 键名形态：header 风格键同样脱敏
+    ev2 = _mk(EventKind.TOOL_STARTED, "v2", payload={
+        "headers": {"x-api-key": "k_123", "X-Authorization": "secret-token"}})
+    p2 = _plain(ev2.payload)
+    assert p2["headers"]["x-api-key"] == "[REDACTED]"
+    assert p2["headers"]["X-Authorization"] == "[REDACTED]"
+    # max_payload_bytes 严格校验（信封构造 + sanitize_payload 双入口）
+    for bad in (True, False, 0, -5, 1.5, "4096", None, (1 << 20) + 1):
+        with pytest.raises(EventNormalizationError, match="max_payload_bytes"):
+            _mk(EventKind.TOOL_PROGRESS, "v3", payload={"x": 1},
+                max_payload_bytes=bad)
+    with pytest.raises(EventNormalizationError, match="max_payload_bytes"):
+        sanitize_payload({"x": 1}, max_bytes=0.5)
+    # 合法边界值可用
+    _mk(EventKind.TOOL_PROGRESS, "v4", payload={"x": 1}, max_payload_bytes=1)
+    _mk(EventKind.TOOL_PROGRESS, "v5", payload={"x": 1}, max_payload_bytes=1 << 20)
+
+
+# B6. approval.requested/resolved 必须绑定 approval_id
+def test_patch1f_approval_id_binding():
+    """reviewer B6：approval.resolved 只能作用于当前挂起的 approval_id。
+
+    deny/timeout 后同 approval_id 的 approve 不得恢复 RUNNING；不相关
+    approval_id 不得改变状态；恢复必须经新的 approval.requested（新 id）。
+    """
+    n, r = _fresh()
+    _feed(n, r, [
+        {"event_id": "q1", "type": "queued"},
+        {"event_id": "q2", "type": "running"},
+        {"event_id": "q3", "type": "waiting_for_approval",
+         "payload": {"approval_id": "ap_1", "command": "fs.rm"}},
+    ])
+    assert r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    # 不相关 approval_id → 零状态变更
+    before = r.view
+    res = r.reduce(n.normalize({"event_id": "q4", "type": "approval.resolved",
+                                "payload": {"decision": "approve",
+                                            "approval_id": "ap_other"}}))
+    assert not res.applied and res.diagnostic.startswith("approval_id_mismatch:")
+    assert r.view is before and r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    # 缺 approval_id → 回退事件自身 event_id 也不匹配挂起身份 → 拒绝
+    res = r.reduce(n.normalize({"event_id": "q5", "type": "approval.resolved",
+                                "payload": {"decision": "approve"}}))
+    assert not res.applied and res.diagnostic.startswith("approval_id_mismatch:")
+    # 畸形 outcome（未知）→ 拒绝但**不消费**挂起请求；随后合法 approve 仍可用
+    res = r.reduce(n.normalize({"event_id": "q5b", "type": "approval.resolved",
+                                "payload": {"decision": "maybe", "approval_id": "ap_1"}}))
+    assert not res.applied and res.diagnostic.startswith("illegal_transition:")
+    assert r.view.primary is WorkExecutionState.WAITING_PERMISSION
+    # 匹配 approval_id + approve → RUNNING（合法消费，一次性）
+    res = r.reduce(n.normalize({"event_id": "q6", "type": "approval.resolved",
+                                "payload": {"decision": "approve",
+                                            "approval_id": "ap_1"}}))
+    assert res.applied and r.view.primary is WorkExecutionState.RUNNING
+    # deny 后同 approval_id 的 approve 不得恢复 RUNNING
+    n2, r2 = _fresh()
+    _feed(n2, r2, [
+        {"event_id": "d1", "type": "queued"},
+        {"event_id": "d2", "type": "running"},
+        {"event_id": "d3", "type": "waiting_for_approval", "payload": {"approval_id": "ap_2"}},
+        {"event_id": "d4", "type": "approval.resolved",
+         "payload": {"decision": "deny", "approval_id": "ap_2"}},
+    ])
+    assert r2.view.primary is WorkExecutionState.BLOCKED_APPROVAL
+    res = r2.reduce(n2.normalize({"event_id": "d5", "type": "approval.resolved",
+                                  "payload": {"decision": "approve",
+                                              "approval_id": "ap_2"}}))
+    assert not res.applied and res.diagnostic.startswith("approval_id_mismatch:")
+    assert r2.view.primary is WorkExecutionState.BLOCKED_APPROVAL
+    # timeout 同理：同 approval_id 的 approve 不得恢复
+    n3, r3 = _fresh()
+    _feed(n3, r3, [
+        {"event_id": "t1", "type": "queued"},
+        {"event_id": "t2", "type": "running"},
+        {"event_id": "t3", "type": "waiting_for_approval", "payload": {"approval_id": "ap_3"}},
+        {"event_id": "t4", "type": "approval.resolved",
+         "payload": {"decision": "timeout", "approval_id": "ap_3"}},
+    ])
+    assert r3.view.primary is WorkExecutionState.BLOCKED_APPROVAL
+    res = r3.reduce(n3.normalize({"event_id": "t5", "type": "approval.resolved",
+                                  "payload": {"decision": "approve",
+                                              "approval_id": "ap_3"}}))
+    assert not res.applied and r3.view.primary is WorkExecutionState.BLOCKED_APPROVAL
+    # 恢复路径：BLOCKED 中必须出现新 approval.requested（新 id）→ approve 才恢复
+    res = r3.reduce(n3.normalize({"event_id": "t6", "type": "waiting_for_approval",
+                                  "payload": {"approval_id": "ap_4"}}))
+    assert res.applied and r3.view.primary is WorkExecutionState.WAITING_PERMISSION
+    res = r3.reduce(n3.normalize({"event_id": "t7", "type": "approval.resolved",
+                                  "payload": {"decision": "approve",
+                                              "approval_id": "ap_4"}}))
+    assert res.applied and r3.view.primary is WorkExecutionState.RUNNING
+
+
+# B7. TOOL_STARTED/TOOL_COMPLETED 不可丢、不可合并
+def test_patch1g_tool_boundary_not_droppable_not_coalescible():
+    """reviewer B7：TOOL_STARTED/TOOL_COMPLETED 是不可丢、不可合并的生命周期边界；
+    只有 TOOL_PROGRESS/token delta 可 drop/coalesce。"""
+    for k in (EventKind.TOOL_STARTED, EventKind.TOOL_COMPLETED):
+        assert classify_priority(k) is EventPriority.CRITICAL
+        assert EventBackpressurePolicy.never_droppable(k)
+        assert not EventBackpressurePolicy.drop_allowed(k, under_pressure=True)
+        assert not EventBackpressurePolicy.coalesce_allowed(k)
+    # TOOL_PROGRESS 是唯一可丢弃的 token 类；reconnect/unknown 仅可合并
+    assert EventBackpressurePolicy.drop_allowed(EventKind.TOOL_PROGRESS, under_pressure=True)
+    assert not EventBackpressurePolicy.drop_allowed(EventKind.TOOL_PROGRESS, under_pressure=False)
+    for k in (EventKind.TRANSPORT_RECONNECTED, EventKind.UNKNOWN_EVENT):
+        assert not EventBackpressurePolicy.drop_allowed(k, under_pressure=True)
+        assert EventBackpressurePolicy.coalesce_allowed(k)

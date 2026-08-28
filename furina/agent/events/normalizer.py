@@ -24,6 +24,7 @@ from .models import (
     EventNormalizationError,
     NormalizedEvent,
     _default_now,
+    _validate_payload_budget,
 )
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,14 @@ _SEQ_KEYS = ("sequence", "seq", "number")
 _TS_KEYS = ("occurred_at", "occurredAt", "timestamp", "ts", "time")
 _PAYLOAD_KEYS = ("payload", "data", "body", "result")
 
+#: Mapping 形状中的身份字段候选键（normalizer 构造绑定；**携带即必须一致**，
+#: 不一致直接拒绝——禁止静默改绑）。
+_IDENTITY_KEYS: dict = {
+    "backend_id": ("backend_id", "backendId"),
+    "contract_id": ("contract_id", "contractId"),
+    "run_id": ("run_id", "runId"),
+}
+
 
 def map_kind(token: Any) -> EventKind:
     """外部 token → canonical EventKind（未知/非权威 → UNKNOWN_EVENT，绝不抛错）。"""
@@ -180,21 +189,51 @@ def _first_mapping(mapping: Mapping[str, Any], keys: tuple) -> Optional[Mapping[
     return None
 
 
-def _derive_event_id(backend_id: str, run_id: str, token: str, payload: Any) -> str:
-    """内容寻址的派生事件 id：同一逻辑事件重复投递 → 同一 id（幂等去重基础）。"""
+def _derive_event_id(backend_id: str, run_id: str, token: str, payload: Any,
+                     sequence: int) -> str:
+    """内容寻址的派生事件 id（缺上游稳定 event_id 时的 fallback）。
+
+    派生 id 纳入 ``sequence``：同内容的两次事件（如两次相同 tool.started）是
+    两次**不同**事件（sequence 不同 → id 不同），不得被误去重；只有上游显式
+    提供的稳定 event_id 才享有强重投幂等。
+    """
     try:
         canon = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     except Exception as exc:  # noqa: BLE001 —— 防御性：非 JSON-safe 载荷退化
         canon = f"<unserializable:{type(exc).__name__}>"
-    digest = hashlib.sha256(f"{token}|{canon}".encode()).hexdigest()[:16]
+    digest = hashlib.sha256(f"{token}|{sequence}|{canon}".encode()).hexdigest()[:16]
     return f"bev_{backend_id[:16]}_{run_id[:16]}_{digest}"
+
+
+def _check_mapping_identity(normalizer_backend_id: str, normalizer_contract_id: str,
+                            normalizer_run_id: str, raw: Mapping[str, Any]) -> None:
+    """Mapping 若携带身份字段，与 normalizer 绑定不一致/非 str 一律拒绝（不静默改绑）。"""
+    for field, keys in _IDENTITY_KEYS.items():
+        for k in keys:
+            if k not in raw:
+                continue
+            v = raw[k]
+            bound = {"backend_id": normalizer_backend_id,
+                     "contract_id": normalizer_contract_id,
+                     "run_id": normalizer_run_id}[field]
+            if not isinstance(v, str) or not v.strip():
+                raise EventNormalizationError(
+                    f"raw.{k} 必须是非空 str，得到 {v!r}（身份字段不得以非 str 携带）")
+            if v.strip() != bound:
+                raise EventNormalizationError(
+                    f"raw.{k}={v.strip()!r} 与 normalizer 绑定 {field}={bound!r} 不一致"
+                    "（禁止静默改绑）")
+            break
 
 
 class BackendEventNormalizer:
     """backend-neutral 归一器：16B BackendEvent / Mapping → NormalizedEvent。
 
-    构造绑定 backend_id/contract_id/run_id（信封恒等；缺 event_id 时派生稳定 id，
-    缺 sequence 时按到达顺序补序——同一输入流重复归一结果完全一致）。
+    构造绑定 backend_id/contract_id/run_id（信封恒等）；**身份不一致直接拒绝**：
+    BackendEvent 的 backend_id/run_id、Mapping 携带的身份字段都必须与绑定一致，
+    不静默改绑。缺 event_id 时按到达顺序内容寻址派生（fallback id 含 sequence，
+    同内容两次事件 = 两次不同事件）；缺 sequence 时按到达顺序补序——同一输入流
+    重复归一结果完全一致。
     """
 
     def __init__(
@@ -214,7 +253,7 @@ class BackendEventNormalizer:
         self._contract_id = contract_id.strip()
         self._run_id = run_id.strip()
         self._now_fn = now_fn
-        self._max_payload_bytes = int(max_payload_bytes)
+        self._max_payload_bytes = _validate_payload_budget(max_payload_bytes)
         self._seq_counter = 0
 
     # -- 公共入口 ----------------------------------------------------------------
@@ -229,36 +268,48 @@ class BackendEventNormalizer:
 
     # -- 16B typed 引用 ----------------------------------------------------------
     def _from_backend_event(self, be: BackendEvent) -> NormalizedEvent:
+        if be.backend_id != self._backend_id:
+            raise EventNormalizationError(
+                f"BackendEvent.backend_id={be.backend_id!r} 与 normalizer 绑定 "
+                f"{self._backend_id!r} 不一致（禁止静默改绑）")
+        if be.run_id != self._run_id:
+            raise EventNormalizationError(
+                f"BackendEvent.run_id={be.run_id!r} 与 normalizer 绑定 {self._run_id!r}"
+                " 不一致（禁止静默改绑）")
         token = be.event_type if isinstance(be.event_type, str) else ""
         kind = map_kind(token)
         payload = be.payload if isinstance(be.payload, Mapping) else {}
         now = self._now_fn()
+        sequence = self._next_seq()
         return NormalizedEvent(
-            event_id=_derive_event_id(be.backend_id, be.run_id, token, payload),
-            backend_id=be.backend_id,
+            event_id=_derive_event_id(self._backend_id, self._run_id, token, payload,
+                                      sequence),
+            backend_id=self._backend_id,
             contract_id=self._contract_id,
-            run_id=be.run_id,
-            sequence=self._next_seq(),
+            run_id=self._run_id,
+            sequence=sequence,
             occurred_at=now,
             received_at=now,
             kind=kind,
             payload=payload,
-            provenance=f"backend_event:{be.backend_id}",
+            provenance=f"backend_event:{self._backend_id}",
             max_payload_bytes=self._max_payload_bytes,
         )
 
     # -- 通用 Mapping 形状（含 Hermes-shaped fixture）-----------------------------
     def _from_mapping(self, raw: Mapping[str, Any]) -> NormalizedEvent:
+        _check_mapping_identity(self._backend_id, self._contract_id, self._run_id, raw)
         token = _first_str(raw, _KIND_KEYS) or ""
         kind = map_kind(token)
         payload = _first_mapping(raw, _PAYLOAD_KEYS) or {}
         now = self._now_fn()
-        event_id = _first_str(raw, _EVENT_ID_KEYS)
-        if event_id is None:
-            event_id = _derive_event_id(self._backend_id, self._run_id, token, payload)
         sequence = _first_int(raw, _SEQ_KEYS)
         if sequence is None:
             sequence = self._next_seq()
+        event_id = _first_str(raw, _EVENT_ID_KEYS)
+        if event_id is None:
+            event_id = _derive_event_id(self._backend_id, self._run_id, token, payload,
+                                        sequence)
         occurred_at = _first_float(raw, _TS_KEYS)
         if occurred_at is None:
             occurred_at = now

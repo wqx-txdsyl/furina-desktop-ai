@@ -58,7 +58,10 @@ class EventKind(str, enum.Enum):
     TRANSPORT_DISCONNECTED = "transport.disconnected"  # 传输断开 → UNKNOWN 策略边界
     TRANSPORT_RECONNECTED = "transport.reconnected"    # 重连（非权威；不得复活终态）
     PROTOCOL_ERROR = "protocol.error"            # 协议错误（诊断性，不改状态）
-    VERIFICATION_BOUNDARY = "verification.boundary"    # 16F 校验边界（16E 只定义转移规则）
+    VERIFICATION_BOUNDARY = "verification.boundary"    # 16F 校验边界（16E 只定义转移规则；
+                                                        # outcome=verified 在 16E 阶段
+                                                        # fail-closed——VERIFIED 不可由
+                                                        # 公开事件抵达，见 reducer）
     UNKNOWN_EVENT = "unknown.event"              # 未知外部类型：可观察但非权威
 
 
@@ -71,6 +74,9 @@ TERMINAL_KINDS = frozenset({
 
 #: critical 事件（任务书 §5：terminal/approval/cancellation/disconnect/
 #: verification-boundary 永不丢弃；另含生命周期与协议完整性信号）。
+#: TOOL_STARTED/TOOL_COMPLETED 是**不可丢、不可合并**的工具生命周期边界——
+#: 丢/合并它们会破坏工具子相位的成对语义，故归入 critical（见 reviewer
+#: patch1: 只有 TOOL_PROGRESS/token delta 可 drop/coalesce）。
 CRITICAL_KINDS = frozenset({
     EventKind.BACKEND_COMPLETED,
     EventKind.BACKEND_FAILED,
@@ -84,15 +90,17 @@ CRITICAL_KINDS = frozenset({
     EventKind.RUN_ACCEPTED,
     EventKind.RUN_STARTED,
     EventKind.PROTOCOL_ERROR,
+    EventKind.TOOL_STARTED,
+    EventKind.TOOL_COMPLETED,
 })
 
 #: droppable 事件（progress/token 高频 tick：压力下可丢弃，绝不写成 cognition truth）。
 DROPPABLE_KINDS = frozenset({EventKind.TOOL_PROGRESS})
 
 #: coalescible 事件（压力下可合并；未列出的非 critical 事件默认 coalescible）。
+#: 仅 reconnect/unknown 这类无生命周期语义的观察可合并；TOOL_* 生命周期边界
+#: 已上移为 critical（不可丢亦不可合并）。
 COALESCIBLE_KINDS = frozenset({
-    EventKind.TOOL_STARTED,
-    EventKind.TOOL_COMPLETED,
     EventKind.TRANSPORT_RECONNECTED,
     EventKind.UNKNOWN_EVENT,
 })
@@ -110,7 +118,7 @@ class EventPriority(str, enum.Enum):
 
 
 def classify_priority(kind: EventKind) -> EventPriority:
-    """确定性优先级分类：critical ⊇ 终态/审批/取消/断开/校验边界。"""
+    """确定性优先级分类：critical ⊇ 终态/审批/取消/断开/校验边界/工具生命周期边界。"""
     if not isinstance(kind, EventKind):
         raise EventNormalizationError(f"kind 必须是 EventKind，得到 {kind!r}")
     if kind in CRITICAL_KINDS:
@@ -123,9 +131,11 @@ def classify_priority(kind: EventKind) -> EventPriority:
 class EventBackpressurePolicy:
     """16E 背压策略（纯策略，无队列/无持久化）。
 
-    - ``never_droppable(kind)``：CRITICAL 永不丢弃；
-    - ``drop_allowed(kind, under_pressure)``：压力下只允许丢弃 DROPPABLE；
-    - ``coalesce_allowed(kind)``：COALESCIBLE 可合并（token/progress/tool tick）。
+    - ``never_droppable(kind)``：CRITICAL 永不丢弃（含工具生命周期边界）；
+    - ``drop_allowed(kind, under_pressure)``：压力下只允许丢弃 DROPPABLE
+      （仅 TOOL_PROGRESS/token delta）；
+    - ``coalesce_allowed(kind)``：仅 COALESCIBLE（reconnect/unknown 观察）可合并；
+      TOOL_STARTED/TOOL_COMPLETED 既不可丢也不可合并。
     """
 
     @staticmethod
@@ -147,14 +157,17 @@ class EventBackpressurePolicy:
 # payload 脱敏与有界（确定性；16E 自带，不依赖 16D/16B 内部）
 # ---------------------------------------------------------------------------
 _SECRET_KEY_PARTS = frozenset({
-    "password", "passwd", "pwd", "secret", "apikey", "api_key",
+    "password", "passwd", "pwd", "secret", "apikey", "api_key", "api-key",
     "access_token", "refresh_token", "authorization", "bearer",
     "cookie", "private_key", "client_secret",
+    "token", "auth_token", "passphrase", "credential", "xapikey", "xauthtoken",
+    "xauthorization", "proxyauthorization",
 })
 
 _MAX_DEPTH = 8
 _STRING_CAP = 256
 _DEFAULT_MAX_BYTES = 4096
+_MAX_PAYLOAD_BUDGET = 1 << 20     # 1 MiB：防呆上限（拒绝任意巨大预算）
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
@@ -168,12 +181,49 @@ def _is_secret_key(key: str) -> bool:
     return norm in _SECRET_KEY_PARTS or compact in _SECRET_KEY_PARTS
 
 
+#: 秘密**值**形态（嵌在 message/stdout/error 字符串内的键值/头/凭证形态）。
+#: 键值形态的标签允许 `_`/`-` 分隔（api_key/api-key/apikey 同义），键名允许被
+#: JSON 引号包裹（``{"access_token":"atk"}``），避免泄漏 "Authorization: Bearer
+#: xyz" / "password=hunter2" / 'token: abc123' 等形态。
+_AUTHORIZATION_LINE_RE = re.compile(
+    r"(?i)(?<![a-z0-9_])(authorization)\s*[:=]\s*([^\r\n]+)")
+_KEY_VALUE_SECRET_RE = re.compile(
+    r"(?i)(?<![a-z0-9_])(password|passwd|pwd|secret|bearer|"
+    r"api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+    r"private[_-]?key|cookie|token|auth[_-]?token)\s*[\"']?([:=])\s*[\"']?"
+    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[a-z0-9._~+/=-]{3,})")
+_AUTH_SCHEME_TOKEN_RE = re.compile(
+    r"(?i)(?<![a-z0-9_])(bearer|basic|digest)\s+([a-z0-9._~+/=-]{3,})")
+
+
+def _redact_secret_values(text: str) -> str:
+    """字符串内的秘密值形态脱敏（保留标签、替换秘密部分为 [REDACTED]）。
+
+    顺序：authorization 整行优先（贪婪吞掉头值）→ 键值形态 → 独立
+    Bearer/Basic 凭证形态。任何替换后都不含原文秘密。
+    """
+    text = _AUTHORIZATION_LINE_RE.sub(r"\1: [REDACTED]", text)
+    text = _KEY_VALUE_SECRET_RE.sub(r"\1\2 [REDACTED]", text)
+    text = _AUTH_SCHEME_TOKEN_RE.sub(r"\1 [REDACTED]", text)
+    return text
+
+
+def _validate_payload_budget(value: Any) -> int:
+    """max_payload_bytes 严格校验：type-is-int（bool 不算）、有限合理正值。"""
+    if type(value) is not int or value <= 0 or value > _MAX_PAYLOAD_BUDGET:
+        raise EventNormalizationError(
+            f"max_payload_bytes 必须是 type-int 且 0 < n <= {_MAX_PAYLOAD_BUDGET}"
+            f"（bool/float/非正值/超上限一律拒绝），得到 {value!r}")
+    return value
+
+
 def _sanitize_value(value: Any, depth: int) -> Any:
     """递归清洗：秘密脱敏 / 控制字符清除 / 字符串限长 / JSON-safe 化 / 深度有界。"""
     if depth > _MAX_DEPTH:
         return None
     if isinstance(value, str):
-        s = _CTRL_RE.sub(" ", value)
+        s = _redact_secret_values(value)
+        s = _CTRL_RE.sub(" ", s)
         return s[:_STRING_CAP] if len(s) > _STRING_CAP else s
     if isinstance(value, bool):
         return value
@@ -206,6 +256,7 @@ def _sanitize_value(value: Any, depth: int) -> Any:
 
 def sanitize_payload(payload: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Mapping[str, Any]:
     """payload 脱敏 + 有界大小：返回 JSON-safe dict（总序列化大小 <= max_bytes）。"""
+    budget = _validate_payload_budget(max_bytes)
     tree = _sanitize_value(payload if isinstance(payload, Mapping) else {}, 0)
     if not isinstance(tree, dict):
         tree = {}
@@ -213,12 +264,12 @@ def sanitize_payload(payload: Any, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> Ma
         encoded = json.dumps(tree, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
                              default=str)
     except Exception as exc:  # noqa: BLE001 —— 防御性：确定性清洗树不应序列化失败
-        return {"_truncated": True, "byte_budget": int(max_bytes),
+        return {"_truncated": True, "byte_budget": budget,
                 "original_bytes": -1, "reason": type(exc).__name__}
-    if len(encoded) > int(max_bytes):
+    if len(encoded) > budget:
         return {
             "_truncated": True,
-            "byte_budget": int(max_bytes),
+            "byte_budget": budget,
             "original_bytes": len(encoded),
         }
     return tree
@@ -312,7 +363,8 @@ class NormalizedEvent:
         self._occurred_at = _finite_ts(occurred_at, "occurred_at")
         self._received_at = _finite_ts(received_at, "received_at")
         self._kind = kind
-        self._payload = deep_freeze(sanitize_payload(payload or {}, max_bytes=max_payload_bytes))
+        self._payload = deep_freeze(sanitize_payload(
+            payload or {}, max_bytes=_validate_payload_budget(max_payload_bytes)))
         self._terminal = kind in TERMINAL_KINDS
         self._critical = classify_priority(kind) is EventPriority.CRITICAL
         self._provenance = _clean_id(provenance, "provenance")

@@ -6,15 +6,27 @@ Master Plan §5A/§10 词表（工作域状态，**绝不写 C7**）：
     TOOL_RUNNING(子相位) / VERIFYING / REPAIRING / CANCELLING / CANCELLED /
     BACKEND_DONE_UNVERIFIED / VERIFIED / FAILED / UNKNOWN
 
-规则（任务书 §4）：
+规则（任务书 §4 + reviewer patch1）：
 
 - backend completed **只**折算为 ``BACKEND_DONE_UNVERIFIED``；**任何 backend 事件
-  都不能产生 ``VERIFIED``**（VERIFIED 只预留给 16F 的校验边界事件）；
-- duplicate event_id 幂等；乱序不能回退终态（终态吸收：CANCELLED/FAILED/VERIFIED/
-  UNKNOWN 不接受任何转移，reconnect/progress 不得复活）；
+  都不能产生 ``VERIFIED``**。16E 阶段无 verifier authority，公开 reducer 对
+  ``VERIFICATION_BOUNDARY(verified)`` 一律 fail-closed（``unauthorized_verification``
+  typed diagnostic，零状态变更）——不得以 provenance 字符串或 Python _private 属性
+  冒充 authority；16F 建立真实 verifier 后由组合根注入权威通道再开放。
+- duplicate event_id 幂等：``event_id → canonical fingerprint`` 去重——同 id 同内容
+  为 duplicate、同 id 不同内容为 ``event_id_conflict``；**被拒绝的事件（非法转移/
+  终态吸收/冲突等）不烧毁 id**——前置条件满足后同一事件可重放；乱序不能回退终态
+  （终态吸收：CANCELLED/FAILED/VERIFIED/UNKNOWN 不接受任何转移，reconnect/progress
+  不得复活）；
+- 身份绑定：构造绑定 backend_id/run_id/contract_id，事件任一不匹配 raise
+  ``WorkExecutionError``（normalizer 对身份不一致同样拒绝，禁止静默改绑）；
+- approval.requested/resolved **必须绑定 approval_id**：resolved 只能作用于当前
+  挂起的请求；deny/timeout 后同 approval_id 的 approve 不得恢复 RUNNING，不相关
+  approval_id 不得改变状态（approval_id_mismatch typed diagnostic，零变更）；
 - 非法转移返回 typed diagnostic，**零状态变更**；
 - ``TOOL_RUNNING`` 是**子相位**（primary + tool_subphase/active_tool 分离快照），
-  绝不覆盖/销毁 enclosing run state；
+  绝不覆盖/销毁 enclosing run state；TOOL_STARTED/TOOL_COMPLETED 是不可丢/不可
+  合并的生命周期边界（critical）；
 - 同一事件流重放结果完全一致（确定性：内容寻址 id + 纯转移表 + 注入时钟）。
 
 本模块不执行 Hermes、不写 C6/C7、不实现 verifier/repair/recovery（16F/16H/16G 拥有）。
@@ -22,10 +34,11 @@ Master Plan §5A/§10 词表（工作域状态，**绝不写 C7**）：
 from __future__ import annotations
 
 import enum
+import json
 import time
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .models import (
     EventKind,
@@ -158,6 +171,7 @@ _TRANSITIONS: Dict[WorkExecutionState, Dict[EventKind, WorkExecutionState]] = {
         EventKind.TRANSPORT_DISCONNECTED: WorkExecutionState.UNKNOWN,
     },
     WorkExecutionState.BLOCKED_APPROVAL: {
+        EventKind.APPROVAL_REQUESTED: WorkExecutionState.WAITING_PERMISSION,  # 新请求重新挂起
         EventKind.STOP_REQUESTED: WorkExecutionState.CANCELLING,
         EventKind.STOPPING: WorkExecutionState.CANCELLING,
         EventKind.BACKEND_COMPLETED: WorkExecutionState.BACKEND_DONE_UNVERIFIED,
@@ -237,29 +251,68 @@ def _tool_name(payload: Mapping[str, Any]) -> str:
     return ""
 
 
-class WorkExecutionReducer:
-    """每 run 一个的确定性工作域状态机（构造绑定 run_id + contract_id 身份）。
+def _approval_id(payload: Mapping[str, Any], event_id: str) -> str:
+    """审批身份：payload 显式 approval_id 优先；缺省回退到请求事件自身的 canonical
+    event_id（确定性绑定，绝不虚构——回退身份即该请求事件的恒等）。"""
+    for k in ("approval_id", "approvalId", "request_id", "requestId"):
+        v = payload.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:128]
+    return event_id
 
-    ``reduce(event)`` 处理一个 canonical 信封：duplicate event_id 幂等；
-    非法转移返回 typed diagnostic 且零状态变更；终态吸收；子相位与 primary
-    分离存储。同一事件流在全新 reducer 上重放结果完全一致。
+
+def _plain_tree(obj: Any) -> Any:
+    """MappingProxyType → dict、tuple → list（fingerprint 序列化前解冻）。"""
+    if isinstance(obj, Mapping):
+        return {k: _plain_tree(v) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return [_plain_tree(v) for v in obj]
+    return obj
+
+
+def _event_fingerprint(event: NormalizedEvent) -> str:
+    """event_id → canonical fingerprint（同 id 同内容 = duplicate 的判据）。
+
+    只取**语义内容**（身份 + kind + 清洗后 payload），排除 sequence/时间戳等
+    投递元数据——上游稳定 event_id 的重投（到达时间/补序位置不同）仍视为同内容；
+    同一 id 复用为不同语义事件（kind/payload/身份变化）则判定 event_id_conflict。
+    """
+    canon = json.dumps(_plain_tree(event.payload), sort_keys=True, ensure_ascii=False,
+                       default=str)
+    return "|".join((event.backend_id, event.contract_id, event.run_id,
+                     event.kind.value, canon))
+
+
+class WorkExecutionReducer:
+    """每 run 一个的确定性工作域状态机（构造绑定 backend_id+run_id+contract_id）。
+
+    ``reduce(event)`` 处理一个 canonical 信封：event_id→fingerprint 去重（同 id
+    同内容 duplicate、同 id 不同内容 conflict）；非法转移/终态吸收/审批身份不匹配
+    返回 typed diagnostic 且**零状态变更、不烧毁 event_id**（前置条件满足后可重放）；
+    审批 resolved 必须匹配当前挂起 approval_id；``VERIFICATION_BOUNDARY(verified)``
+    在 16E 阶段 fail-closed（VERIFIED 不可由公开事件抵达）。同一事件流在全新 reducer
+    上重放结果完全一致。
     """
 
     def __init__(self, run_id: str, contract_id: str, *,
-                 backend_id: str = "", now_fn=None) -> None:
-        for name, v in (("run_id", run_id), ("contract_id", contract_id)):
+                 backend_id: str, now_fn=None) -> None:
+        for name, v in (("backend_id", backend_id), ("run_id", run_id),
+                        ("contract_id", contract_id)):
             if not isinstance(v, str) or not v.strip():
                 raise WorkExecutionError(f"{name} 必须是非空 str，得到 {v!r}")
-        if not isinstance(backend_id, str):
-            raise WorkExecutionError(f"backend_id 必须是 str，得到 {backend_id!r}")
+        self._backend_id = backend_id.strip()
         self._run_id = run_id.strip()
         self._contract_id = contract_id.strip()
-        self._backend_id = backend_id.strip()
         self._now_fn = now_fn or (lambda: time.time())
         self._view = WorkExecutionView(primary=WorkExecutionState.IDLE)
-        self._seen: set = set()
+        self._seen: Dict[str, str] = {}
+        self._pending_approval_id: Optional[str] = None
 
     # -- 身份与快照 --------------------------------------------------------------
+    @property
+    def backend_id(self) -> str:
+        return self._backend_id
+
     @property
     def run_id(self) -> str:
         return self._run_id
@@ -278,6 +331,10 @@ class WorkExecutionReducer:
             raise WorkExecutionError(
                 f"reduce 只接受 NormalizedEvent，得到 {type(event).__name__}"
                 "（外部词表必须先经 BackendEventNormalizer 归一）")
+        if event.backend_id != self._backend_id:
+            raise WorkExecutionError(
+                f"backend_id 不匹配：reducer 绑定 {self._backend_id!r}，"
+                f"事件为 {event.backend_id!r}（禁止跨 backend 混用）")
         if event.run_id != self._run_id:
             raise WorkExecutionError(
                 f"run_id 不匹配：reducer 绑定 {self._run_id!r}，事件为 {event.run_id!r}"
@@ -286,14 +343,22 @@ class WorkExecutionReducer:
             raise WorkExecutionError(
                 f"contract_id 不匹配：reducer 绑定 {self._contract_id!r}，"
                 f"事件为 {event.contract_id!r}")
-        if event.event_id in self._seen:
+        seen_fp = self._seen.get(event.event_id)
+        if seen_fp is not None:
+            if seen_fp == _event_fingerprint(event):
+                return ReduceResult(view=self._view, applied=False,
+                                    diagnostic=f"duplicate_event:{event.event_id}",
+                                    kind=event.kind)
             return ReduceResult(view=self._view, applied=False,
-                                diagnostic=f"duplicate_event:{event.event_id}", kind=event.kind)
-        self._seen.add(event.event_id)
+                                diagnostic=f"event_id_conflict:{event.event_id}",
+                                kind=event.kind)
         primary, subphase, tool, applied, diag = self._apply(event)
         if not applied:
-            # 拒绝：零状态变更（快照对象与计数均不变；diagnostic 说明原因）。
-            return ReduceResult(view=self._view, applied=False, diagnostic=diag, kind=event.kind)
+            # 拒绝：零状态变更（快照对象与计数均不变；id 不烧毁——先非法后满足
+            # 前置条件的同事件可重放）。
+            return ReduceResult(view=self._view, applied=False, diagnostic=diag,
+                                kind=event.kind)
+        self._seen[event.event_id] = _event_fingerprint(event)
         v = self._view
         self._view = WorkExecutionView(
             primary=primary,
@@ -325,23 +390,46 @@ class WorkExecutionReducer:
         if kind is EventKind.TRANSPORT_RECONNECTED:
             return primary, v.tool_subphase, v.active_tool, True, ""
 
-        # 审批结果（outcome 依赖）。
+        # 审批请求：绑定 approval_id 并进入挂起态（BLOCKED 收到新请求 → 重新挂起）。
+        if kind is EventKind.APPROVAL_REQUESTED:
+            if primary in (WorkExecutionState.STARTING, WorkExecutionState.RUNNING,
+                           WorkExecutionState.BLOCKED_APPROVAL):
+                self._pending_approval_id = _approval_id(event.payload, event.event_id)
+                return WorkExecutionState.WAITING_PERMISSION, False, "", True, ""
+            if primary is WorkExecutionState.WAITING_PERMISSION:
+                self._pending_approval_id = _approval_id(event.payload, event.event_id)
+                return primary, v.tool_subphase, v.active_tool, True, ""
+            return primary, v.tool_subphase, v.active_tool, False, \
+                f"illegal_transition:{primary.value}:{kind.value}"
+
+        # 审批结果（approval_id 精确绑定；outcome 依赖）。
         if kind is EventKind.APPROVAL_RESOLVED:
             outcome = _approval_outcome(event.payload)
+            rid = _approval_id(event.payload, event.event_id)
             if primary in (WorkExecutionState.WAITING_PERMISSION,
                            WorkExecutionState.BLOCKED_APPROVAL):
+                if self._pending_approval_id is None or rid != self._pending_approval_id:
+                    return primary, v.tool_subphase, v.active_tool, False, \
+                        f"approval_id_mismatch:{primary.value}:{kind.value}"
+                if outcome not in ("approve", "deny", "timeout"):
+                    # 畸形 outcome：拒绝且**不消费**挂起请求（pending 保留，可重试）
+                    return primary, v.tool_subphase, v.active_tool, False, \
+                        f"illegal_transition:{primary.value}:{kind.value}:outcome:{outcome}"
+                self._pending_approval_id = None   # 合法消费即销毁（一次性）
                 if outcome == "approve":
                     return WorkExecutionState.RUNNING, False, "", True, ""
-                if primary is WorkExecutionState.WAITING_PERMISSION:
-                    return WorkExecutionState.BLOCKED_APPROVAL, False, "", True, ""
-                return primary, v.tool_subphase, v.active_tool, True, "approval_already_blocked"
+                return WorkExecutionState.BLOCKED_APPROVAL, False, "", True, ""
             return primary, v.tool_subphase, v.active_tool, False, \
                 f"illegal_transition:{primary.value}:{kind.value}:outcome:{outcome}"
 
-        # 校验边界（16F 唯一合法进入 VERIFYING/REPAIRING/VERIFIED 的通道；
-        # normalizer 永不产出此 kind——backend 词表无法自造验证）。
+        # 校验边界（16F 唯一合法进入 VERIFYING/REPAIRING 的通道；normalizer 永不
+        # 产出此 kind——backend 词表无法自造验证）。16E 阶段无 verifier authority：
+        # outcome=verified 一律 fail-closed，VERIFIED 不可由公开事件抵达。
         if kind is EventKind.VERIFICATION_BOUNDARY:
             outcome = _vb_outcome(event.payload)
+            if outcome == "verified":
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"unauthorized_verification:{primary.value}:{kind.value}"
             if primary is WorkExecutionState.BACKEND_DONE_UNVERIFIED:
                 if outcome == "start":
                     return WorkExecutionState.VERIFYING, False, "", True, ""
@@ -350,20 +438,23 @@ class WorkExecutionReducer:
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"illegal_transition:{primary.value}:{kind.value}:outcome:{outcome}"
             if primary is WorkExecutionState.VERIFYING:
-                if outcome == "verified":
-                    return WorkExecutionState.VERIFIED, False, "", True, ""
                 if outcome == "failed":
                     return WorkExecutionState.FAILED, False, "", True, ""
                 if outcome == "repair":
                     return WorkExecutionState.REPAIRING, False, "", True, ""
-                return primary, v.tool_subphase, v.active_tool, True, "verification_restarted"
+                if outcome == "start":
+                    return primary, v.tool_subphase, v.active_tool, True, \
+                        "verification_restarted"
+                return primary, v.tool_subphase, v.active_tool, False, \
+                    f"illegal_transition:{primary.value}:{kind.value}:outcome:{outcome}"
             if primary is WorkExecutionState.REPAIRING:
                 if outcome == "start":
                     return WorkExecutionState.VERIFYING, False, "", True, ""
                 if outcome == "failed":
                     return WorkExecutionState.FAILED, False, "", True, ""
                 if outcome == "repair":
-                    return primary, v.tool_subphase, v.active_tool, True, "repair_continues"
+                    return primary, v.tool_subphase, v.active_tool, True, \
+                        "repair_continues"
                 return primary, v.tool_subphase, v.active_tool, False, \
                     f"illegal_transition:{primary.value}:{kind.value}:outcome:{outcome}"
             return primary, v.tool_subphase, v.active_tool, False, \
