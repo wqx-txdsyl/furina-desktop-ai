@@ -89,9 +89,26 @@
   ``once``/``deny``——**绝不发送 always/session**；同一 approval 只向 Hermes 转发一次
   （并发 resolve 单请求获胜；第二次调用 typed no-op）；``resolved==1`` 精确才声明成功；
   409 仅在错误码精确为 ``approval_not_pending`` 时视为 no-op；
+- **approval 幂等/冻结/绑定（Reviewer Patch 4）**：相同 (run_id, tool, capability,
+  完整原始 args) 操作身份 digest 的 approval.request 重投**幂等复用原 approval_id**
+  （先于容量检查——不新建 broker request、不占审批容量、不发 deny；PENDING/已决议
+  未 forward 交唯一 resolve 路径；已 forward 零再次 POST once/deny；并发相同操作
+  in-flight 单飞只产生一个 approval_id）；resolve 只认真实 APPROVE_ONCE/
+  APPROVE_SESSION 决议——DENY/TIMEOUT/REVOKED/CANCELLED/LATE/UNKNOWN/CONFLICT 一律
+  固定 deny 且不触碰 Gate（**绝不因后出现的 session grant 升级**，不签发/不消费
+  permit、零 once）；操作身份在帧时刻**严格递归 defensive copy**（非 JSON 值
+  fail-closed），账本快照与事件 payload / permission_decider / Gate / permit 消费
+  零共享嵌套引用，批准后只能消费帧时刻冻结的原操作；Gate 判定结果进入 adapter
+  审批账本或产生 once 前，必须经 16D **公开 API** 证明其产生于构造期注入的
+  approval_broker（``state_of`` / ``is_grant_active``；外部 broker 的 Gate →
+  fail-closed deny，不触碰任何 _private 属性）；approval frame 的 tool **精确匹配**
+  （零 strip 规范化）；content-type charset 参数**真正 token 校验**（拒绝重复
+  charset/空值/引号/非法参数，只承诺实际践行的 UTF-8 解码）；
 - **HTTP 严格边界（Patch 2 + Patch 3 收紧）**：只接受精确媒体类型
   ``application/json``（可带 ``; charset=…`` 参数；application/jsonp、
-  text/application/json-evil、非 charset 参数一律拒绝）；全部普通 JSON 响应**流式/
+  text/application/json-evil、非 charset 参数一律拒绝；Patch 4：charset 值必须为
+  合法 token 且只能声明本 adapter 实际践行的 UTF-8、拒绝重复 charset）；全部普通
+  JSON 响应**流式/
   有界读取**（> 4 MiB 立即拒绝，超限内容不入异常）；**错误码/诊断片段读取同样有界
   （64 KiB；超限只留标记）且同样要求精确 application/json**——text/plain 承载的
   run_not_found/approval_not_pending 绝不当作已知错误码；单 chunk 在 extend **前**
@@ -105,6 +122,7 @@ run/contract/approval 账本硬容量满则 fail-closed 不淘汰）；资源显
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -117,7 +135,14 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from furina.agent.approval import ApprovalBroker, ApprovalGate, ApprovalStateError, GateVerdict
+from furina.agent.approval import (
+    ApprovalBroker,
+    ApprovalDecisionKind,
+    ApprovalGate,
+    ApprovalState,
+    ApprovalStateError,
+    GateVerdict,
+)
 from furina.agent.approval.models import ResolutionStatus
 from furina.agent.permission import Permission, PermissionDecision
 from furina.agent.work_contract import WorkContract, WorkContractValidationError
@@ -178,6 +203,11 @@ _MAX_JSON_BODY_BYTES = 4 * (1 << 20)
 _MAX_ERROR_BODY_BYTES = 64 * 1024
 #: 唯一合法 JSON 媒体类型（type/subtype 精确相等；参数仅容 charset=<token>）。
 _JSON_MEDIA_TYPE = "application/json"
+#: RFC 9110 token 词法（content-type 参数名与 charset 值的严格校验，Patch 4 blocker 六）。
+_MEDIA_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+#: 本 adapter 实际践行的响应字符集（响应体一律严格 UTF-8 解码——声明任何其它
+#: charset 都与实际解码方式矛盾，fail-closed 拒绝；Patch 4 blocker 六）。
+_ALLOWED_CHARSET_VALUES = frozenset({"utf-8", "utf8"})
 
 #: 账本硬容量（满容量 fail-closed；绝不淘汰——淘汰会诱导旧 contract 被重新执行）。
 _MAX_TRACKED_CONTRACTS = 512
@@ -287,6 +317,53 @@ def _plain_tree(obj: Any) -> Any:
     return obj
 
 
+def _deep_freeze_json(value: Any, path: str = "$") -> Any:
+    """严格递归 defensive copy（Patch 4 blocker 四）：仅接受 JSON 值域
+    （dict / list / str / int / float / bool / None），键必须为 str；任何非 JSON
+    值（含非有限浮点）→ HermesProtocolError fail-closed。输出树与输入树零共享
+    嵌套引用（dict/list 全部重建；标量不可变原样传递）。无 repr/default=str
+    兜底，异常文本只含路径与类型名（零原始值、零秘密导出）。"""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise HermesProtocolError(
+                f"审批操作参数含非有限数值（fail-closed）@ {path}")
+        return float(value)
+    if isinstance(value, Mapping):
+        frozen: Dict[str, Any] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise HermesProtocolError(
+                    f"审批操作参数键非 str（fail-closed）@ {path}")
+            frozen[k] = _deep_freeze_json(v, f"{path}.{k}")
+        return frozen
+    if isinstance(value, (list, tuple)):
+        return [_deep_freeze_json(v, f"{path}[{i}]") for i, v in enumerate(value)]
+    raise HermesProtocolError(
+        f"审批操作参数含非 JSON 值（fail-closed）@ {path}: {type(value).__name__}")
+
+
+def _operation_identity_digest(run_id: str, tool: str, capability: str,
+                               op_args: Mapping[str, Any]) -> str:
+    """完整审批操作身份 digest（Patch 4 blocker 二/三）：run_id + tool + capability +
+    完整原始 canonical args 的确定性摘要（严格 JSON canonical、sort_keys、
+    allow_nan=False）。幂等重投与并发单飞以 digest 为唯一身份键——任何
+    command/args 差异 ⇒ 不同 digest ⇒ 不同操作。非 JSON 值 fail-closed。"""
+    try:
+        blob = json.dumps(
+            {"run_id": run_id, "tool": tool, "capability": capability,
+             "args": op_args},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise HermesProtocolError(
+            "审批操作参数不可 canonical（非 JSON 值 fail-closed）") from exc
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # 内部 run 记录 / submit reservation（进程内 correlation 账本；16H 之前无任何持久化）
 # ---------------------------------------------------------------------------
@@ -311,17 +388,21 @@ class _RunRecord:
 
 class _ApprovalOpRecord:
     """approval_id → 帧时刻冻结的完整操作身份（run_id + tool + capability + 原始
-    canonical operation args）——resolve 边界 permit 签发/原子消费的唯一身份来源
-    （禁止在转发时刻重新解释帧或改用 permit 自身字段自证）。"""
+    canonical operation args 的严格递归 defensive copy + 完整操作身份 digest）——
+    resolve 边界 permit 签发/原子消费的唯一身份来源（禁止在转发时刻重新解释帧或
+    改用 permit 自身字段自证）。Patch 4（blocker 四）：op_args 为 ``_deep_freeze_json``
+    输出的深冻结副本，与帧 payload / permission_decider / Gate / permit 消费收到的
+    副本零共享嵌套引用；批准后只能消费帧时刻冻结的原操作。"""
 
-    __slots__ = ("run_id", "tool", "capability", "op_args")
+    __slots__ = ("run_id", "tool", "capability", "op_args", "digest")
 
     def __init__(self, run_id: str, tool: str, capability: str,
-                 op_args: Mapping[str, Any]) -> None:
+                 op_args: Mapping[str, Any], digest: str) -> None:
         self.run_id = run_id
         self.tool = tool
         self.capability = capability
-        self.op_args = dict(op_args)
+        self.op_args = op_args   # 调用方必须已深冻结（_deep_freeze_json 输出）
+        self.digest = digest
 
 
 class _SubmitReservation:
@@ -578,6 +659,12 @@ class HermesExecutionBackend(ExecutionBackend):
         self._runs: Dict[str, _RunRecord] = {}
         self._runs_reserved = 0   # POST 前已预留、尚未入账的 run 槽位（容量原子预留）
         self._approval_ops: Dict[str, _ApprovalOpRecord] = {}   # approval_id → 操作身份
+        #: 完整操作身份 digest → approval_id（Patch 4 blocker 二/三：幂等重投唯一
+        #: 复用键；先于容量检查——重投绝不新建 broker request、不占容量、零 deny）。
+        self._approval_op_index: Dict[str, str] = {}
+        #: digest → in-flight Event（Patch 4：并发相同操作单飞——只有 leader 走
+        #: Gate 判定，follower 等待后复用同一 approval_id）。
+        self._approval_inflight: Dict[str, threading.Event] = {}
         self._approvals_reserved = 0   # broker 请求创建在途的容量预留（封闭状态机）
         self._approval_forwarded: Set[str] = set()      # exactly-once 转发守卫
         self._max_tracked_contracts = int(max_tracked_contracts)
@@ -701,9 +788,15 @@ class HermesExecutionBackend(ExecutionBackend):
         return bytes(buf)
 
     def _check_json_media_type(self, stage: str, response: httpx.Response) -> None:
-        """精确媒体类型：type/subtype 必须 == application/json（大小写不敏感）；
-        参数**仅**允许 ``charset=<token>``。application/jsonp、
-        text/application/json-evil、无值/非 charset 参数一律类型化拒绝。"""
+        """精确媒体类型（Patch 4 blocker 六收紧）：type/subtype 必须 ==
+        application/json（大小写不敏感）；参数**仅**允许 ``charset=<token>`` 且
+        **真正校验 token**——参数名必须精确 ``charset``（RFC 9110 token 词法，
+        零 OWS 容忍）、值必须为合法 token（拒绝空值/引号/空白/非法字符）、拒绝
+        重复 charset 参数；且声明值必须是本 adapter 实际践行的 UTF-8（响应体一律
+        严格 UTF-8 解码——声明其它 charset 即矛盾）。application/jsonp、
+        text/application/json-evil、非 charset 参数一律类型化拒绝；
+        ``application/json`` 与 ``application/json; charset=utf-8``（任意大小写）
+        保持通过。"""
         raw = response.headers.get("content-type", "")
         parts = [p.strip() for p in raw.split(";")] if raw.strip() else []
         if not parts or not parts[0]:
@@ -713,12 +806,27 @@ class HermesExecutionBackend(ExecutionBackend):
             raise HermesProtocolError(
                 f"hermes {stage} content-type 必须精确 '{_JSON_MEDIA_TYPE}'"
                 f"（仅可带 charset 参数），得到 {raw!r}")
+        seen_charset = False
         for param in parts[1:]:
             name, sep, value = param.partition("=")
-            if not sep or name.strip().lower() != "charset" or not value.strip():
+            if not sep or not _MEDIA_TOKEN_RE.match(name) \
+                    or name.lower() != "charset":
                 raise HermesProtocolError(
                     f"hermes {stage} content-type 参数仅允许 charset=<token>，"
                     f"得到 {raw!r}")
+            if seen_charset:
+                raise HermesProtocolError(
+                    f"hermes {stage} content-type 出现重复 charset 参数"
+                    f"（fail-closed），得到 {raw!r}")
+            seen_charset = True
+            if not value or not _MEDIA_TOKEN_RE.match(value):
+                raise HermesProtocolError(
+                    f"hermes {stage} content-type charset 值必须是合法 token"
+                    f"（拒绝空值/引号/空白/非法字符），得到 {raw!r}")
+            if value.lower() not in _ALLOWED_CHARSET_VALUES:
+                raise HermesProtocolError(
+                    f"hermes {stage} content-type 声明 charset={value!r} 与本 adapter"
+                    f" 严格 UTF-8 解码矛盾（fail-closed），得到 {raw!r}")
 
     def _read_json_object(self, stage: str, response: httpx.Response) -> Dict[str, Any]:
         """2xx 已确认的流式响应体严格解析：精确媒体类型 + 有界读取
@@ -1611,35 +1719,40 @@ class HermesExecutionBackend(ExecutionBackend):
                                  ) -> Tuple[Optional[str], Optional[str]]:
         """approval.request → 16D 四层 Gate（唯一判定器）或 fail-closed 自动 deny。
 
-        Reviewer Patch 3 判定路径（恢复 16D 四层 Gate——PermitIssuer 的签发/消费只
-        发生在 ApprovalGate 的 ALLOW 路径内，本适配器**不直接持有/注册/调用 issuer**）：
+        Reviewer Patch 4 判定路径（在 Patch 3 四层 Gate 基础上收紧六组 blocker）：
 
-        1. 工具词法（缺失/非 str）→ 自动 deny（``approval_tool_missing``）；
-        2. **工具面三重封闭**（tool ∈ 最近 probe 快照 / 构造期 expected_profile_tools
-           / 封闭 tool→capability 映射）任一不满足 → 自动 deny
-           （``approval_tool_unmapped``），零 16D 请求；
+        1. 工具词法（缺失/非 str/纯空白）→ 自动 deny（``approval_tool_missing``）；
+        2. **tool 精确匹配**（blocker 六：绝不用 strip() 规范化——``" terminal "`` ≠
+           ``"terminal"``）+ **工具面三重封闭**（tool ∈ 最近 probe 快照 / 构造期
+           expected_profile_tools / 封闭 tool→capability 映射）任一不满足 → 自动
+           deny（``approval_tool_unmapped``），零 16D 请求；
         3. 映射 capability ∉ 本 run 契约 allowed_capabilities（防御性复检）→ 自动
            deny（``approval_capability_not_in_contract``）；
-        4. 契约对应 ApprovalGate 缺失（``approval_gate_missing``）→ 自动 deny——
-           无 Gate 即无 16D 判定面，绝不绕过 Gate 使用 issuer；
-        5. 实时 PermissionManager 决策（``permission_decider`` 构造期注入）：
-           decider 缺失/异常/非 PermissionDecision → 自动 deny
-           （``approval_pm_unavailable``），**绝不手造 PM 结果**；
-        6. 容量预留（封闭状态机；满 → deny **先于** Gate 调用，零 16D 请求）；
-        7. ``gate.check_step``（wait_for_approval=False）：
-           - 使用 submit 账本冻结的**完整 WorkContract**；
-           - 使用**真实原始 args**（帧全量减传输层字段，零 str() coercion、零截断）；
-           - 使用**实时 PermissionDecision**（granted=false → Gate 折为
-             DENY_PERMISSION，零 16D 请求）；
-           - backend capability 使用冻结 envelope；
-           - risk 下界 L2（PM 结果仍为下界上限，调用方不得降级）；
-           - **APPROVAL_PENDING → 唯一建立待审批记录**（approval 账本，帧时刻冻结
-             完整操作身份，供 resolve 边界使用）并返回 approval_id；
-           - ALLOW（会话 grant 覆盖）→ 立即边界 ``gate.consume_permit`` 原子复核+
-             单点提交成功才向 Hermes 转发 once（消费失败 → deny）；
-           - 任何 DENY / Gate 异常 → 自动 deny（``approval_gate_<verdict>``）。
+        4. 契约对应 ApprovalGate 缺失（``approval_gate_missing``）→ 自动 deny；
+        5. **操作身份深度冻结**（blocker 四）：帧进入审批域即对完整 JSON 操作参数
+           做严格递归 defensive copy（非 JSON 值 fail-closed
+           ``approval_args_not_canonical``）+ 完整操作身份 digest；账本快照、
+           permission_decider、Gate、permit 消费各持独立副本，零共享嵌套引用；
+        6. **幂等重投 exactly-once**（blocker 二/三）：相同 (run_id, tool,
+           capability, 完整原始 args) digest 的重投 → 复用原 approval_id——PENDING /
+           已决议未 forward 一律交唯一 resolve 路径；已 forward 零再次 POST
+           once/deny（``_approval_forwarded`` 权威不旁路）；重投**先于容量检查**：
+           不新建 broker request、不占审批容量、不发 deny；并发相同操作经
+           in-flight 单飞只产生一个 approval_id；
+        7. 实时 PermissionManager 决策（``permission_decider`` 构造期注入）→ 容量
+           预留（**仅新操作**；满 → ``approval_ledger_full`` + deny）→
+           ``gate.check_step``（wait_for_approval=False，完整 WorkContract + 冻结
+           原始 args 独立副本 + 冻结 envelope + risk 下界 L2）；
+        8. **Gate 绑定证明**（blocker 五）：Gate 判定结果进入本 adapter 审批账本前，
+           必须经 16D 公开 API 证明其产生于构造期注入的 approval_broker（外部
+           broker 的 Gate → fail-closed deny，不进账本、不产生 once）；
+        9. **ALLOW 来源区分**（blocker 二）：``result.approval`` 非空 → 属已有
+           approval，必须进入统一 exactly-once 路径（绝不立即 POST）；仅
+           ``result.grant`` 非空才允许作为新的 grant-covered action 立即边界
+           ``gate.consume_permit`` 原子消费成功后转发 once（grant 绑定同样先经
+           公开 API ``broker.is_grant_active`` 证明）。
 
-        自动 deny 只向 Hermes 转发 ``deny``，**不创建任何 16D 审批请求**（决议由
+        自动 deny 只向 Hermes 转发 ``deny``，不创建任何 16D 审批请求（决议由
         Furina 决策面（broker owner）做出；绝不伪造 USER evidence、绝不签发 grant/
         permit）。
         """
@@ -1647,8 +1760,7 @@ class HermesExecutionBackend(ExecutionBackend):
         if not isinstance(tool, str) or not tool.strip():
             self._forward_choice(run_id, "deny")
             return None, "approval_tool_missing"
-        tool = tool.strip()
-        # -- 工具面三重封闭（Patch 3）：probe 快照 / expected / 封闭映射任一不满足即 deny
+        # -- blocker 六：tool 精确匹配（零 strip 规范化；三重封闭用原始词形）----------
         snapshot = self._profile_tools_snapshot
         if tool not in snapshot or tool not in self._expected_profile_tools \
                 or tool not in self._tool_capability_map:
@@ -1662,15 +1774,75 @@ class HermesExecutionBackend(ExecutionBackend):
         if gate is None:
             self._forward_choice(run_id, "deny")
             return None, "approval_gate_missing"
+        # -- blocker 四：帧时刻操作身份深度冻结 + 完整身份 digest ---------------------
         # canonical operation args = frame 全量减传输层字段（零 str() coercion、零截断；
-        # 任何 command/args 差异 ⇒ 不同 operation digest ⇒ 不同 approval）。
-        op_args = {k: v for k, v in frame.items() if k not in _NON_OPERATION_FRAME_FIELDS}
-        pm = self._live_permission_decision(tool, capability, op_args,
+        # 任何 command/args 差异 ⇒ 不同操作身份 digest ⇒ 不同操作）。
+        raw_op_args = {k: v for k, v in frame.items()
+                       if k not in _NON_OPERATION_FRAME_FIELDS}
+        try:
+            op_args = _deep_freeze_json(raw_op_args)
+            digest = _operation_identity_digest(run_id, tool, capability, op_args)
+        except HermesProtocolError:
+            self._forward_choice(run_id, "deny")
+            return None, "approval_args_not_canonical"
+        # -- blocker 二/三：幂等重投 + 并发单飞（先于容量与 Gate）----------------------
+        while True:
+            with self._lock:
+                replay_id = self._approval_op_index.get(digest)
+                inflight = None if replay_id is not None \
+                    else self._approval_inflight.get(digest)
+                leader = replay_id is None and inflight is None
+                if leader:
+                    inflight = threading.Event()
+                    self._approval_inflight[digest] = inflight
+            if replay_id is not None:
+                # 完全相同操作重投：复用原 approval_id。PENDING / 已决议未 forward
+                # → 仍交唯一 resolve 路径；已 forward → 零再次 POST once/deny；
+                # 零新 broker request、零容量占用。
+                return replay_id, None
+            if leader:
+                break
+            if not inflight.wait(timeout=self._request_timeout + 5.0):
+                self._forward_choice(run_id, "deny")
+                return None, "approval_replay_inflight_timeout"
+            # leader 已收口：重新查索引——命中即复用；未命中（leader 未能建立
+            # approval）则本线程作为新 leader 自行走完整判定路径。
+        try:
+            return self._approval_new_operation(run_id, record, tool, capability,
+                                                gate, op_args, digest)
+        finally:
+            with self._lock:
+                done = self._approval_inflight.pop(digest, None)
+            if done is not None:
+                done.set()
+
+    def _prove_approval_in_broker(self, approval_id: str) -> Optional[str]:
+        """Gate 绑定证明（Patch 4 blocker 五）：Gate 判定产生的 approval_id 进入本
+        adapter 审批账本前，必须经 16D **公开 API**（``ApprovalBroker.state_of``）
+        证明其真实产生于构造期注入的 approval_broker 决策面——来自另一个
+        ApprovalBroker 的 Gate，其 approval_id 在本 broker 不可查询 → fail-closed
+        deny（不进账本、不产生 once）。仅使用公开查询面，不触碰任何 Python
+        ``_private`` 属性。返回 None = 证明成立；非 None = deny 原因。"""
+        try:
+            self._broker.state_of(approval_id)
+        except ApprovalStateError:
+            return "approval_gate_broker_binding"
+        except Exception as exc:   # noqa: BLE001 —— 查询面异常同样 fail-closed
+            return f"approval_gate_broker_binding_error:{type(exc).__name__}"
+        return None
+
+    def _approval_new_operation(self, run_id: str, record: _RunRecord, tool: str,
+                                capability: str, gate: ApprovalGate,
+                                op_args: Mapping[str, Any], digest: str
+                                ) -> Tuple[Optional[str], Optional[str]]:
+        """新操作（digest 未入账本）的 16D 四层 Gate 判定主路径（Patch 4）。"""
+        pm = self._live_permission_decision(tool, capability,
+                                            _deep_freeze_json(op_args),
                                             record.contract_id, run_id)
         if pm is None:
             self._forward_choice(run_id, "deny")
             return None, "approval_pm_unavailable"
-        # 原子容量预留（封闭状态机第一步；网络 I/O 一律在锁外）
+        # 原子容量预留（仅新操作；封闭状态机第一步；网络 I/O 一律在锁外）
         with self._lock:
             full = len(self._approval_ops) + self._approvals_reserved \
                 >= self._max_tracked_approvals
@@ -1681,7 +1853,7 @@ class HermesExecutionBackend(ExecutionBackend):
             return None, "approval_ledger_full"
         try:
             result = gate.check_step(
-                tool=tool, args=op_args, contract=record.contract,
+                tool=tool, args=_deep_freeze_json(op_args), contract=record.contract,
                 pm_decision=pm,
                 backend_capability_ids=self._capabilities.capability_ids,
                 run_id=run_id, risk_level=Permission.L2_HIGH_RISK,
@@ -1692,24 +1864,60 @@ class HermesExecutionBackend(ExecutionBackend):
             self._forward_choice(run_id, "deny")
             return None, f"approval_gate_error:{type(exc).__name__}"
         if result.verdict is GateVerdict.APPROVAL_PENDING and result.approval is not None:
-            # 唯一建立待审批记录的路径：Gate 已创建 16D 请求且状态 PENDING。
+            # 唯一建立待审批记录的路径：Gate 已创建 16D 请求且状态 PENDING；
+            # 入账本前必须先证明该 approval 产生于本 adapter 的 approval_broker。
+            approval_id = result.approval.approval_id
+            binding = self._prove_approval_in_broker(approval_id)
+            if binding is not None:
+                with self._lock:
+                    self._approvals_reserved -= 1
+                self._forward_choice(run_id, "deny")
+                return None, binding
             with self._lock:
-                if result.approval.approval_id not in self._approval_ops:
-                    self._approval_ops[result.approval.approval_id] = _ApprovalOpRecord(
-                        run_id=run_id, tool=tool, capability=capability, op_args=op_args)
+                self._approval_ops.setdefault(
+                    approval_id, _ApprovalOpRecord(
+                        run_id=run_id, tool=tool, capability=capability,
+                        op_args=op_args, digest=digest))
+                self._approval_op_index.setdefault(digest, approval_id)
                 self._approvals_reserved -= 1
-            return result.approval.approval_id, None
+            return approval_id, None
         with self._lock:
             self._approvals_reserved -= 1   # 非 PENDING 路径：归还预留（未入账）
-        if result.verdict is GateVerdict.ALLOW and result.permit is not None:
-            # 会话 grant 覆盖的 ALLOW：立即边界原子消费成功才转发 once。
-            outcome = gate.consume_permit(result.permit, tool=tool,
-                                          capability=capability, args=op_args)
-            if outcome.ok:
-                self._forward_choice(run_id, "once")
-                return None, "approval_covered_by_grant_once"
+        if result.verdict is GateVerdict.ALLOW:
+            if result.approval is not None:
+                # blocker 二：ALLOW 源于**已有 approval**（approve_once/session 终态）
+                # → 绝不立即 POST once/deny，进入统一 exactly-once resolve 路径。
+                approval_id = result.approval.approval_id
+                binding = self._prove_approval_in_broker(approval_id)
+                if binding is not None:
+                    self._forward_choice(run_id, "deny")
+                    return None, binding
+                with self._lock:
+                    self._approval_ops.setdefault(
+                        approval_id, _ApprovalOpRecord(
+                            run_id=run_id, tool=tool, capability=capability,
+                            op_args=op_args, digest=digest))
+                    self._approval_op_index.setdefault(digest, approval_id)
+                return approval_id, None
+            if result.grant is not None and result.permit is not None:
+                # blocker 二/五：仅 grant 来源允许作为**新的** grant-covered action
+                # 立即边界消费（session grant 本义为多次放行）；grant 绑定先经
+                # 公开 API 证明。
+                if not self._broker.is_grant_active(result.grant.grant_id):
+                    self._forward_choice(run_id, "deny")
+                    return None, "approval_gate_broker_binding_grant"
+                outcome = gate.consume_permit(result.permit, tool=tool,
+                                              capability=capability,
+                                              args=_deep_freeze_json(op_args))
+                if outcome.ok:
+                    self._forward_choice(run_id, "once")
+                    return None, "approval_covered_by_grant_once"
+                self._forward_choice(run_id, "deny")
+                return None, "approval_grant_permit_denied"
+            # 无 approval / grant 来源的 ALLOW（adapter 下不可达：risk 下界 L2 硬性
+            # 审批）→ fail-closed deny（来源不可证明即不放行）。
             self._forward_choice(run_id, "deny")
-            return None, "approval_grant_permit_denied"
+            return None, "approval_allow_source_unproven"
         self._forward_choice(run_id, "deny")
         return None, f"approval_gate_{result.verdict.value}"
 
@@ -1762,11 +1970,15 @@ class HermesExecutionBackend(ExecutionBackend):
         → 立即边界原子 permit 消费 → POST**：
 
         - 先经 ``broker.wait_for_resolution``（有界）等待**真实 Furina 决议**；
-        - resolve 时**重新取得实时 PermissionDecision**（构造期注入
+        - **Patch 4（blocker 一）：决议不得被后出现的 grant 升级**——先检查原
+          approval 的真实 resolution，仅真实 APPROVE_ONCE / APPROVE_SESSION 有资格
+          继续执行；DENY / TIMEOUT / REVOKED / CANCELLED / LATE / UNKNOWN / CONFLICT
+          / decision=None → 固定 choice=deny 且完全不触碰 Gate（绝不因 matching
+          session grant 重新变成 ALLOW，不签发、不消费 permit、零 once）；
+        - 有资格路径：resolve 时**重新取得实时 PermissionDecision**（构造期注入
           ``permission_decider``；缺失/异常/非决策 → fail-closed deny），并**再次调用
-          同一 ``ApprovalGate.check_step``**（完整 WorkContract + 真实原始 args +
-          冻结 envelope + risk 下界 L2，wait_for_approval=False——终态请求走
-          ``_verdict_for``）：
+          同一 ``ApprovalGate.check_step``**（完整 WorkContract + 帧时刻冻结原始 args
+          的独立深冻结副本 + 冻结 envelope + risk 下界 L2，wait_for_approval=False）：
           - GateResult=ALLOW 且携带 permit → ``gate.consume_permit`` 在发送 once 的
             **立即边界**原子复核（contract_id/hash + run_id + tool + capability +
             原始 args + approval/grant 状态）并单点提交消费；**仅消费成功才 POST
@@ -1802,62 +2014,78 @@ class HermesExecutionBackend(ExecutionBackend):
         resolution_status = str(resolution.status.value
                                 if isinstance(resolution.status, ResolutionStatus)
                                 else resolution.status)
+        decision = resolution.decision \
+            if isinstance(resolution.decision, ApprovalDecisionKind) else None
         choice = "deny"
         consumed = False
         permit_id = ""
         boundary_reason = ""
-        # -- resolve 时重新取得实时 PM 决策 + 同一 Gate 重新判定（Reviewer Patch 3）----
-        with self._lock:
-            run_rec = self._runs.get(op.run_id)
-        if run_rec is None:
-            boundary_reason = "boundary_run_unknown"
+        # -- Patch 4（blocker 一）：决议不得被后出现的 grant 升级 ----------------------
+        # 先检查原 approval 的真实 resolution：**仅真实 APPROVE_ONCE /
+        # APPROVE_SESSION 决议有资格继续执行**。DENY / TIMEOUT / REVOKED / CANCELLED
+        # / LATE / UNKNOWN / CONFLICT / decision=None → 固定 choice=deny，**完全不
+        # 触碰 Gate**——绝不因 resolve 时新出现的 matching session grant 重新变成
+        # ALLOW（不签发、不消费 permit、零 once）。
+        eligible = decision in (ApprovalDecisionKind.APPROVE_ONCE,
+                                ApprovalDecisionKind.APPROVE_SESSION)
+        if not eligible:
+            boundary_reason = "resolution_not_approvable:" + resolution_status + (
+                f":{decision.value}" if decision is not None else "")
         else:
-            gate = self._approval_gates.get(run_rec.contract_id)
-            if gate is None:
-                boundary_reason = "boundary_gate_missing"
+            # -- resolve 时重新取得实时 PM 决策 + 同一 Gate 重新判定（Reviewer Patch 3）
+            with self._lock:
+                run_rec = self._runs.get(op.run_id)
+            if run_rec is None:
+                boundary_reason = "boundary_run_unknown"
             else:
-                pm = self._live_permission_decision(op.tool, op.capability, op.op_args,
-                                                    run_rec.contract_id, op.run_id)
-                if pm is None:
-                    boundary_reason = "boundary_permission_decider_unavailable"
+                gate = self._approval_gates.get(run_rec.contract_id)
+                if gate is None:
+                    boundary_reason = "boundary_gate_missing"
                 else:
-                    try:
-                        result = gate.check_step(
-                            tool=op.tool, args=op.op_args, contract=run_rec.contract,
-                            pm_decision=pm,
-                            backend_capability_ids=self._capabilities.capability_ids,
-                            run_id=op.run_id, risk_level=Permission.L2_HIGH_RISK,
-                            wait_for_approval=False)
-                    except Exception as exc:   # noqa: BLE001 —— Gate 异常 fail-closed
-                        boundary_reason = f"boundary_gate_error:{type(exc).__name__}"
-                        result = None
-                    if result is not None and result.verdict is GateVerdict.ALLOW \
-                            and result.permit is not None:
-                        try:
-                            outcome = gate.consume_permit(
-                                result.permit, tool=op.tool, capability=op.capability,
-                                args=op.op_args)
-                        except ApprovalStateError as exc:
-                            boundary_reason = \
-                                f"boundary_permit_consume_error:{type(exc).__name__}"
-                            outcome = None
-                        if outcome is not None and outcome.ok:
-                            # permit 已在发送边界**原子消费**（POST 前最后一道状态性
-                            # 操作）；此后 POST 失败也绝不回滚消费/绝不重发。
-                            choice = "once"
-                            consumed = True
-                            permit_id = result.permit.permit_id
-                        else:
-                            boundary_reason = boundary_reason or "boundary_permit_denied"
-                            log.warning(
-                                "hermes approval=%s 决议 %s 但远端边界 permit 消费未成立"
-                                "（fail-closed deny）: %s", approval_id,
-                                resolution.decision.value if resolution.decision else "?",
-                                boundary_reason)
+                    pm = self._live_permission_decision(
+                        op.tool, op.capability, _deep_freeze_json(op.op_args),
+                        run_rec.contract_id, op.run_id)
+                    if pm is None:
+                        boundary_reason = "boundary_permission_decider_unavailable"
                     else:
-                        boundary_reason = boundary_reason or (
-                            f"boundary_gate_{result.verdict.value}"
-                            if result is not None else "boundary_gate_error")
+                        try:
+                            result = gate.check_step(
+                                tool=op.tool, args=_deep_freeze_json(op.op_args),
+                                contract=run_rec.contract,
+                                pm_decision=pm,
+                                backend_capability_ids=self._capabilities.capability_ids,
+                                run_id=op.run_id, risk_level=Permission.L2_HIGH_RISK,
+                                wait_for_approval=False)
+                        except Exception as exc:   # noqa: BLE001 —— Gate 异常 fail-closed
+                            boundary_reason = f"boundary_gate_error:{type(exc).__name__}"
+                            result = None
+                        if result is not None and result.verdict is GateVerdict.ALLOW \
+                                and result.permit is not None:
+                            try:
+                                outcome = gate.consume_permit(
+                                    result.permit, tool=op.tool, capability=op.capability,
+                                    args=_deep_freeze_json(op.op_args))
+                            except ApprovalStateError as exc:
+                                boundary_reason = \
+                                    f"boundary_permit_consume_error:{type(exc).__name__}"
+                                outcome = None
+                            if outcome is not None and outcome.ok:
+                                # permit 已在发送边界**原子消费**（POST 前最后一道状态性
+                                # 操作）；此后 POST 失败也绝不回滚消费/绝不重发。
+                                choice = "once"
+                                consumed = True
+                                permit_id = result.permit.permit_id
+                            else:
+                                boundary_reason = boundary_reason or "boundary_permit_denied"
+                                log.warning(
+                                    "hermes approval=%s 决议 %s 但远端边界 permit 消费未成立"
+                                    "（fail-closed deny）: %s", approval_id,
+                                    resolution.decision.value if resolution.decision else "?",
+                                    boundary_reason)
+                        else:
+                            boundary_reason = boundary_reason or (
+                                f"boundary_gate_{result.verdict.value}"
+                                if result is not None else "boundary_gate_error")
         client = self._get_client()
         try:
             response, cm = self._open_stream(

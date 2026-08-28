@@ -2,11 +2,13 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED — Reviewer Patch 3（16D 四层 Gate 恢复 +
-                                 工具面全等闭合 + HTTP 真正有界 + 12 项 reviewer 专项
-                                 测试新增，全量测试通过，等待外部验收；不声明 16C_PASS）
-BASE_SHA                       = 667ffab32cfc785cfb46754272efe0f05bcb936c
-                                 （16C Reviewer Patch 2 提交；本 patch 唯一父提交）
+STATUS                         = EXECUTED — Reviewer Patch 4（决议不被后出现 grant
+                                 升级 + approval 重投 exactly-once + 容量保留幂等重投 +
+                                 操作身份深度冻结 + Gate 绑定公开 API 证明 + tool 精确
+                                 匹配/charset 严格 token 校验 + 6 项 reviewer 专项否证
+                                 新增，全量测试通过，等待外部验收；不声明 16C_PASS）
+BASE_SHA                       = 78ab09f9a8d26e2c3250e5bfc943aae4c20b6a49
+                                 （16C Reviewer Patch 3 提交；本 patch 唯一父提交）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，
                                  沿用 16A/16B/16D/16E 惯例）
 BRANCH                         = feature/phase16-16c-hermes-api-adapter
@@ -272,11 +274,11 @@ PRODUCTION_FILES_CHANGED       = furina/agent/backend/hermes.py（Reviewer Patch
                                  改动）；frozen C1–C7/16A/16B/16D/16E 零改动
 TEST_FILES_CHANGED             = tests/agent/integration/test_phase16c_hermes_api_
                                  adapter.py（Reviewer Patch 1 36 项 + Patch 2 12 项
-                                 + Patch 3 12 项 = 60 项；Patch 3 既有用例按新构造面
+                                 + Patch 3 12 项 + Patch 4 6 项 = 66 项；Patch 3 既有用例按新构造面
                                  （approval_gates/permission_decider 注入取代
                                  permit_issuers）与 Gate 流程准确升级——approval 专项
                                  全部走 16D Gate 四层判定）
-TARGETED_TESTS                 = 16C 专项 60 passed（Patch 1/2 全量 48 项保持通过 +
+TARGETED_TESTS                 = 16C 专项 66 passed（Patch 1/2/3 全量 60 项保持通过 +
                                  Patch 3 新增 12 项：PM DENY + 用户 APPROVE_ONCE →
                                  Hermes 只收 deny、PM 在 approval 后 POST 前由 allow
                                  变 deny → 零 once、源码结构断言无 PermitIssuer.issue/
@@ -293,11 +295,12 @@ TARGETED_TESTS                 = 16C 专项 60 passed（Patch 1/2 全量 48 项�
                                  capacity/run_id collision/contract authorizer/fresh
                                  probe）保持）
 BACKEND_PERMISSION_REGRESSION  = 16A/16B/16D/16E 四套件 251 passed + tests/agent
-                                 全量回归 392 passed（16C 专项 Patch 3 新增 12 项计入；
+                                 全量回归（含 agent tools）418 passed（16C 专项 Patch 4
+                                 新增 6 项计入；
                                  frozen 16D 公开 API 零改动即完成外部边界表达——未触发
                                  BLOCKED_BY_16D_EXTERNAL_GATE_API_GAP）
 COGNITION_SUITE                = 279 passed
-FULL_SUITE                     = 1674 passed（0 failed；一次完整运行；15 条
+FULL_SUITE                     = 1680 passed（0 failed；一次完整运行；15 条
                                  warning 全部来自既有 tests/test_agent_tools.py
                                  子进程 reader 编码问题，与本 patch 无关）
 GIT_DIFF_CHECK                 = clean（git diff --check 零输出）
@@ -322,6 +325,54 @@ REMAINING_GAPS                 = (1) 实机 approval.request SSE 帧未 live 触
                                  审批一律 fail-closed deny（如实登记的部署边界）。
 READY_FOR_REVIEW               = YES（不声明 16C_PASS）
 ```
+
+## Reviewer Patch 4 修复摘要（BASE 78ab09f，2026-08-28）
+
+1. **决议不得被后出现的 grant 升级（blocker 一）**：`resolve_approval` 先检查原
+   approval 的真实 resolution——仅真实 APPROVE_ONCE / APPROVE_SESSION 有资格继续
+   执行（实时 PM → 同一 ApprovalGate.check_step → permit consume → once）；
+   DENY / TIMEOUT / REVOKED / CANCELLED / LATE / UNKNOWN / CONFLICT / decision=None
+   → 固定 choice=deny 且**完全不触碰 Gate**（不签发、不消费 permit、零 once），
+   绝不因 resolve 时新出现的 matching session grant 重新变成 ALLOW。否证：DENY /
+   TIMEOUT / REVOKED 后创建覆盖同操作的合法 session grant，resolve 仍只能 deny
+   （对照组证明 grant 真实激活且对新操作真实放行 grant-covered once）。
+2. **approval.request 重投纳入 exactly-once（blocker 二）**：新增完整操作身份
+   digest 账本（run_id + tool + capability + 完整原始 args 的严格 canonical JSON
+   SHA-256；传输层字段 event/run_id/timestamp 不参与）；相同操作重投复用原
+   approval_id——PENDING 复用、APPROVED 未 forward 交唯一 resolve 路径、已 forward
+   后零再次 POST once/deny（`_approval_forwarded` 权威不旁路）；Gate 返回 ALLOW 时
+   区分来源——`result.approval` 非空属于已有 approval，必须进入统一 exactly-once
+   路径（绝不立即 POST），仅 `result.grant` 非空才允许作为新的 grant-covered
+   action 立即边界消费。否证：APPROVE_ONCE 后 resolve 前重投最终恰好一个 once；
+   resolve 后重投 Hermes POST 数不增加；并发相同操作 in-flight 单飞只产生一个
+   approval_id 且零转发 POST。
+3. **容量检查保留幂等重投（blocker 三）**：digest 索引查询先于容量检查——账本满时
+   已存在的完全相同操作重投复用原 approval_id（不增加账本、不新建 broker request、
+   不向 Hermes 发 deny）；只有新的不同操作才 approval_ledger_full + deny；cap=1
+   下并发相同操作（账本为空起跑）也只产生一个 approval_id、零容量 deny。
+4. **操作身份深度冻结（blocker 四）**：新增 `_deep_freeze_json`（严格递归
+   defensive copy，仅 JSON 值域，非 JSON 值/非有限浮点 fail-closed
+   `approval_args_not_canonical`；无 repr/default=str 兜底，异常只含路径与类型名）；
+   帧进入审批域即冻结，账本快照与交付 BackendEvent 的 payload /
+   permission_decider / Gate / permit 消费各持独立副本（零共享嵌套引用）；
+   resolve/Gate/permit 始终使用帧时刻冻结的原始操作，替换后的操作是新 approval
+   不借用许可；`_ApprovalOpRecord` 恰好一个 `__slots__` 声明（含 digest 字段）。
+5. **Gate 绑定构造期 approval_broker（blocker 五）**：16D frozen 公开 API 无构造期
+   gate→broker 绑定查询面（`_known_gate_ids` 为 broker 私有，无公开访问器），采用
+   **公开 API 行为绑定证明**——Gate 判定结果进入 adapter 审批账本前必须
+   `broker.state_of(approval_id)` 可查询（外部 broker 的 approval_id 在本 broker
+   不可查询 → ApprovalStateError → fail-closed deny `approval_gate_broker_binding`）；
+   grant 路径必须 `broker.is_grant_active(grant_id)` 激活（外部 broker 的 grant →
+   fail-closed deny `approval_gate_broker_binding_grant`）；不进账本、不产生 once、
+   不触碰任何 Python `_private` 属性；对照组证明本 broker 合法路径不被误伤。
+   **未触发 BLOCKED_BY_16D_GATE_BROKER_BINDING_GAP**（公开 API 足以完成 fail-closed
+   绑定证明）。
+6. **词法与媒体类型收尾（blocker 六）**：approval frame 的 tool 精确匹配（删除
+   `strip()` 规范化——`" terminal "` ≠ `"terminal"`，三重封闭用原始词形）；content-
+   type charset 参数真正 token 校验（RFC 9110 token 词法；拒绝重复 charset、空值、
+   引号、空白、非法参数；且声明值必须是本 adapter 实际践行的 UTF-8——声明其它
+   charset 与严格 UTF-8 解码矛盾；`application/json` 与
+   `application/json; charset=utf-8`（任意大小写）保持通过）。
 
 ## Reviewer Patch 3 修复摘要（BASE 667ffab，2026-08-28）
 

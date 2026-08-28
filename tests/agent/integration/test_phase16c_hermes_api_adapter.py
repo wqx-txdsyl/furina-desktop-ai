@@ -58,6 +58,7 @@ import re
 import socket
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -68,6 +69,7 @@ from furina.agent.approval import (
     ApprovalDecisionKind,
     ApprovalGate,
     ApprovalState,
+    EvidenceContext,
 )
 from furina.agent.backend import (
     BackendHealth,
@@ -3103,4 +3105,517 @@ def test_59_reviewer_patch2_invariants_preserved(server):
     time.sleep(0.3)
     with pytest.raises(HermesProtocolError, match="过期"):
         backend.submit(contract_p.to_backend_projection())
+    backend.close()
+
+
+# =================================================================================
+# ================================ Reviewer Patch 4 专项 ============================
+# =================================================================================
+
+def _make_evidence_broker() -> ApprovalBroker:
+    """16C Patch 4 专用 broker：owner 线程 + 可信 USER 证据验证器（grant 创建可达）。"""
+    return ApprovalBroker(owner_thread_id=threading.get_ident(),
+                          user_evidence_verifier=lambda uid, ctx: True)
+
+
+def _create_session_grant(broker: ApprovalBroker, contract: WorkContract, *,
+                          tool_pattern: str = "terminal",
+                          capability: str = "cap.filesystem") -> Any:
+    """可信组合根（16D 公开 API）：canonical USER 证据 → nonce → session grant
+    （绑定 contract_id/hash；workspace = 契约 workspace（内含校验通过）；
+    tool_pattern 覆盖指定工具；窗口 1h）。调用契约必须声明非空 workspace 根。"""
+    event_id = f"lev_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    issued = broker.now()
+    expiry = issued + 3600.0
+    ws = contract.workspace_scope
+    assert ws.read_roots or ws.write_roots, "测试契约必须声明 workspace 根（grant 拒绝无界）"
+    context = EvidenceContext(
+        decision="grant", contract_id=contract.contract_id,
+        contract_hash=contract.content_hash, capability=capability,
+        tool_pattern=tool_pattern,
+        workspace_read_roots=tuple(ws.read_roots),
+        workspace_write_roots=tuple(ws.write_roots),
+        issued_at=issued, expiry=expiry, scope_note="16C patch4 negation")
+    nonce = broker.request_user_evidence(event_id, context=context)
+    return broker.create_grant(
+        user_evidence=nonce, contract_id=contract.contract_id,
+        contract_hash=contract.content_hash, capability=capability,
+        tool_pattern=tool_pattern, workspace_scope=ws,
+        expiry=expiry, issued_at=issued, scope_note="16C patch4 negation")
+
+
+def _denies_for(server: _FakeHermesServer, run_id: str) -> List[Dict[str, Any]]:
+    return [b for rid, b in server.approval_requests
+            if rid == run_id and b.get("choice") == "deny"]
+
+
+def _onces_for(server: _FakeHermesServer, run_id: str) -> List[Dict[str, Any]]:
+    return [b for rid, b in server.approval_requests
+            if rid == run_id and b.get("choice") == "once"]
+
+
+def _requested_events(broker: ApprovalBroker) -> List[Any]:
+    return [e for e in broker.events if e.etype == "approval.requested"]
+
+
+# --------------------------------------------------------------- P4-1: 决议不被 grant 升级
+def test_60_reviewer_resolution_cannot_be_upgraded_by_later_grant(server):
+    """P4-locked（blocker 一）：DENY / TIMEOUT / REVOKED 决议后创建**覆盖同操作的
+    合法 session grant**，resolve 仍只能 deny——固定 deny、不触碰 Gate、不签发/
+    不消费 permit、零 once；对照组证明 grant 本身真实激活且覆盖（新操作真走
+    grant-covered once），排除"grant 无效导致 deny"的假阳性。
+    （grant 必须绑定非空 workspace 而 hermes submit 面拒绝路径 scope 契约——
+    与 test_43 同构，用白盒 _RunRecord 驱动审批域；run 经 server.register_run
+    注册使 deny/once 转发可观察。）"""
+    ws = WorkspaceScope(read_roots=("C:/ws/p4",), write_roots=("C:/ws/p4",))
+
+    # (a) DENY 后 grant 升级否证
+    contract = _make_contract(contract_id="wc_16c_p4_upg_deny", workspace_scope=ws)
+    broker = _make_evidence_broker()
+    gate = _make_gate(broker, contract)
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_gates={contract.contract_id: gate})
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id)
+    record = _RunRecord(contract.contract_id, contract.content_hash,
+                        tuple(contract.allowed_capabilities), contract=contract)
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo deny-me", "preview": "echo deny-me"}
+    approval_id, r = backend._handle_approval_request(run_id, record, dict(frame))
+    assert approval_id and r is None
+    assert broker.resolve(approval_id, ApprovalDecisionKind.DENY).ok
+    grant = _create_session_grant(broker, contract)
+    assert broker.is_grant_active(grant.grant_id), "前置：grant 必须真实激活"
+    result = backend.resolve_approval(approval_id)
+    assert result["choice"] == "deny", "DENY 决议不得被后出现的 grant 升级"
+    assert result["boundary"].startswith("resolution_not_approvable")
+    assert result.get("consumed") is not True, "deny 路径绝不消费 permit"
+    assert not broker.is_consumed(approval_id)
+    assert len(_onces_for(server, run_id)) == 0, "DENY 升级路径零 once"
+    # 对照组：同一 grant 对**新**操作真实覆盖 → grant-covered once（证明 grant
+    # 活着且 covering——deny 升级被拦截绝非 grant 无效）
+    r2 = backend._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo grant-covers", "preview": "echo grant-covers"})
+    assert r2 == (None, "approval_covered_by_grant_once")
+    assert len(_onces_for(server, run_id)) == 1, "对照组新操作真走 grant once"
+    backend.close()
+
+    # (b) TIMEOUT 后 grant 升级否证（gate wait_cap 收窄 → 审批到期 TIMED_OUT）
+    contract_t = _make_contract(contract_id="wc_16c_p4_upg_timeout", workspace_scope=ws)
+    broker_t = _make_evidence_broker()
+    gate_t = _make_gate(broker_t, contract_t, gate_kw={"wait_cap_seconds": 0.05})
+    backend_t = _make_backend(server, broker=broker_t, contract=contract_t,
+                              approval_gates={contract_t.contract_id: gate_t})
+    run_id_t = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id_t)
+    record_t = _RunRecord(contract_t.contract_id, contract_t.content_hash,
+                          tuple(contract_t.allowed_capabilities), contract=contract_t)
+    ap_t, r_t = backend_t._handle_approval_request(
+        run_id_t, record_t,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo timeout-me", "preview": "echo timeout-me"})
+    assert ap_t and r_t is None
+    time.sleep(0.3)
+    assert ap_t in broker_t.sweep_timeouts(), "审批必须真实到期"
+    assert broker_t.state_of(ap_t) is ApprovalState.TIMED_OUT
+    _create_session_grant(broker_t, contract_t)
+    result_t = backend_t.resolve_approval(ap_t)
+    assert result_t["choice"] == "deny", "TIMEOUT 决议不得被 grant 升级"
+    assert result_t.get("consumed") is not True
+    assert len(_onces_for(server, run_id_t)) == 0, "TIMEOUT 升级路径零 once"
+    backend_t.close()
+
+    # (c) REVOKED 后 grant 升级否证
+    contract_r = _make_contract(contract_id="wc_16c_p4_upg_revoke", workspace_scope=ws)
+    broker_r = _make_evidence_broker()
+    gate_r = _make_gate(broker_r, contract_r)
+    backend_r = _make_backend(server, broker=broker_r, contract=contract_r,
+                              approval_gates={contract_r.contract_id: gate_r})
+    run_id_r = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id_r)
+    record_r = _RunRecord(contract_r.contract_id, contract_r.content_hash,
+                          tuple(contract_r.allowed_capabilities), contract=contract_r)
+    ap_r, r_r = backend_r._handle_approval_request(
+        run_id_r, record_r,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo revoke-me", "preview": "echo revoke-me"})
+    assert ap_r and r_r is None
+    assert broker_r.revoke(ap_r, reason="用户撤销").ok
+    _create_session_grant(broker_r, contract_r)
+    result_r = backend_r.resolve_approval(ap_r)
+    assert result_r["choice"] == "deny", "REVOKED 决议不得被 grant 升级"
+    assert result_r.get("consumed") is not True
+    assert len(_onces_for(server, run_id_r)) == 0, "REVOKED 升级路径零 once"
+    backend_r.close()
+
+
+# --------------------------------------------------------------- P4-2: 重投 exactly-once
+def test_61_reviewer_approval_replay_exactly_once(server):
+    """P4-locked（blocker 二）：相同 (run, tool, capability, 完整原始 args) 重投
+    复用原 approval_id——PENDING 复用、APPROVED 未 forward 交唯一 resolve 路径、
+    resolve 后重投 Hermes POST 数不增加；传输层字段（timestamp）差异不构成新操作；
+    不同操作仍是新 approval；并发相同操作只产生一个 approval_id 且零转发 POST。"""
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract(contract_id="wc_16c_p4_replay")
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_gates=_make_gates(broker, contract))
+    handle = backend.submit(contract.to_backend_projection())
+    record = backend._runs[handle.run_id]
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo replay", "preview": "echo replay", "timestamp": 1.0}
+    a1, r1 = backend._handle_approval_request(handle.run_id, record, dict(frame))
+    assert a1 and r1 is None
+    # PENDING 重投：复用原 approval_id；零新 16D request、零转发 POST
+    assert backend._handle_approval_request(
+        handle.run_id, record, dict(frame)) == (a1, None)
+    assert backend._handle_approval_request(
+        handle.run_id, record, {**frame, "timestamp": 999.0}) == (a1, None), \
+        "传输层字段（timestamp）不参与操作身份"
+    assert len(_requested_events(broker)) == 1
+    assert server.approval_requests == [], "PENDING 重投零转发"
+    assert len(backend._approval_ops) == 1
+    # APPROVED 但尚未 forward：重投仍交唯一 resolve 路径（不旁路 _approval_forwarded）
+    assert broker.resolve(a1, ApprovalDecisionKind.APPROVE_ONCE).ok
+    assert backend._handle_approval_request(
+        handle.run_id, record, dict(frame)) == (a1, None)
+    assert server.approval_requests == []
+    # 唯一 resolve 路径 → 恰好一个 once
+    result = backend.resolve_approval(a1)
+    assert result["choice"] == "once" and result["resolved"] == 1
+    assert server.approval_requests == [(handle.run_id, {"choice": "once"})]
+    # resolve 后重投：Hermes POST 数不增加
+    assert backend._handle_approval_request(
+        handle.run_id, record, dict(frame)) == (a1, None)
+    assert len(server.approval_requests) == 1, "resolve 后重投零新增 POST"
+    # 不同完整原始 args = 不同操作身份 → 新 approval
+    a2, r2 = backend._handle_approval_request(
+        handle.run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo other", "preview": "echo other"})
+    assert a2 is not None and a2 != a1 and r2 is None
+    assert len(backend._approval_ops) == 2
+    backend.close()
+
+    # 并发相同操作：in-flight 单飞只产生一个 approval_id，全部零转发 POST
+    broker_c = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract_c = _make_contract(contract_id="wc_16c_p4_replay_conc")
+    backend_c = _make_backend(server, broker=broker_c, contract=contract_c,
+                              approval_gates=_make_gates(broker_c, contract_c))
+    handle_c = backend_c.submit(contract_c.to_backend_projection())
+    record_c = backend_c._runs[handle_c.run_id]
+    frame_c = {"event": "approval.request", "tool": "terminal",
+               "command": "echo concurrent", "preview": "echo concurrent"}
+    outcomes: List[Tuple[Optional[str], Optional[str]]] = []
+    barrier = threading.Barrier(4)
+    olock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait(timeout=10)
+        r = backend_c._handle_approval_request(handle_c.run_id, record_c,
+                                               dict(frame_c))
+        with olock:
+            outcomes.append(r)
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=15)
+    assert len(outcomes) == 4
+    ids = {a for a, _r in outcomes}
+    assert len(ids) == 1 and all(r is None for _a, r in outcomes), \
+        f"并发相同操作只产生一个 approval_id: {outcomes}"
+    assert len(_requested_events(broker_c)) == 1, "并发重投零新 16D request"
+    assert _denies_for(server, handle_c.run_id) == [] \
+        and _onces_for(server, handle_c.run_id) == [], "并发重投零转发 POST"
+    backend_c.close()
+
+
+# --------------------------------------------------------------- P4-3: 容量保留幂等重投
+def test_62_reviewer_idempotent_replay_survives_capacity(server):
+    """P4-locked（blocker 三）：approval 账本容量满时——已存在的完全相同操作重投
+    复用原 approval_id（零新账本、零新 broker request、零 deny POST）；只有新的
+    不同操作才 approval_ledger_full + deny；并发相同操作在 cap=1 下也只产生一个
+    approval_id、零容量 deny。"""
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract(contract_id="wc_16c_p4_cap_replay")
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_gates=_make_gates(broker, contract),
+                            max_tracked_approvals=1)
+    handle = backend.submit(contract.to_backend_projection())
+    record = backend._runs[handle.run_id]
+    frame_a = {"event": "approval.request", "tool": "terminal",
+               "command": "echo cap-a", "preview": "echo cap-a"}
+    a, r = backend._handle_approval_request(handle.run_id, record, dict(frame_a))
+    assert a and r is None
+    # 新的不同操作：容量满 → approval_ledger_full + deny
+    assert backend._handle_approval_request(
+        handle.run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo cap-b", "preview": "echo cap-b"}) == \
+        (None, "approval_ledger_full")
+    assert len(_denies_for(server, handle.run_id)) == 1
+    # 完全相同操作重投：容量满仍复用原 approval_id——不增加账本、不新建 broker
+    # request、不向 Hermes 发 deny
+    n_requested = len(_requested_events(broker))
+    assert backend._handle_approval_request(
+        handle.run_id, record, dict(frame_a)) == (a, None)
+    assert len(_requested_events(broker)) == n_requested, "重投零新 broker request"
+    assert len(_denies_for(server, handle.run_id)) == 1, "重投零新 deny POST"
+    assert len(backend._approval_ops) == 1, "重投不增加账本"
+    backend.close()
+
+    # 并发相同操作（cap=1、账本为空起跑）：单飞后仍然只有一个 approval_id、
+    # 零 approval_ledger_full、零 deny POST
+    broker_c = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract_c = _make_contract(contract_id="wc_16c_p4_cap_conc")
+    backend_c = _make_backend(server, broker=broker_c, contract=contract_c,
+                              approval_gates=_make_gates(broker_c, contract_c),
+                              max_tracked_approvals=1)
+    handle_c = backend_c.submit(contract_c.to_backend_projection())
+    record_c = backend_c._runs[handle_c.run_id]
+    frame_c = {"event": "approval.request", "tool": "terminal",
+               "command": "echo cap-conc", "preview": "echo cap-conc"}
+    outcomes: List[Tuple[Optional[str], Optional[str]]] = []
+    barrier = threading.Barrier(3)
+    olock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait(timeout=10)
+        r = backend_c._handle_approval_request(handle_c.run_id, record_c,
+                                               dict(frame_c))
+        with olock:
+            outcomes.append(r)
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(3)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=15)
+    assert len(outcomes) == 3
+    ids = {a_ for a_, _r in outcomes}
+    assert len(ids) == 1 and None not in ids, \
+        f"cap=1 并发相同操作也只产生一个 approval_id: {outcomes}"
+    assert all(r_ is None for _a, r_ in outcomes), \
+        f"幂等重投不产生容量拒绝: {outcomes}"
+    assert len(_requested_events(broker_c)) == 1
+    assert _denies_for(server, handle_c.run_id) == []
+    assert len(backend_c._approval_ops) == 1
+    backend_c.close()
+
+
+# --------------------------------------------------------------- P4-4: 操作身份深度冻结
+def test_63_reviewer_operation_snapshot_deeply_isolated(server):
+    """P4-locked（blocker 四）：帧进入审批域即严格递归 defensive copy——事件 payload
+    修改不污染账本身份；permission_decider 修改收到的嵌套参数不污染账本；resolve/
+    permit 始终使用帧时刻冻结的原始操作；替换后的操作是新 approval 不借用许可；
+    非 JSON 值 fail-closed；_ApprovalOpRecord 无重复 __slots__ 声明。"""
+    import inspect
+
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract(contract_id="wc_16c_p4_freeze")
+    seen: List[Dict[str, Any]] = []
+
+    def decider(tool, capability, raw_args, contract_id, run_id):
+        seen.append(json.loads(json.dumps(raw_args)))   # 捕获收到的独立副本快照
+        raw_args.setdefault("opts", {}).setdefault("paths", []).append("/pm-mutated")
+        raw_args["injected"] = "pm-side-effect"
+        return PermissionDecision(True, "pm_allow", Permission.L2_HIGH_RISK)
+
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_gates=_make_gates(broker, contract),
+                            permission_decider=decider)
+    handle = backend.submit(contract.to_backend_projection())
+    run_id = handle.run_id
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo freeze", "preview": "echo freeze",
+             "opts": {"paths": ["/a", "/b"], "env": {"k": "v"}}}
+    server.set_status_sequence(run_id, [("waiting_for_approval", {})])
+    server.sse[run_id] = [("frame", frame), ("close",)]
+    box: Dict[str, Any] = {}
+
+    def consume() -> None:
+        for be in backend.events(handle):
+            if be.event_type == "approval.request":
+                box["event"] = be
+
+    t = threading.Thread(target=consume, daemon=True)
+    t.start()
+    assert _wait_until(lambda: "event" in box)
+    be = box["event"]
+    approval_id = be.payload["approval_id"]
+    op = backend._approval_ops[approval_id]
+    # (1) 审批事件返回后修改 payload 内嵌 dict/list，账本身份不变（零共享嵌套引用）
+    be.payload["opts"]["paths"].append("/evil")
+    be.payload["opts"]["env"]["k"] = "evil"
+    be.payload["injected"] = "payload-side-effect"
+    assert op.op_args["opts"]["paths"] == ["/a", "/b"]
+    assert op.op_args["opts"]["env"] == {"k": "v"}
+    assert "injected" not in op.op_args
+    # (2) permission_decider 修改收到的嵌套参数，账本身份不变（decider 持独立副本）
+    assert seen, "decider 已被调用"
+    assert seen[0]["opts"]["paths"] == ["/a", "/b"], \
+        "decider 收到的必须是帧时刻冻结值的独立副本"
+    assert op.op_args["opts"]["paths"] == ["/a", "/b"]
+    assert "injected" not in op.op_args
+    # (3) 原操作批准后只能消费原操作：resolve/Gate/permit 始终使用帧时刻冻结的
+    #     原始操作（resolve 边界 decider 收到的仍是原始 args）
+    assert broker.resolve(approval_id, ApprovalDecisionKind.APPROVE_ONCE).ok
+    result = backend.resolve_approval(approval_id)
+    assert result["choice"] == "once" and result["consumed"] is True
+    assert seen[-1]["command"] == "echo freeze"
+    assert seen[-1]["opts"]["paths"] == ["/a", "/b"]
+    assert op.op_args["opts"]["paths"] == ["/a", "/b"]
+    assert op.op_args["command"] == "echo freeze"
+    # (4) 替换后的操作不能借用许可：篡改 args = 新操作身份 → 新 approval（PENDING），
+    #     绝不借用已消费 approval 的 permit
+    tampered = dict(frame)
+    tampered["command"] = "echo EVIL"
+    tampered["opts"] = {"paths": ["/evil"]}
+    a2, r2 = backend._handle_approval_request(run_id, backend._runs[run_id],
+                                              tampered)
+    assert a2 is not None and a2 != approval_id and r2 is None, \
+        "替换后的操作 ≠ 原操作身份（不得借用许可）"
+    assert broker.state_of(a2) is ApprovalState.PENDING, \
+        "替换后的操作必须走自己的审批，不得复用原许可"
+    assert broker.is_consumed(approval_id)
+    # (5) 非 JSON 值 fail-closed（零 16D 请求、零 once）
+    n_requested = len(_requested_events(broker))
+    n_onces = len(_onces_for(server, run_id))
+    assert backend._handle_approval_request(
+        run_id, backend._runs[run_id],
+        {"event": "approval.request", "tool": "terminal",
+         "command": object()}) == (None, "approval_args_not_canonical")
+    assert backend._handle_approval_request(
+        run_id, backend._runs[run_id],
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo nan", "n": float("nan")}) == \
+        (None, "approval_args_not_canonical")
+    assert backend._handle_approval_request(
+        run_id, backend._runs[run_id],
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo set", "s": {1, 2}}) == \
+        (None, "approval_args_not_canonical")
+    assert len(_requested_events(broker)) == n_requested, "非 JSON 帧 零 16D 请求"
+    assert len(_onces_for(server, run_id)) == n_onces, "非 JSON 帧 零 once（不新增转发）"
+    # (6) _ApprovalOpRecord 恰好一个 __slots__ 声明（无重复声明）
+    cls_src = inspect.getsource(hermes_module._ApprovalOpRecord)
+    assert cls_src.count("__slots__") == 1, "_ApprovalOpRecord 不得重复声明 __slots__"
+    t.join(timeout=10)
+    backend.close()
+
+
+# --------------------------------------------------------------- P4-5: Gate 绑定证明
+def test_64_reviewer_gate_broker_binding_enforced(server):
+    """P4-locked（blocker 五）：来自另一 ApprovalBroker 的 Gate——其 PENDING
+    approval_id 在 adapter 构造期注入的 broker 上不可查询（公开 API state_of）→
+    fail-closed deny、不进 adapter 账本、零 once；其 grant 不被 adapter broker
+    承认（公开 API is_grant_active）→ 同样 fail-closed deny、零 once；对照组证明
+    本 broker 的合法 grant 路径照常放行（绑定证明不误伤合法路径）。
+    （外部 Gate 绑定的契约需 workspace 根供 grant 使用——与 test_43 同构，
+    白盒 _RunRecord 驱动；run 经 server.register_run 注册使转发可观察。）"""
+    ws = WorkspaceScope(read_roots=("C:/ws/p4",), write_roots=("C:/ws/p4",))
+    contract = _make_contract(contract_id="wc_16c_p4_binding", workspace_scope=ws)
+    broker_main = _make_evidence_broker()
+    broker_foreign = _make_evidence_broker()
+    foreign_gate = _make_gate(broker_foreign, contract)
+    backend = _make_backend(server, broker=broker_main, contract=contract,
+                            approval_gates={contract.contract_id: foreign_gate})
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id)
+    record = _RunRecord(contract.contract_id, contract.content_hash,
+                        tuple(contract.allowed_capabilities), contract=contract)
+    # (a) PENDING 路径：外部 Gate 的 approval_id 在本 broker 不可查询 → deny
+    approval_id, r = backend._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo foreign", "preview": "echo foreign"})
+    assert approval_id is None and         r == "approval_gate_broker_binding",         f"外部 Gate 的 approval 必须被绑定证明拦截: {(approval_id, r)}"
+    assert not _requested_events(broker_main),         "外部 Gate 的 approval 不进 adapter broker"
+    assert backend._approval_ops == {}, "不进入 adapter approval 账本"
+    denies = _denies_for(server, run_id)
+    assert denies and all(b.get("choice") == "deny" for b in denies)
+    assert _onces_for(server, run_id) == [], "外部 Gate 零 once"
+    assert _requested_events(broker_foreign),         "前置：外部 Gate 确实曾在自己的 broker 建立审批（被绑定证明拦截）"
+    # (b) grant 路径：外部 broker 的 grant 不被 adapter broker 承认 → deny
+    _create_session_grant(broker_foreign, contract)
+    r2 = backend._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo fgrant", "preview": "echo fgrant"})
+    assert r2 == (None, "approval_gate_broker_binding_grant"),         f"外部 broker 的 grant 必须被绑定证明拦截: {r2}"
+    assert _onces_for(server, run_id) == []
+    # (c) 对照组：本 broker 的合法 grant + 绑定本 broker 的 Gate → grant-covered
+    #     once 照常放行（绑定证明只拦截"Gate/broker 来自外部"的组合）
+    main_gate = _make_gate(broker_main, contract)
+    backend_main = _make_backend(server, broker=broker_main, contract=contract,
+                                 approval_gates={contract.contract_id: main_gate})
+    _create_session_grant(broker_main, contract)
+    r3 = backend_main._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo mgrant", "preview": "echo mgrant"})
+    assert r3 == (None, "approval_covered_by_grant_once"),         f"本 broker 合法 grant 不得被绑定证明误伤: {r3}"
+    assert len(_onces_for(server, run_id)) == 1
+    backend.close()
+    backend_main.close()
+
+
+# --------------------------------------------------------------- P4-6: 词法与媒体类型收尾
+def test_65_reviewer_tool_identity_exact_and_strict_charset(server):
+    """P4-locked（blocker 六）：approval frame 的 tool 精确匹配——" terminal " 不得
+    被 strip() 规范化成 "terminal"（自动 deny、零 16D 请求），精确 tool 主路径不受
+    影响；content-type charset 参数真正 token 校验——重复 charset/空值/引号/空白/
+    非法参数/与 UTF-8 解码矛盾的声明一律拒绝，正常 application/json 与
+    application/json; charset=utf-8（任意大小写、可有可无空格）保持通过。"""
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract(contract_id="wc_16c_p4_exact_tool")
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_gates=_make_gates(broker, contract))
+    handle = backend.submit(contract.to_backend_projection())
+    record = backend._runs[handle.run_id]
+    # tool " terminal "：精确匹配失败 → approval_tool_unmapped（零规范化）
+    r = backend._handle_approval_request(
+        handle.run_id, record,
+        {"event": "approval.request", "tool": " terminal ",
+         "command": "echo pad", "preview": "echo pad"})
+    assert r == (None, "approval_tool_unmapped"), \
+        f"未规范化 tool 不得被 strip 成合法名字: {r}"
+    assert not _requested_events(broker), "未规范化 tool 零 16D 请求"
+    denies = _denies_for(server, handle.run_id)
+    assert denies and all(b.get("choice") == "deny" for b in denies)
+    assert _onces_for(server, handle.run_id) == []
+    # 对照：精确 tool 主路径不受影响
+    a, rr = backend._handle_approval_request(
+        handle.run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo exact", "preview": "echo exact"})
+    assert a and rr is None
+    backend.close()
+
+    # charset 严格校验（白盒直驱 _read_json_object）
+    class _CtypeStub:
+        def __init__(self, ctype: str) -> None:
+            self.headers = {"content-type": ctype}
+
+        def iter_bytes(self):
+            yield b'{"ok": true}'
+
+    for ctype in ("application/json",
+                  "application/json;charset=utf-8",
+                  "application/json; charset=utf-8",
+                  "application/json; charset=UTF-8"):
+        assert backend._read_json_object("t", _CtypeStub(ctype)) == {"ok": True}, \
+            f"正常媒体类型必须保持通过: {ctype!r}"
+    for ctype in ("application/json; charset=utf-8; charset=utf-8",  # 重复 charset
+                  "application/json; charset=",                       # 空值
+                  "application/json; charset='utf-8'",                # 引号（非 token）
+                  "application/json; charset=ut f-8",                 # 空白（非 token）
+                  "application/json; charset=utf-16",                 # 与严格 UTF-8 矛盾
+                  "application/json; boundary=x; charset=utf-8",      # 非法参数
+                  "application/json; charset=utf-8; x=y"):            # 非法参数
+        with pytest.raises(HermesProtocolError, match="charset"):
+            backend._read_json_object("t", _CtypeStub(ctype))
     backend.close()
