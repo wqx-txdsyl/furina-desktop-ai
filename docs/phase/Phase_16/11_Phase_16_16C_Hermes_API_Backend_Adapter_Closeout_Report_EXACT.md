@@ -2,13 +2,20 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED — Reviewer Patch 4（决议不被后出现 grant
-                                 升级 + approval 重投 exactly-once + 容量保留幂等重投 +
-                                 操作身份深度冻结 + Gate 绑定公开 API 证明 + tool 精确
-                                 匹配/charset 严格 token 校验 + 6 项 reviewer 专项否证
-                                 新增，全量测试通过，等待外部验收；不声明 16C_PASS）
-BASE_SHA                       = 78ab09f9a8d26e2c3250e5bfc943aae4c20b6a49
-                                 （16C Reviewer Patch 3 提交；本 patch 唯一父提交）
+STATUS                         = EXECUTED — Reviewer Patch 5（Gate→ApprovalBroker
+                                 绑定证明完整身份化：approval 经 claimed
+                                 ApprovalRequest 字段独立重算 + 主 broker 公开
+                                 全身份查询面 matching_request、命中 approval_id
+                                 精确等于 Gate 返回值；grant 经主 broker
+                                 covering_grant 全匹配、有效 grant_id 精确等于
+                                 Gate 返回值；同名 ID 不同身份（UUID 碰撞/换
+                                 args/run_id/契约 hash/scope）一律 fail-closed；
+                                 resolve 边界 once 前补同一证明；_deep_freeze_json
+                                 收紧为真正 JSON 值域（tuple 拒绝，不静默转 list）
+                                 + 5 项 reviewer 专项否证新增，全量测试通过，等待
+                                 外部验收；不声明 16C_PASS）
+BASE_SHA                       = 7f5dbc80fc5740dbbab1db487f6ed9c8a7ee89e4
+                                 （16C Reviewer Patch 4 提交；本 patch 唯一父提交）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，
                                  沿用 16A/16B/16D/16E 惯例）
 BRANCH                         = feature/phase16-16c-hermes-api-adapter
@@ -257,7 +264,15 @@ DIRECT_DIALOGUE_BYPASS         = false（submit 只发送 canonical_user_request
                                  payload 证据，经 16E 信封，绝不直达对话）
 
 PRODUCTION_FILES_CHANGED       = furina/agent/backend/hermes.py（Reviewer Patch 1
-                                 重写 + Patch 2 六组收紧 + Patch 3 三组收紧：
+                                 重写 + Patch 2 六组收紧 + Patch 3 三组收紧 +
+                                 Patch 5 两组收紧：Gate→ApprovalBroker 绑定证明
+                                 完整身份化（approval: claimed 字段独立重算 +
+                                 matching_request 全身份查询 + 命中 approval_id
+                                 精确相等；grant: covering_grant 全匹配 + 有效
+                                 grant_id 精确相等；同名 ID 不同身份 fail-closed、
+                                 resolve 边界 once 前补证明；仅公开 API 零 _private
+                                 触碰）、_deep_freeze_json 收紧为真正 JSON 值域
+                                 （tuple 拒绝不静默转 list）；
                                  16D 四层 Gate 恢复（approval_gates + permission_decider
                                  构造注入；PermitIssuer 直接持有/注册/issue 全部删除；
                                  approval.request 与 resolve 一律经 ApprovalGate.
@@ -274,33 +289,35 @@ PRODUCTION_FILES_CHANGED       = furina/agent/backend/hermes.py（Reviewer Patch
                                  改动）；frozen C1–C7/16A/16B/16D/16E 零改动
 TEST_FILES_CHANGED             = tests/agent/integration/test_phase16c_hermes_api_
                                  adapter.py（Reviewer Patch 1 36 项 + Patch 2 12 项
-                                 + Patch 3 12 项 + Patch 4 6 项 = 66 项；Patch 3 既有用例按新构造面
+                                 + Patch 3 12 项 + Patch 4 6 项 + Patch 5 5 项
+                                 = 71 项；Patch 3 既有用例按新构造面
                                  （approval_gates/permission_decider 注入取代
                                  permit_issuers）与 Gate 流程准确升级——approval 专项
                                  全部走 16D Gate 四层判定）
-TARGETED_TESTS                 = 16C 专项 66 passed（Patch 1/2/3 全量 60 项保持通过 +
-                                 Patch 3 新增 12 项：PM DENY + 用户 APPROVE_ONCE →
-                                 Hermes 只收 deny、PM 在 approval 后 POST 前由 allow
-                                 变 deny → 零 once、源码结构断言无 PermitIssuer.issue/
-                                 直接 issuer 注册路径（AST 级）、Gate 契约/hash 不匹配
-                                 → 零 once、Gate ALLOW + permit 原子消费 → 恰好一个
-                                 once、extra tool_capability_map 构造期拒绝（多/未知/
-                                 空白未规范化名字）、approval.request 使用 expected 外
-                                 工具 → 零 request + deny、202 先给合法 JSON 前缀随后
-                                 读取中断 → 拒绝（reservation 中毒零重提）、单 chunk
-                                 超上限 → extend 前拒绝（白盒记录 extend 长度）、
-                                 text/plain 的 run_not_found/approval_not_pending →
-                                 拒绝（probe unhealthy + 409 协议错误）、application/
-                                 json 正常错误码无回归、Patch 2 四组锁定测试（run
-                                 capacity/run_id collision/contract authorizer/fresh
-                                 probe）保持）
+TARGETED_TESTS                 = 16C 专项 71 passed（Patch 1–4 全量 66 项保持通过 +
+                                 Patch 5 新增 5 项：approval 同名 ID UUID 碰撞拒绝
+                                 （不同操作身份 → fail-closed，不进账本零 once，
+                                 主 broker 原记录不覆盖不串用，对照组完整身份正例
+                                 通过）、同名 ID 身份逐维否证（不同 args / 不同
+                                 run_id / 不同 contract hash 各自不得通过绑定证明 +
+                                 完整身份正例）、grant 同名 ID 碰撞拒绝（主 broker
+                                 有效但不同 tool / 绑定另一契约的 grant → 零 permit
+                                 消费零 once，consume 之前拦截；对照组合法覆盖
+                                 grant → once）、合法 approval/grant 正例保持通过
+                                 （PENDING 建立 + APPROVE_ONCE resolve 边界二次 Gate
+                                 + 绑定证明 + 原子消费 → 恰好一个 once）、
+                                 _deep_freeze_json 真正 JSON 值域（tuple 顶层/嵌套
+                                 拒绝不静默转 list，帧路径 approval_args_not_
+                                 canonical 零 16D 请求；JSON 正例零共享嵌套引用
+                                 保持））
 BACKEND_PERMISSION_REGRESSION  = 16A/16B/16D/16E 四套件 251 passed + tests/agent
-                                 全量回归（含 agent tools）418 passed（16C 专项 Patch 4
-                                 新增 6 项计入；
-                                 frozen 16D 公开 API 零改动即完成外部边界表达——未触发
-                                 BLOCKED_BY_16D_EXTERNAL_GATE_API_GAP）
+                                 全量回归（含 agent tools）403 passed（16C 专项
+                                 Patch 5 新增 5 项计入；
+                                 frozen 16D 公开 API 零改动即完成完整身份绑定证明
+                                 （matching_request / covering_grant 公开查询面）
+                                 ——未触发 BLOCKED_BY_16D_GATE_BROKER_BINDING_GAP）
 COGNITION_SUITE                = 279 passed
-FULL_SUITE                     = 1680 passed（0 failed；一次完整运行；15 条
+FULL_SUITE                     = 1685 passed（0 failed；一次完整运行；15 条
                                  warning 全部来自既有 tests/test_agent_tools.py
                                  子进程 reader 编码问题，与本 patch 无关）
 GIT_DIFF_CHECK                 = clean（git diff --check 零输出）
@@ -325,6 +342,55 @@ REMAINING_GAPS                 = (1) 实机 approval.request SSE 帧未 live 触
                                  审批一律 fail-closed deny（如实登记的部署边界）。
 READY_FOR_REVIEW               = YES（不声明 16C_PASS）
 ```
+
+## Reviewer Patch 5 修复摘要（BASE 7f5dbc8，2026-08-29）
+
+1. **Gate→ApprovalBroker 绑定证明完整身份化（blocker 一）**：Patch 4 的
+   `state_of` / `is_grant_active` 只能证明"主 broker 中存在同名 ID 的记录"，不能
+   证明 Gate 返回的记录来自主 broker，也不能证明其完整操作身份一致——本 patch
+   收紧为：
+   - **approval 路径**（`_prove_approval_binding`）：Gate 返回的
+     ApprovalRequest 自身字段必须与真实操作完整身份逐维一致
+     （contract_id / content_hash / run_id / tool / capability / requested_scope /
+     risk / policy——其中 requested_scope 由 `AgentRuntime._step_paths` + broker
+     scope 归一化**独立重算**、risk 由 effective = max(PM level, L2) 镜像独立重算、
+     policy 取自冻结契约，均不信任 Gate 自报）；随后经主 broker **公开全身份查询
+     面** `ApprovalBroker.matching_request`（contract_id / contract_hash / run_id /
+     tool / capability / requested_scope / risk_level / policy_kind /
+     operation_digest 全部精确过滤）检索，**命中的 approval_id 必须精确等于 Gate
+     返回值**。`operation_digest` 是主 broker 随机密钥 HMAC over 原始 args——外部
+     broker 的 Gate 无法伪造出能在主 broker 台账命中的 digest，"同名 ID 不同身份"
+     （UUID 碰撞 / 换 args / 换 run_id / 换契约 hash）一律不命中 → fail-closed；
+   - **grant 路径**（`_prove_grant_binding`）：claimed AuthorizationGrant 的
+     contract_id / contract_hash / capability 必须与真实操作一致；随后经主 broker
+     **公开查询面** `ApprovalBroker.covering_grant`（激活窗口 + 契约 id/hash 精确
+     过滤 + capability 精确 + tool_pattern glob + 全部路径入 workspace + 写目标入
+     write_roots）检索，**返回的有效 grant_id 必须精确等于 Gate 返回值**——证明
+     失败在 `gate.consume_permit` **之前**拦截（零 permit 消费、零 once）；
+   - **fail-closed 后果**：仅 ID 相同但身份不同 → 不进入 adapter approval ledger、
+     不消费 permit、不发送 once、原记录不覆盖不串用（账本写入保持 setdefault）；
+   - **resolve 边界补同一证明**：`resolve_approval` 的 Gate 重判 ALLOW 后、
+     `consume_permit` / POST once 之前，对 `result.approval` / `result.grant`
+     再做一次完整身份绑定证明（外部 Gate 在 resolve 时刻的 UUID 碰撞同样在
+     consume 之前拦截）；
+   - **仅使用 16D 公开 API**（matching_request / covering_grant / ApprovalRequest
+     / AuthorizationGrant 公开字段），不触碰任何 `_broker` / `_requests` /
+     `_grants` / `_known_gate_ids` 等私有字段——frozen 16D 公开 API 足以表达完整
+     证明，**未触发 BLOCKED_BY_16D_GATE_BROKER_BINDING_GAP**。Reviewer-locked
+     否证：A（monkeypatch UUID 使主/外部 broker 生成相同 approval_id、操作身份
+     不同 → foreign Gate 拒绝零 once，对照完整身份正例通过）；B（相同
+     approval_id、相同 tool 但不同 args / run_id / contract hash 逐维均不得通过）；
+     C（monkeypatch 相同 grant_id、主 broker 为有效但不同 tool / 绑定另一契约的
+     grant → 拒绝，零 permit 消费零 once，对照合法覆盖 grant → once）；D（主
+     broker 合法 approval PENDING 建立 + APPROVE_ONCE resolve → 恰好一个 once、
+     合法 grant → once 正例保持）。
+2. **strict JSON 声明收紧**：`_deep_freeze_json` 只接受真正 JSON 值域（dict /
+   list / str / int / float / bool / None）——**tuple 一律 fail-closed 拒绝**
+   （JSON 文档不存在 tuple，不得静默转换为 list；帧路径折为
+   `approval_args_not_canonical`），顶层 / 嵌套 / dict 键值内出现均拒绝；既有
+   dict/list 递归 defensive copy 与零共享嵌套引用保持（JSON 正例不回归）。新增
+   tuple 否证（单元级 + 帧路径级零 16D 请求 / 仅 deny 转发 / 等价 list 帧正常
+   建立审批）。
 
 ## Reviewer Patch 4 修复摘要（BASE 78ab09f，2026-08-28）
 

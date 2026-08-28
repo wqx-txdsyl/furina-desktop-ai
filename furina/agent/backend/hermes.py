@@ -99,9 +99,18 @@
   permit、零 once）；操作身份在帧时刻**严格递归 defensive copy**（非 JSON 值
   fail-closed），账本快照与事件 payload / permission_decider / Gate / permit 消费
   零共享嵌套引用，批准后只能消费帧时刻冻结的原操作；Gate 判定结果进入 adapter
-  审批账本或产生 once 前，必须经 16D **公开 API** 证明其产生于构造期注入的
-  approval_broker（``state_of`` / ``is_grant_active``；外部 broker 的 Gate →
-  fail-closed deny，不触碰任何 _private 属性）；approval frame 的 tool **精确匹配**
+  审批账本或产生 once 前（**含 resolve 边界**），必须经 16D **公开 API** 证明其
+  产生于构造期注入的 approval_broker 且与真实操作**完整身份一致**（Patch 5
+  blocker 一：仅"同名 ID 存在/激活"不构成证明——approval 经 claimed
+  ApprovalRequest 字段独立重算（scope/risk/policy 不信任 Gate 自报）+ 主 broker
+  ``matching_request`` 全身份查询（含 broker 密钥 HMAC operation_digest）、命中
+  approval_id **精确等于** Gate 返回值；grant 经主 broker ``covering_grant``
+  全匹配（契约/tool/capability/paths/write_paths）、有效 grant_id **精确等于**
+  Gate 返回值；UUID 碰撞 / 换 args / 换 run_id / 换契约 hash / 换 scope 一律
+  fail-closed deny：不进账本、不消费 permit、零 once、原记录不覆盖不串用；
+  不触碰任何 _private 属性，frozen 16D 公开 API 可完整表达证明）；
+  ``_deep_freeze_json`` 只接受真正 JSON 值域（tuple 不得静默转换为 list →
+  ``approval_args_not_canonical``）；approval frame 的 tool **精确匹配**
   （零 strip 规范化）；content-type charset 参数**真正 token 校验**（拒绝重复
   charset/空值/引号/非法参数，只承诺实际践行的 UTF-8 解码）；
 - **HTTP 严格边界（Patch 2 + Patch 3 收紧）**：只接受精确媒体类型
@@ -135,13 +144,17 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from furina.agent.agent_runtime import AgentRuntime
 from furina.agent.approval import (
     ApprovalBroker,
     ApprovalDecisionKind,
     ApprovalGate,
+    ApprovalRequest,
     ApprovalState,
     ApprovalStateError,
+    AuthorizationGrant,
     GateVerdict,
+    classify_step_paths,
 )
 from furina.agent.approval.models import ResolutionStatus
 from furina.agent.permission import Permission, PermissionDecision
@@ -318,11 +331,13 @@ def _plain_tree(obj: Any) -> Any:
 
 
 def _deep_freeze_json(value: Any, path: str = "$") -> Any:
-    """严格递归 defensive copy（Patch 4 blocker 四）：仅接受 JSON 值域
-    （dict / list / str / int / float / bool / None），键必须为 str；任何非 JSON
-    值（含非有限浮点）→ HermesProtocolError fail-closed。输出树与输入树零共享
-    嵌套引用（dict/list 全部重建；标量不可变原样传递）。无 repr/default=str
-    兜底，异常文本只含路径与类型名（零原始值、零秘密导出）。"""
+    """严格递归 defensive copy（Patch 4 blocker 四；Patch 5 收紧值域声明）：仅接受
+    真正 JSON 值域（dict / list / str / int / float / bool / None），键必须为 str；
+    任何非 JSON 值（含非有限浮点与 **tuple**——JSON 文档不存在 tuple，不得静默
+    转换为 list）→ HermesProtocolError fail-closed（调用方折为
+    ``approval_args_not_canonical``）。输出树与输入树零共享嵌套引用（dict/list
+    全部重建；标量不可变原样传递）。无 repr/default=str 兜底，异常文本只含路径
+    与类型名（零原始值、零秘密导出）。"""
     if value is None or isinstance(value, (bool, str)):
         return value
     if isinstance(value, int):
@@ -340,10 +355,11 @@ def _deep_freeze_json(value: Any, path: str = "$") -> Any:
                     f"审批操作参数键非 str（fail-closed）@ {path}")
             frozen[k] = _deep_freeze_json(v, f"{path}.{k}")
         return frozen
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list):
         return [_deep_freeze_json(v, f"{path}[{i}]") for i, v in enumerate(value)]
     raise HermesProtocolError(
-        f"审批操作参数含非 JSON 值（fail-closed）@ {path}: {type(value).__name__}")
+        f"审批操作参数含非 JSON 值（fail-closed；tuple 等 Python 扩展类型不得"
+        f"静默转换）@ {path}: {type(value).__name__}")
 
 
 def _operation_identity_digest(run_id: str, tool: str, capability: str,
@@ -1731,8 +1747,9 @@ class HermesExecutionBackend(ExecutionBackend):
         4. 契约对应 ApprovalGate 缺失（``approval_gate_missing``）→ 自动 deny；
         5. **操作身份深度冻结**（blocker 四）：帧进入审批域即对完整 JSON 操作参数
            做严格递归 defensive copy（非 JSON 值 fail-closed
-           ``approval_args_not_canonical``）+ 完整操作身份 digest；账本快照、
-           permission_decider、Gate、permit 消费各持独立副本，零共享嵌套引用；
+           ``approval_args_not_canonical``；tuple 等 Python 扩展类型不得静默转
+           list）+ 完整操作身份 digest；账本快照、permission_decider、Gate、
+           permit 消费各持独立副本，零共享嵌套引用；
         6. **幂等重投 exactly-once**（blocker 二/三）：相同 (run_id, tool,
            capability, 完整原始 args) digest 的重投 → 复用原 approval_id——PENDING /
            已决议未 forward 一律交唯一 resolve 路径；已 forward 零再次 POST
@@ -1743,14 +1760,20 @@ class HermesExecutionBackend(ExecutionBackend):
            预留（**仅新操作**；满 → ``approval_ledger_full`` + deny）→
            ``gate.check_step``（wait_for_approval=False，完整 WorkContract + 冻结
            原始 args 独立副本 + 冻结 envelope + risk 下界 L2）；
-        8. **Gate 绑定证明**（blocker 五）：Gate 判定结果进入本 adapter 审批账本前，
-           必须经 16D 公开 API 证明其产生于构造期注入的 approval_broker（外部
-           broker 的 Gate → fail-closed deny，不进账本、不产生 once）；
+        8. **Gate 绑定证明（完整身份）**（blocker 五；Patch 5 blocker 一）：Gate
+           判定结果进入本 adapter 审批账本前，必须经 16D 公开 API 证明其产生于
+           构造期注入的 approval_broker **且与本操作完整身份一致**——claimed
+           ApprovalRequest 字段独立重算（scope/risk/policy 不信任 Gate 自报）+
+           主 broker ``matching_request`` 全身份查询、命中 approval_id 精确等于
+           Gate 返回值（外部 broker 的 Gate / 同名 ID 不同身份 → fail-closed
+           deny，不进账本、不产生 once）；
         9. **ALLOW 来源区分**（blocker 二）：``result.approval`` 非空 → 属已有
            approval，必须进入统一 exactly-once 路径（绝不立即 POST）；仅
            ``result.grant`` 非空才允许作为新的 grant-covered action 立即边界
-           ``gate.consume_permit`` 原子消费成功后转发 once（grant 绑定同样先经
-           公开 API ``broker.is_grant_active`` 证明）。
+           ``gate.consume_permit`` 原子消费成功后转发 once（grant 绑定先经主
+           broker 公开查询面 ``covering_grant`` 全匹配证明：契约/tool/capability/
+           paths/write_paths 全部匹配且有效 grant_id 精确等于 Gate 返回值——
+           证明失败在 consume **之前**拦截，零 permit 消费）。
 
         自动 deny 只向 Hermes 转发 ``deny``，不创建任何 16D 审批请求（决议由
         Furina 决策面（broker owner）做出；绝不伪造 USER evidence、绝不签发 grant/
@@ -1816,19 +1839,118 @@ class HermesExecutionBackend(ExecutionBackend):
             if done is not None:
                 done.set()
 
-    def _prove_approval_in_broker(self, approval_id: str) -> Optional[str]:
-        """Gate 绑定证明（Patch 4 blocker 五）：Gate 判定产生的 approval_id 进入本
-        adapter 审批账本前，必须经 16D **公开 API**（``ApprovalBroker.state_of``）
-        证明其真实产生于构造期注入的 approval_broker 决策面——来自另一个
-        ApprovalBroker 的 Gate，其 approval_id 在本 broker 不可查询 → fail-closed
-        deny（不进账本、不产生 once）。仅使用公开查询面，不触碰任何 Python
-        ``_private`` 属性。返回 None = 证明成立；非 None = deny 原因。"""
+    @staticmethod
+    def _gate_effective_risk(pm_decision: PermissionDecision) -> Permission:
+        """``ApprovalGate.check_step`` effective risk 的镜像（同一规则）：
+        effective = max(PM level（若为 Permission）, 调用方声明的 risk 下界)。
+        本 adapter 恒以 ``risk_level=L2`` 调用 Gate，故 effective 恒 ≥ L2。
+        仅用于绑定证明对请求身份的**独立重算**（不信任 Gate 自报）；四层判定
+        权威仍在 Gate。"""
+        pm_level = pm_decision.level if isinstance(pm_decision.level, Permission) else None
+        return max(lv for lv in (pm_level, Permission.L2_HIGH_RISK) if lv is not None)
+
+    def _prove_approval_binding(self, claimed: Any, *, contract: WorkContract,
+                                run_id: str, tool: str, capability: str,
+                                op_args: Mapping[str, Any],
+                                pm_decision: PermissionDecision) -> Optional[str]:
+        """Gate 绑定证明（Patch 4 blocker 五；Patch 5 blocker 一完整身份版）——
+        approval 路径。
+
+        Gate 判定产生的 approval 进入本 adapter 审批账本或产生 once 前，必须经
+        16D **公开 API** 证明其确为构造期注入的 approval_broker 针对**本操作**
+        建立的记录——仅"主 broker 存在同名 ID"不构成证明（同名记录可能是完全
+        不同的操作）：
+
+        1. Gate 返回的 :class:`ApprovalRequest` 自身字段必须与真实操作完整身份
+           逐维一致：contract_id / content_hash / run_id / tool / capability /
+           requested_scope / risk / policy——其中 requested_scope / risk / policy
+           由本 adapter 以与 Gate/broker 相同的公共规则**独立重算**
+           （``AgentRuntime._step_paths`` + broker scope 归一化、effective risk
+           max(PM, L2) 镜像、契约 approval_policy），不信任 Gate 自报；
+        2. 经主 broker 公开全身份查询面 ``ApprovalBroker.matching_request``
+           （contract_id / contract_hash / run_id / tool / capability /
+           requested_scope / risk_level / policy_kind / operation_digest 全部
+           精确过滤）检索；**命中的 approval_id 必须精确等于 Gate 返回值**。
+           ``operation_digest`` 是主 broker 随机密钥 HMAC over 原始 args——
+           外部 broker 的 Gate 无法伪造出能在主 broker 台账命中的 digest，
+           "同名 ID 不同身份"（UUID 碰撞 / 换 args / 换 run_id / 换契约 hash）
+           一律不命中 → fail-closed。
+
+        仅使用公开查询面，不触碰任何 Python ``_private`` 属性（frozen 16D 公开
+        API 可完整表达本证明，未触发 BLOCKED_BY_16D_GATE_BROKER_BINDING_GAP）。
+        返回 None = 证明成立；非 None = deny 原因（fail-closed：不进 adapter
+        账本、不消费 permit、零 once、原记录不覆盖不串用）。"""
         try:
-            self._broker.state_of(approval_id)
-        except ApprovalStateError:
-            return "approval_gate_broker_binding"
+            expected_scope = tuple(
+                str(p).strip()
+                for p in AgentRuntime._step_paths(tool, dict(op_args))
+                if str(p).strip())
+            expected_risk = self._gate_effective_risk(pm_decision)
+            expected_policy = contract.approval_policy.policy_kind
+        except Exception as exc:   # noqa: BLE001 —— 身份重算异常 fail-closed
+            return f"approval_binding_identity_error:{type(exc).__name__}"
+        if (not isinstance(claimed, ApprovalRequest)
+                or claimed.contract_id != contract.contract_id
+                or claimed.contract_hash != contract.content_hash
+                or claimed.run_id != run_id
+                or claimed.tool != tool
+                or claimed.capability != capability
+                or claimed.requested_scope != expected_scope
+                or claimed.risk_level != expected_risk
+                or claimed.policy_kind != expected_policy):
+            return "approval_binding_identity_mismatch"
+        try:
+            bound = self._broker.matching_request(
+                contract_id=contract.contract_id,
+                contract_hash=contract.content_hash,
+                run_id=run_id, tool=tool, capability=capability,
+                requested_scope=expected_scope, risk_level=expected_risk,
+                policy_kind=expected_policy,
+                operation_digest=claimed.operation_digest)
         except Exception as exc:   # noqa: BLE001 —— 查询面异常同样 fail-closed
             return f"approval_gate_broker_binding_error:{type(exc).__name__}"
+        if bound is None or bound.approval_id != claimed.approval_id:
+            return "approval_gate_broker_binding"
+        return None
+
+    def _prove_grant_binding(self, claimed: Any, *, contract: WorkContract,
+                             tool: str, capability: str,
+                             op_args: Mapping[str, Any]) -> Optional[str]:
+        """Gate 绑定证明（Patch 4 blocker 五；Patch 5 blocker 一完整身份版）——
+        grant 路径。
+
+        Gate 判定返回的 grant-covered ALLOW 进入 permit 消费 / once 前，必须经
+        主 broker 公开查询面证明其 grant 确为注入的 approval_broker 中**有效且
+        精确覆盖本操作**的记录——仅"存在同名激活 grant"不构成证明：
+
+        1. Gate 返回的 :class:`AuthorizationGrant` 自身契约 / capability 绑定
+           必须与真实操作一致（contract_id / contract_hash / capability）；
+        2. 经主 broker 公开查询面 ``ApprovalBroker.covering_grant``（激活窗口
+           + 契约 id/hash 精确过滤 + capability 精确 + tool_pattern glob +
+           全部路径入 workspace + **写目标入 write_roots**）检索——paths /
+           write_paths 由本 adapter 以与 Gate/broker 相同的公共规则独立重算；
+           **返回的有效 grant_id 必须精确等于 Gate 返回值**。
+
+        同名 grant 但 scope / contract / tool 不同（UUID 碰撞）不命中 →
+        fail-closed deny：不消费 permit、零 once。仅使用公开查询面，不触碰任何
+        Python ``_private`` 属性。返回 None = 证明成立；非 None = deny 原因。"""
+        if (not isinstance(claimed, AuthorizationGrant)
+                or claimed.contract_id != contract.contract_id
+                or claimed.contract_hash != contract.content_hash
+                or claimed.capability != capability):
+            return "approval_grant_identity_mismatch"
+        try:
+            paths = tuple(AgentRuntime._step_paths(tool, dict(op_args)))
+            write_paths, _read_paths = classify_step_paths(tool, paths)
+            covering = self._broker.covering_grant(
+                tool=tool, capability=capability,
+                contract_id=contract.contract_id,
+                contract_hash=contract.content_hash,
+                paths=paths, write_paths=write_paths, now=self._broker.now())
+        except Exception as exc:   # noqa: BLE001 —— 查询面异常同样 fail-closed
+            return f"approval_gate_broker_binding_error:{type(exc).__name__}"
+        if covering is None or covering.grant_id != claimed.grant_id:
+            return "approval_gate_broker_binding_grant"
         return None
 
     def _approval_new_operation(self, run_id: str, record: _RunRecord, tool: str,
@@ -1865,9 +1987,12 @@ class HermesExecutionBackend(ExecutionBackend):
             return None, f"approval_gate_error:{type(exc).__name__}"
         if result.verdict is GateVerdict.APPROVAL_PENDING and result.approval is not None:
             # 唯一建立待审批记录的路径：Gate 已创建 16D 请求且状态 PENDING；
-            # 入账本前必须先证明该 approval 产生于本 adapter 的 approval_broker。
+            # 入账本前必须先证明该 approval 产生于本 adapter 的 approval_broker
+            # 且与本操作完整身份一致（Patch 5：仅同名 ID 存在不构成证明）。
             approval_id = result.approval.approval_id
-            binding = self._prove_approval_in_broker(approval_id)
+            binding = self._prove_approval_binding(
+                result.approval, contract=record.contract, run_id=run_id,
+                tool=tool, capability=capability, op_args=op_args, pm_decision=pm)
             if binding is not None:
                 with self._lock:
                     self._approvals_reserved -= 1
@@ -1886,9 +2011,13 @@ class HermesExecutionBackend(ExecutionBackend):
         if result.verdict is GateVerdict.ALLOW:
             if result.approval is not None:
                 # blocker 二：ALLOW 源于**已有 approval**（approve_once/session 终态）
-                # → 绝不立即 POST once/deny，进入统一 exactly-once resolve 路径。
+                # → 绝不立即 POST once/deny，进入统一 exactly-once resolve 路径；
+                # 入账本前同样先经完整身份绑定证明（Patch 5）。
                 approval_id = result.approval.approval_id
-                binding = self._prove_approval_in_broker(approval_id)
+                binding = self._prove_approval_binding(
+                    result.approval, contract=record.contract, run_id=run_id,
+                    tool=tool, capability=capability, op_args=op_args,
+                    pm_decision=pm)
                 if binding is not None:
                     self._forward_choice(run_id, "deny")
                     return None, binding
@@ -1902,10 +2031,15 @@ class HermesExecutionBackend(ExecutionBackend):
             if result.grant is not None and result.permit is not None:
                 # blocker 二/五：仅 grant 来源允许作为**新的** grant-covered action
                 # 立即边界消费（session grant 本义为多次放行）；grant 绑定先经
-                # 公开 API 证明。
-                if not self._broker.is_grant_active(result.grant.grant_id):
+                # 主 broker 公开查询面完整身份证明（Patch 5：covering_grant
+                # 全匹配 + 有效 grant_id 精确相等，仅 is_grant_active 不构成证明）
+                # ——证明失败在 consume **之前**拦截：零 permit 消费、零 once。
+                binding = self._prove_grant_binding(
+                    result.grant, contract=record.contract, tool=tool,
+                    capability=capability, op_args=op_args)
+                if binding is not None:
                     self._forward_choice(run_id, "deny")
-                    return None, "approval_gate_broker_binding_grant"
+                    return None, binding
                 outcome = gate.consume_permit(result.permit, tool=tool,
                                               capability=capability,
                                               args=_deep_freeze_json(op_args))
@@ -1967,7 +2101,7 @@ class HermesExecutionBackend(ExecutionBackend):
         """等待 16D 真实决议并**恰好一次**转发 Hermes（choice 只允许 once/deny）。
 
         Reviewer Patch 3 边界重构——顺序为 **等待决议 → 同一 Gate 重新判定（实时 PM）
-        → 立即边界原子 permit 消费 → POST**：
+        → Gate 绑定证明（Patch 5：完整身份）→ 立即边界原子 permit 消费 → POST**：
 
         - 先经 ``broker.wait_for_resolution``（有界）等待**真实 Furina 决议**；
         - **Patch 4（blocker 一）：决议不得被后出现的 grant 升级**——先检查原
@@ -1979,11 +2113,14 @@ class HermesExecutionBackend(ExecutionBackend):
           ``permission_decider``；缺失/异常/非决策 → fail-closed deny），并**再次调用
           同一 ``ApprovalGate.check_step``**（完整 WorkContract + 帧时刻冻结原始 args
           的独立深冻结副本 + 冻结 envelope + risk 下界 L2，wait_for_approval=False）：
-          - GateResult=ALLOW 且携带 permit → ``gate.consume_permit`` 在发送 once 的
+          - GateResult=ALLOW 且携带 permit → **先经 Gate 绑定证明（Patch 5）**：
+            ``result.approval`` / ``result.grant`` 必须证明产生于主 broker 且与
+            帧时刻冻结的完整操作身份一致（外部 Gate / 同名 ID 不同身份在
+            consume **之前**拦截），随后 ``gate.consume_permit`` 在发送 once 的
             **立即边界**原子复核（contract_id/hash + run_id + tool + capability +
             原始 args + approval/grant 状态）并单点提交消费；**仅消费成功才 POST
-            once**。决议与远端边界之间的撤销/状态漂移/PM 降级 → 消费失败或 Gate 重判
-            DENY → fail-closed 转发 deny，绝不发送 once；
+            once**。决议与远端边界之间的撤销/状态漂移/PM 降级 → 绑定证明失败、
+            消费失败或 Gate 重判 DENY → fail-closed 转发 deny，绝不发送 once；
           - Gate 任何 DENY（PM 拒绝、契约/hash 不匹配、撤销、超时、已消费）、契约
             Gate 缺失、permit 消费失败 → ``deny``（fail-closed）；
           - APPROVE_SESSION 决议仍只收窄转发 once（不放宽 16D 决议）；
@@ -2061,14 +2198,36 @@ class HermesExecutionBackend(ExecutionBackend):
                             result = None
                         if result is not None and result.verdict is GateVerdict.ALLOW \
                                 and result.permit is not None:
-                            try:
-                                outcome = gate.consume_permit(
-                                    result.permit, tool=op.tool, capability=op.capability,
-                                    args=_deep_freeze_json(op.op_args))
-                            except ApprovalStateError as exc:
-                                boundary_reason = \
-                                    f"boundary_permit_consume_error:{type(exc).__name__}"
-                                outcome = None
+                            # -- Patch 5（blocker 一）：once 前绑定证明同样适用——
+                            # resolve 边界的 Gate 判定结果必须证明仍产生于主 broker
+                            # 且与帧时刻冻结的完整操作身份一致；外部 Gate / UUID
+                            # 碰撞在 consume **之前**拦截（零 permit 消费零 once）。
+                            if result.approval is not None:
+                                binding = self._prove_approval_binding(
+                                    result.approval, contract=run_rec.contract,
+                                    run_id=op.run_id, tool=op.tool,
+                                    capability=op.capability, op_args=op.op_args,
+                                    pm_decision=pm)
+                            elif result.grant is not None:
+                                binding = self._prove_grant_binding(
+                                    result.grant, contract=run_rec.contract,
+                                    tool=op.tool, capability=op.capability,
+                                    op_args=op.op_args)
+                            else:
+                                binding = "approval_allow_source_unproven"
+                            outcome = None
+                            if binding is not None:
+                                boundary_reason = f"boundary_{binding}"
+                            else:
+                                try:
+                                    outcome = gate.consume_permit(
+                                        result.permit, tool=op.tool,
+                                        capability=op.capability,
+                                        args=_deep_freeze_json(op.op_args))
+                                except ApprovalStateError as exc:
+                                    boundary_reason = \
+                                        f"boundary_permit_consume_error:{type(exc).__name__}"
+                                    outcome = None
                             if outcome is not None and outcome.ok:
                                 # permit 已在发送边界**原子消费**（POST 前最后一道状态性
                                 # 操作）；此后 POST 失败也绝不回滚消费/绝不重发。

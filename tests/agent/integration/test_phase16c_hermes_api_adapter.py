@@ -49,6 +49,17 @@ GateResult=ALLOW + permit + gate.consume_permit 原子消费成功才 POST once�
 **HTTP 真正有界**（读取异常抛类型化错误绝不返回前缀；单 chunk extend 前检查余量；
 错误码 JSON 同样要求精确 application/json——text/plain 的 run_not_found/
 approval_not_pending 不当作已知错误码；超限内容不入异常文本/日志/缓冲）。
+
+Reviewer Patch 5 锁定面：**Gate→ApprovalBroker 绑定证明完整身份化**——仅"同名 ID
+存在/激活"不构成证明：approval 路径经 claimed ApprovalRequest 字段独立重算
+（scope/risk/policy 不信任 Gate 自报）+ 主 broker 公开全身份查询面
+``matching_request``（含 broker 密钥 HMAC operation_digest）、命中 approval_id
+**精确等于** Gate 返回值；grant 路径经主 broker 公开查询面 ``covering_grant``
+全匹配（contract/tool/capability/paths/write_paths）、有效 grant_id **精确等于**
+Gate 返回值；UUID 碰撞 / 换 args / 换 run_id / 换契约 hash / 换 scope 一律
+fail-closed deny（不进账本、不消费 permit、零 once、原记录不覆盖不串用）；
+resolve 边界 once 前同样先绑定证明；``_deep_freeze_json`` 只接受真正 JSON 值域
+（tuple 不得静默转 list → ``approval_args_not_canonical``）。
 """
 from __future__ import annotations
 
@@ -3618,4 +3629,362 @@ def test_65_reviewer_tool_identity_exact_and_strict_charset(server):
                   "application/json; charset=utf-8; x=y"):            # 非法参数
         with pytest.raises(HermesProtocolError, match="charset"):
             backend._read_json_object("t", _CtypeStub(ctype))
+    backend.close()
+
+
+# =================================================================================
+# ================================ Reviewer Patch 5 专项 ============================
+# =================================================================================
+
+#: uuid4 桩的固定 hex（主/外部 broker 各自取 [:12] 生成**相同** approval_id/grant_id）。
+_FIXED_UUID_HEX = "5c011d5ea12b5c011d5ea12b5c011d5e"
+
+
+class _FixedUuid4:
+    """uuid4 桩：``hex`` 固定——使两个 broker 在 UUID 碰撞前提下生成同名 ID
+    （Reviewer Patch 5 blocker 一：同名 ID 但身份不同必须被绑定证明拒绝）。"""
+
+    def __init__(self, hex_value: str = _FIXED_UUID_HEX) -> None:
+        self.hex = hex_value
+
+
+def _patch_uuid4(monkeypatch: pytest.MonkeyPatch,
+                 hex_value: str = _FIXED_UUID_HEX) -> None:
+    """全局替换 uuid.uuid4（broker/grant/nonce 生成全部同名化；测试结束自动还原）。"""
+    monkeypatch.setattr(uuid, "uuid4", lambda: _FixedUuid4(hex_value))
+
+
+def _p5_run_record(contract: WorkContract) -> _RunRecord:
+    return _RunRecord(contract.contract_id, contract.content_hash,
+                      tuple(contract.allowed_capabilities), contract=contract)
+
+
+# ------------------------------------------------- P5-A: approval 同名 ID 碰撞拒绝
+def test_66_reviewer_approval_binding_full_identity_uuid_collision(server, monkeypatch):
+    """P5-locked（blocker 一/A）：monkeypatch UUID 使主 broker 与 foreign broker
+    生成**相同** approval_id，但操作身份不同——foreign Gate 必须被完整身份绑定
+    证明拒绝：不进 adapter 账本、不消费 permit、零 once、主 broker 原记录不覆盖
+    不串用；对照组证明主 broker 自己的 Gate 对同一完整身份正例照常通过（同名 ID
+    存在性从来不是证明依据，完整身份一致才是）。"""
+    contract = _make_contract(contract_id="wc_16c_p5_apv_collision")
+    broker_main = _make_evidence_broker()
+    broker_foreign = _make_evidence_broker()
+    backend = _make_backend(
+        server, broker=broker_main, contract=contract,
+        approval_gates={contract.contract_id: _make_gate(broker_foreign, contract)})
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id)
+    record = _p5_run_record(contract)
+    _patch_uuid4(monkeypatch)
+    # 主 broker 预置**同名 approval_id** 的不同操作记录（UUID 碰撞前提）；
+    # args 与对照组帧的 canonical 操作参数完全一致（对照可复用同一条记录）。
+    main_op_args = {"tool": "terminal", "command": "echo MAIN-SIDE-OP",
+                    "preview": "echo MAIN-SIDE-OP"}
+    planted = broker_main.create_request(
+        contract_id=contract.contract_id, run_id=run_id, tool="terminal",
+        capability="cap.filesystem", args=dict(main_op_args),
+        reason="p5-collision-planted", risk_level=Permission.L2_HIGH_RISK,
+        requested_scope=(), policy_kind="approval_required_each_step",
+        contract_hash=contract.content_hash)
+    assert planted.approval_id == f"apv_{_FIXED_UUID_HEX[:12]}", \
+        "前置：UUID 桩必须使主 broker 生成固定同名 approval_id"
+    n_main_requested = len(_requested_events(broker_main))
+    # foreign Gate 处理**不同**操作 → foreign broker 生成同名 approval_id
+    approval_id, r = backend._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo FOREIGN-OP", "preview": "echo FOREIGN-OP"})
+    assert approval_id is None and r == "approval_gate_broker_binding", \
+        f"同名 ID 但身份不同的 foreign Gate 必须被拒绝: {(approval_id, r)}"
+    assert len(_requested_events(broker_main)) == n_main_requested, \
+        "碰撞操作零新主 broker request（原记录不被覆盖/串用）"
+    assert backend._approval_ops == {} and backend._approval_op_index == {}, \
+        "不进入 adapter approval 账本"
+    assert _requested_events(broker_foreign), \
+        "前置：foreign Gate 确实曾在自己的 broker 建立同名审批（被完整身份证明拦截）"
+    denies = _denies_for(server, run_id)
+    assert denies and all(b.get("choice") == "deny" for b in denies)
+    assert _onces_for(server, run_id) == [], "碰撞拒绝零 once"
+    assert broker_main.state_of(planted.approval_id) is ApprovalState.PENDING, \
+        "主 broker 原记录状态不受碰撞影响"
+    assert not broker_main.is_consumed(planted.approval_id), "原记录零消费"
+    backend.close()
+    # 对照组：主 broker 自己的 Gate 对**完整身份一致**的操作 → 正常建立（复用原
+    # 记录、零新 broker request）——绑定证明只拒绝身份不一致的冒名，不误伤正例。
+    backend_main = _make_backend(
+        server, broker=broker_main, contract=contract,
+        approval_gates={contract.contract_id: _make_gate(broker_main, contract)})
+    a_ok, r_ok = backend_main._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo MAIN-SIDE-OP", "preview": "echo MAIN-SIDE-OP"})
+    assert a_ok == planted.approval_id and r_ok is None, \
+        f"完整身份一致的正例必须通过绑定证明: {(a_ok, r_ok)}"
+    assert len(_requested_events(broker_main)) == n_main_requested, \
+        "正例复用既有记录（零新 broker request）"
+    assert list(backend_main._approval_ops) == [planted.approval_id]
+    backend_main.close()
+
+
+# ------------------------------------------------- P5-B: 同名 ID 身份逐维否证
+def test_67_reviewer_approval_binding_identity_dimension_negations(server, monkeypatch):
+    """P5-locked（blocker 一/B）：相同 approval_id、相同 tool，但 args / run_id /
+    contract hash 任一不同的同名主 broker 记录，均不得通过绑定证明（逐维否证，
+    零账本零 once）；完整身份一致的正例保持通过。"""
+    contract = _make_contract(contract_id="wc_16c_p5_dims")
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo B-FRAME", "preview": "echo B-FRAME"}
+    frame_args = {"tool": "terminal", "command": "echo B-FRAME",
+                  "preview": "echo B-FRAME"}
+    # run_id 在 UUID 桩生效**前**生成（保持互相独立，避免桩固定 run_id 混淆维度）
+    run_a = f"run_{uuid.uuid4().hex[:12]}"
+    run_b = f"run_{uuid.uuid4().hex[:12]}"
+    run_c = f"run_{uuid.uuid4().hex[:12]}"
+    for rid in (run_a, run_b, run_c, "run_p5_positive"):
+        server.register_run(rid)
+
+    def planted_request(broker: ApprovalBroker, **overrides: Any) -> Any:
+        params: Dict[str, Any] = dict(
+            contract_id=contract.contract_id, tool="terminal",
+            capability="cap.filesystem", args=dict(frame_args),
+            reason="p5-dim-negation", risk_level=Permission.L2_HIGH_RISK,
+            requested_scope=(), policy_kind="approval_required_each_step",
+            contract_hash=contract.content_hash)
+        params.update(overrides)
+        return broker.create_request(**params)
+
+    def foreign_backend(broker_main: ApprovalBroker) -> HermesExecutionBackend:
+        return _make_backend(
+            server, broker=broker_main, contract=contract,
+            approval_gates={contract.contract_id:
+                            _make_gate(_make_evidence_broker(), contract)})
+
+    # (1) 同名 ID + 同 tool/run/契约但**不同 args**（operation digest 必不同）
+    _patch_uuid4(monkeypatch)
+    broker_a = _make_evidence_broker()
+    backend_a = foreign_backend(broker_a)
+    planted_request(broker_a, run_id=run_a,
+                    args={"tool": "terminal", "command": "echo B-OTHER-ARGS",
+                          "preview": "echo B-OTHER-ARGS"})
+    assert backend_a._handle_approval_request(
+        run_a, _p5_run_record(contract), dict(frame)) == \
+        (None, "approval_gate_broker_binding"), "不同 args 的同名记录不得通过"
+    assert backend_a._approval_ops == {} and _onces_for(server, run_a) == []
+    backend_a.close()
+
+    # (2) 同名 ID + 同 tool/args/契约但**不同 run_id**
+    broker_b = _make_evidence_broker()
+    backend_b = foreign_backend(broker_b)
+    planted_request(broker_b, run_id="run_p5_other_run")
+    assert backend_b._handle_approval_request(
+        run_b, _p5_run_record(contract), dict(frame)) == \
+        (None, "approval_gate_broker_binding"), "不同 run_id 的同名记录不得通过"
+    assert backend_b._approval_ops == {} and _onces_for(server, run_b) == []
+    backend_b.close()
+
+    # (3) 同名 ID + 同 tool/args/run_id 但**不同 contract hash**
+    broker_c = _make_evidence_broker()
+    backend_c = foreign_backend(broker_c)
+    planted_request(broker_c, run_id=run_c, contract_hash="0" * 64)
+    assert backend_c._handle_approval_request(
+        run_c, _p5_run_record(contract), dict(frame)) == \
+        (None, "approval_gate_broker_binding"), "不同契约 hash 的同名记录不得通过"
+    assert backend_c._approval_ops == {} and _onces_for(server, run_c) == []
+    backend_c.close()
+
+    # (4) 正例：完整身份逐维一致（主 broker Gate）→ 通过
+    broker_d = _make_evidence_broker()
+    planted = planted_request(broker_d, run_id="run_p5_positive")
+    backend_d = _make_backend(
+        server, broker=broker_d, contract=contract,
+        approval_gates={contract.contract_id: _make_gate(broker_d, contract)})
+    a_ok, r_ok = backend_d._handle_approval_request(
+        "run_p5_positive", _p5_run_record(contract), dict(frame))
+    assert a_ok == planted.approval_id and r_ok is None, \
+        f"完整身份一致的正例必须通过: {(a_ok, r_ok)}"
+    assert list(backend_d._approval_ops) == [planted.approval_id]
+    backend_d.close()
+
+
+# ------------------------------------------------- P5-C: grant 同名 ID 碰撞拒绝
+def test_68_reviewer_grant_binding_full_identity_collision(server, monkeypatch):
+    """P5-locked（blocker 一/C）：monkeypatch UUID 使主 broker 与 foreign broker
+    生成**相同** grant_id——主 broker 中是有效但不同 tool / 不同 contract 的
+    grant，foreign Gate 返回同名覆盖 grant → 必须拒绝：零 permit 消费、零 once；
+    主 broker 合法覆盖 grant 正例保持通过（D）。"""
+    ws = WorkspaceScope(read_roots=("C:/ws/p5",), write_roots=("C:/ws/p5",))
+    contract = _make_contract(contract_id="wc_16c_p5_grant_collision", workspace_scope=ws)
+    other_contract = _make_contract(contract_id="wc_16c_p5_grant_other", workspace_scope=ws)
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo g", "preview": "echo g"}
+    # run_id 在 UUID 桩生效**前**生成（互相独立；桩后 uuid4 恒返回固定 hex）
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    run_id_b = f"run_{uuid.uuid4().hex[:12]}"
+    run_id_c = f"run_{uuid.uuid4().hex[:12]}"
+    for rid in (run_id, run_id_b, run_id_c):
+        server.register_run(rid)
+    _patch_uuid4(monkeypatch)
+
+    # (a) 主 broker：同契约但 tool_pattern 不覆盖 terminal 的**有效** grant（同名 id）
+    broker_main = _make_evidence_broker()
+    main_grant_a = _create_session_grant(broker_main, contract, tool_pattern="read_file")
+    assert main_grant_a.grant_id == f"gr_{_FIXED_UUID_HEX[:12]}", \
+        "前置：UUID 桩必须使主 broker 生成固定同名 grant_id"
+    assert broker_main.is_grant_active(main_grant_a.grant_id), "前置：同名 grant 有效"
+    broker_foreign = _make_evidence_broker()
+    _create_session_grant(broker_foreign, contract)   # foreign broker 的覆盖 grant（同名 id）
+    foreign_gate = _make_gate(broker_foreign, contract)
+    consume_seen: List[Any] = []
+    original_consume = foreign_gate.consume_permit
+
+    def _recording_consume(permit: Any, *, tool: str, capability: str,
+                           args: Mapping[str, Any]) -> Any:
+        consume_seen.append(permit)
+        return original_consume(permit, tool=tool, capability=capability, args=args)
+
+    foreign_gate.consume_permit = _recording_consume   # type: ignore[method-assign]
+    backend = _make_backend(server, broker=broker_main, contract=contract,
+                            approval_gates={contract.contract_id: foreign_gate})
+    record = _p5_run_record(contract)
+    r = backend._handle_approval_request(run_id, record, dict(frame))
+    assert r == (None, "approval_gate_broker_binding_grant"), \
+        f"同名但不同 tool 的 grant 必须被完整身份证明拒绝: {r}"
+    assert consume_seen == [], "证明失败绝不消费 permit（含外部 broker 的 permit）"
+    assert _onces_for(server, run_id) == [], "碰撞拒绝零 once"
+    denies = _denies_for(server, run_id)
+    assert denies and all(b.get("choice") == "deny" for b in denies)
+    backend.close()
+
+    # (b) 主 broker：tool 覆盖但绑定**另一契约**的有效 grant（同名 id）
+    broker_main_b = _make_evidence_broker()
+    main_grant_b = _create_session_grant(broker_main_b, other_contract)
+    assert main_grant_b.grant_id == f"gr_{_FIXED_UUID_HEX[:12]}"
+    assert broker_main_b.is_grant_active(main_grant_b.grant_id)
+    broker_foreign_b = _make_evidence_broker()
+    _create_session_grant(broker_foreign_b, contract)
+    backend_b = _make_backend(
+        server, broker=broker_main_b, contract=contract,
+        approval_gates={contract.contract_id: _make_gate(broker_foreign_b, contract)})
+    r_b = backend_b._handle_approval_request(run_id_b, _p5_run_record(contract),
+                                             dict(frame))
+    assert r_b == (None, "approval_gate_broker_binding_grant"), \
+        f"同名但绑定另一契约的 grant 必须被拒绝: {r_b}"
+    assert _onces_for(server, run_id_b) == []
+    backend_b.close()
+
+    # (c) 对照组（D 正例）：全新主 broker + 合法**覆盖** grant + 主 broker Gate →
+    #     立即边界消费 → once（完整身份证明不误伤合法 grant 路径；独立 broker
+    #     避免同名 canonical USER event 在同一 broker 内被一次性绑定语义锁定）
+    broker_main_c = _make_evidence_broker()
+    main_cover = _create_session_grant(broker_main_c, contract)   # 覆盖 terminal
+    assert main_cover.grant_id == f"gr_{_FIXED_UUID_HEX[:12]}"
+    backend_main = _make_backend(
+        server, broker=broker_main_c, contract=contract,
+        approval_gates={contract.contract_id: _make_gate(broker_main_c, contract)})
+    r3 = backend_main._handle_approval_request(run_id_c, _p5_run_record(contract),
+                                               dict(frame))
+    assert r3 == (None, "approval_covered_by_grant_once"), \
+        f"主 broker 合法覆盖 grant 不得被绑定证明误伤: {r3}"
+    assert len(_onces_for(server, run_id_c)) == 1
+    backend_main.close()
+
+
+# ------------------------------------------------- P5-D: 合法正例保持通过
+def test_69_reviewer_binding_positive_paths_preserved(server):
+    """P5-locked（blocker 一/D）：主 broker 合法 approval 与合法 grant 正例在完整
+    身份绑定证明下保持通过——PENDING 建立账本、APPROVE_ONCE 后 resolve 经
+    resolve 边界二次 Gate + 绑定证明 + 原子消费 → 恰好一个 once；grant 覆盖
+    操作 → 立即边界消费 → once。"""
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract(contract_id="wc_16c_p5_positive")
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_gates=_make_gates(broker, contract))
+    handle = backend.submit(contract.to_backend_projection())
+    record = backend._runs[handle.run_id]
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo p5-ok", "preview": "echo p5-ok"}
+    a1, r1 = backend._handle_approval_request(handle.run_id, record, dict(frame))
+    assert a1 and r1 is None, f"合法 approval 正例必须建立待审批记录: {(a1, r1)}"
+    assert list(backend._approval_ops) == [a1]
+    assert broker.state_of(a1) is ApprovalState.PENDING
+    assert broker.resolve(a1, ApprovalDecisionKind.APPROVE_ONCE).ok
+    result = backend.resolve_approval(a1)
+    assert result["choice"] == "once" and result["resolved"] == 1, \
+        f"APPROVE_ONCE 正例必须恰好转发一次 once: {result}"
+    assert result["consumed"] is True
+    assert broker.is_consumed(a1)
+    assert server.approval_requests == [(handle.run_id, {"choice": "once"})]
+    backend.close()
+
+    # grant 正例：主 broker 合法覆盖 grant → 立即边界消费 → once
+    ws = WorkspaceScope(read_roots=("C:/ws/p5",), write_roots=("C:/ws/p5",))
+    contract_g = _make_contract(contract_id="wc_16c_p5_positive_grant", workspace_scope=ws)
+    broker_g = _make_evidence_broker()
+    backend_g = _make_backend(
+        server, broker=broker_g, contract=contract_g,
+        approval_gates={contract_g.contract_id: _make_gate(broker_g, contract_g)})
+    run_id_g = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id_g)
+    _create_session_grant(broker_g, contract_g)
+    r2 = backend_g._handle_approval_request(
+        run_id_g, _p5_run_record(contract_g),
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo p5-grant-ok", "preview": "echo p5-grant-ok"})
+    assert r2 == (None, "approval_covered_by_grant_once"), \
+        f"合法 grant 正例不得被绑定证明误伤: {r2}"
+    assert len(_onces_for(server, run_id_g)) == 1
+    backend_g.close()
+
+
+# ------------------------------------------------- P5-E: strict JSON 值域收尾
+def test_70_reviewer_deep_freeze_strict_json_domain(server):
+    """P5-locked（strict JSON 收尾）：``_deep_freeze_json`` 只接受真正 JSON 值域
+    ——tuple（顶层/嵌套）一律 fail-closed，不得静默转换为 list；帧路径折为
+    ``approval_args_not_canonical``（零 16D 请求、仅 deny 转发）；既有 JSON 正例
+    （dict/list/str/int/float/bool/None 任意嵌套）保持通过且零共享嵌套引用。"""
+    # (1) 既有 JSON 正例保持通过 + 零共享嵌套引用（dict/list 全部重建）
+    src = {"a": [1, 2.5, True, None, "x", {"b": ["y", ["z"]]}], "c": {}, "d": []}
+    out = hermes_module._deep_freeze_json(src)
+    assert out == src
+    assert out is not src and out["a"] is not src["a"] \
+        and out["a"][5] is not src["a"][5] and out["a"][5]["b"] is not src["a"][5]["b"]
+    out["a"].append("mutated")
+    out["a"][5]["b"].append("mutated")
+    assert src["a"] == [1, 2.5, True, None, "x", {"b": ["y", ["z"]]}], \
+        "输出树修改不得污染输入树（零共享嵌套引用）"
+    # (2) tuple 否证：顶层 / 嵌套 / dict 键值内一律拒绝（不得静默转 list）
+    with pytest.raises(HermesProtocolError, match="tuple"):
+        hermes_module._deep_freeze_json((1, 2))
+    with pytest.raises(HermesProtocolError, match="tuple"):
+        hermes_module._deep_freeze_json({"argv": ("echo", "hi")})
+    with pytest.raises(HermesProtocolError, match="tuple"):
+        hermes_module._deep_freeze_json({"deep": {"argv": [{"x": (1,)}]}})
+    # (3) 帧路径：tuple → approval_args_not_canonical（零 16D 请求、仅 deny 转发）
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract(contract_id="wc_16c_p5_tuple")
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_gates=_make_gates(broker, contract))
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id)
+    record = _p5_run_record(contract)
+    n_requested = len(_requested_events(broker))
+    assert backend._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo tup", "argv": ("echo", "hi")}) == \
+        (None, "approval_args_not_canonical"), "tuple 顶层出现必须 fail-closed"
+    assert backend._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo tup2", "opts": {"argv": ["ok", ("a", "b")]}}) == \
+        (None, "approval_args_not_canonical"), "嵌套 tuple 必须 fail-closed"
+    assert len(_requested_events(broker)) == n_requested, "tuple 帧零 16D 请求"
+    assert _onces_for(server, run_id) == [], "tuple 帧零 once"
+    assert len(_denies_for(server, run_id)) == 2, "tuple 帧仅自动 deny 转发"
+    # 对照：等价 list 帧是合法 JSON 值域 → 正常建立审批（正例不回归）
+    a, r = backend._handle_approval_request(
+        run_id, record,
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo list-ok", "argv": ["echo", "hi"]})
+    assert a and r is None, f"等价 list 帧必须正常建立审批: {(a, r)}"
     backend.close()
