@@ -2,11 +2,11 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED — Reviewer Patch 2（审批接口 Recon Gate PASS +
-                                 六组 blocker 修复完成 + 全量测试通过，等待外部验收；
-                                 不声明 16C_PASS）
-BASE_SHA                       = 9e79fc30b02610c5314669eb458572492e63379b
-                                 （16C Reviewer Patch 1 提交；本 patch 唯一父提交）
+STATUS                         = EXECUTED — Reviewer Patch 3（16D 四层 Gate 恢复 +
+                                 工具面全等闭合 + HTTP 真正有界 + 12 项 reviewer 专项
+                                 测试新增，全量测试通过，等待外部验收；不声明 16C_PASS）
+BASE_SHA                       = 667ffab32cfc785cfb46754272efe0f05bcb936c
+                                 （16C Reviewer Patch 2 提交；本 patch 唯一父提交）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，
                                  沿用 16A/16B/16D/16E 惯例）
 BRANCH                         = feature/phase16-16c-hermes-api-adapter
@@ -43,8 +43,11 @@ CAPABILITY_ENVELOPE_CLOSED     = true（Reviewer Patch 1：capability envelope �
                                  须命中构造期封闭 tool→capability 映射（值 ∉ envelope
                                  构造期拒绝）且 capability ∈ 契约 allowed_capabilities，
                                  否则自动 deny——不向用户制造 16D 可扩权审批）
-HERMES_CAPABILITY_ISOLATION    = AVAILABLE（Reviewer Patch 2 收紧为**精确封闭**：
-                                 构造期冻结不可变 expected_profile_tools——每个
+HERMES_CAPABILITY_ISOLATION    = AVAILABLE（Reviewer Patch 2 收紧为**精确封闭** +
+                                 Patch 3 **全等闭合**：构造期冻结不可变
+                                 expected_profile_tools——**set(tool_capability_map.keys())
+                                 == set(expected_profile_tools)**（多映射/少映射/未知
+                                 映射/空白/未规范化名字一律构造期拒绝），每个
                                  expected tool 必须有 tool→capability 归属、归属
                                  capability 集与 backend envelope 封闭一致；成功 probe
                                  必须同时满足 capabilities.model ==
@@ -60,8 +63,10 @@ HERMES_CAPABILITY_ISOLATION    = AVAILABLE（Reviewer Patch 2 收紧为**精确�
                                  api_server——服务器端权威工具面证据。已知边界如实
                                  登记：POST /v1/runs 无 per-run toolset 参数，run 侧
                                  工具面由服务器 profile 决定——适配器以 probe 精确
-                                 快照 + submit 前置新鲜 probe 门 + 审批面封闭映射
-                                 双向封闭，不用自然语言 instructions 假装隔离）
+                                 快照 + submit 前置新鲜 probe 门 + 审批面**三重封闭**
+                                 （tool ∈ probe 快照 ∩ expected ∩ 映射，任一不满足即
+                                 fail-closed deny、零 16D 请求）双向封闭，不用自然
+                                 语言 instructions 假装隔离）
 ACTIVE_HANDSHAKE_VERIFIED      = true（Reviewer Patch 1 扩展：probe = /health +
                                  /v1/capabilities（Bearer + profile 绑定）+
                                  /v1/toolsets（Bearer + 工具面快照）+ 不存在 probe
@@ -96,29 +101,47 @@ APPROVAL_OPERATION_EXACT       = true（Reviewer Patch 1：(tool, preview) 有�
                                  全量减传输层字段）现场计算——同 tool 同 preview
                                  不同 command 必然不同 approval_id；相同操作帧幂等
                                  复用；零 str() coercion、零截断参与授权身份；帧时刻
-                                 冻结完整操作身份入账本，resolve 边界以此复核）
-APPROVAL_PERMIT_AT_REMOTE_BOUNDARY = true（Reviewer Patch 2：**审批接口 Recon Gate
-                                 PASS**——frozen 16D 公开 API（决策面
-                                 create_permit_issuer + producer 面 consume_permit，
-                                 与 Gate 的 issuer 注入模式同构）足以表达外部 Hermes
-                                 执行边界，未触发
-                                 BLOCKED_BY_16D_EXTERNAL_ACTION_PERMIT_GAP；once 顺序
-                                 重构为 decision → **立即边界原子 permit 消费** →
-                                 POST：经组合根注入的 PermitIssuer（按 contract_id/
-                                 content_hash 绑定；运行期注册仅 owner 线程）签发
-                                 permit，broker.consume_permit 在发送 once 的立即边界
-                                 单锁原子复核 contract_id/hash + run_id + tool +
-                                 capability + 原始 args（HMAC operation digest 重算）+
-                                 approval/grant 状态后**单点提交**——仅消费成功才
-                                 POST once；决议与远端边界之间撤销 → 消费失败 →
-                                 fail-closed deny 绝不 once；issuer 缺失/hash 绑定
-                                 不符同样绝不 once；"POST 后 broker.consume" 已废除）
-APPROVAL_CAPACITY_ATOMIC       = true（Reviewer Patch 2：approval 容量检查、预留、
-                                 broker 请求创建、approval_id 入账构成单锁协调封闭
-                                 状态机——len(账本)+在途预留 ≤ cap 恒成立；并发 cap=1
-                                 攻击最终索引 ≤1；容量失败**先于** broker 创建 deny，
-                                 绝不遗留第二个可用 16D request；每条失败路径精确
-                                 归还预留恰一次；Hermes 只收到 fail-closed deny）
+                                 冻结完整操作身份入账本，resolve 边界以此复核；
+                                 Patch 3：请求创建收拢到 ApprovalGate 内部——provenance
+                                 = "executor"（16D frozen），适配器不再直接调用
+                                 broker.get_or_create_request）
+APPROVAL_GATE_FOUR_LAYER       = true（Reviewer Patch 3：approval.request 一律经
+                                 对应契约 ApprovalGate.check_step 四层判定——完整
+                                 WorkContract（submit 账本冻结）∩ 实时
+                                 permission_decider 的 PermissionDecision ∩ explicit
+                                 approval/grant ∩ backend capability（冻结 envelope）；
+                                 risk 下界 L2、wait_for_approval=false；**仅
+                                 APPROVAL_PENDING 建立待审批记录**；resolve 时重新
+                                 取得实时 PermissionDecision 并再次调用同一
+                                 Gate.check_step——GateResult=ALLOW 且携带 permit、
+                                 随后 gate.consume_permit 原子消费成功才 POST once；
+                                 Gate 任何 DENY/撤销/超时/PM 拒绝或降级/契约 hash
+                                 不匹配/permit 消费失败 → deny 绝不 once；
+                                 APPROVE_SESSION 仍只收窄转发 once）
+PERMISSION_MANAGER_REAL        = true（Reviewer Patch 3：构造期注入 permission_decider
+                                 （(tool, capability, raw_args, contract_id, run_id) →
+                                 PermissionDecision）——decider 缺失/异常/非
+                                 PermissionDecision/granted=false 一律 fail-closed deny，
+                                 **绝不手造 PermissionDecision 冒充 PM 结果**（要求 9）；
+                                 risk 下界 L2 只作审批必须性的下界，PM 结果仍为
+                                 effective 上限（Gate 内 max 语义，调用方不得降级））
+PM_RECHECK_AT_REMOTE_BOUNDARY  = true（Reviewer Patch 3：resolve 边界**重新取得实时
+                                 PermissionDecision** 并再次调用同一 Gate.check_step
+                                 ——approval 后、POST 前 PM 由 allow 变 deny → Gate
+                                 DENY_PERMISSION → 零 once；PM 降级同判 deny）
+DIRECT_PERMIT_ISSUER_USE       = false（Reviewer Patch 3：Hermes **不再直接持有/
+                                 注册/调用 PermitIssuer**——构造参数 permit_issuers、
+                                 register_permit_issuer、_permit_at_boundary 全部删除；
+                                 permit 签发只存在于 16D ApprovalGate 内部（四层判定
+                                 ALLOW 后经内部 issuer 签发）；源码结构 AST 断言锁定
+                                 （无 PermitIssuer 名称/issue 调用/create_permit_issuer/
+                                 register 路径），零绕过 Gate 直接使用 issuer 的代码路径）
+APPROVAL_CAPACITY_ATOMIC       = true（Reviewer Patch 2 + Patch 3：approval 容量检查、
+                                 预留、Gate 内请求创建、approval_id 入账构成单锁协调
+                                 封闭状态机——len(账本)+在途预留 ≤ cap 恒成立；并发
+                                 cap=1 攻击最终索引 ≤1；容量失败**先于** Gate 调用
+                                 deny，绝不遗留第二个可用 16D request；每条失败路径
+                                 精确归还预留恰一次；Hermes 只收到 fail-closed deny）
 APPROVAL_FORWARD_EXACTLY_ONCE  = true（Reviewer Patch 1：同一 approval 顺序重复/
                                  并发 resolve 只有首个调用 POST（先占位守卫）；
                                  其余 typed no-op（forwarded=False）绝不二次 POST；
@@ -164,17 +187,25 @@ LEDGER_CARDINALITY_BOUNDED     = true（Reviewer Patch 1 + Patch 2：contract/ru
                                  返回既有 handle 且零新 POST（不诱导旧 contract
                                  重新执行）；approval 满容量新请求自动 deny 且不
                                  建立 16D 请求；run 满容量 POST 前预留失败零 POST）
-STRICT_MEDIA_TYPE              = true（Reviewer Patch 2：只接受精确媒体类型
+STRICT_MEDIA_TYPE              = true（Reviewer Patch 2 + Patch 3：只接受精确媒体类型
                                  application/json（type/subtype 精确相等，大小写
                                  不敏感；参数仅容 charset=<token>）；
                                  application/jsonp、text/application/json-evil、
-                                 非 charset/无值参数一律类型化拒绝）
-BOUNDED_ERROR_BODY             = true（Reviewer Patch 2：全部普通 JSON 响应**流式/
-                                 有界读取**（> 4 MiB 立即停止读取并拒绝，超限内容
+                                 非 charset/无值参数一律类型化拒绝；**错误码/诊断
+                                 片段 JSON 同样要求精确 application/json**——
+                                 text/plain 承载的 run_not_found / approval_not_pending
+                                 **绝不**当作已知错误码）
+BOUNDED_ERROR_BODY             = true（Reviewer Patch 2 + Patch 3 收紧：全部普通 JSON
+                                 响应**流式/有界读取**（> 4 MiB 立即拒绝，超限内容
                                  不入异常）；_error_code_of 复用有界严格 JSON 读取
                                  （错误体 ≤ 64 KiB，超限只留 [error body over limit]
                                  标记；JSON 严格解析，形状损坏 → code=None 不吞掉）；
-                                 绝不在检查上限前读取 response.text/json）
+                                 绝不在检查上限前读取 response.text/json；**读取
+                                 中断绝不返回已读前缀**（即使前缀恰好是合法 JSON 也
+                                 一律类型化拒绝——TRUNCATED_JSON_REJECTED）；
+                                 **单 chunk 在 extend 前检查余量**（绝不先分配超限
+                                 内存——CHUNK_PREALLOCATION_BOUNDED）；
+                                 超限/中断内容绝不进入异常文本、日志或保留缓冲）
 STATUS_RUN_ID_BOUND            = true（Reviewer Patch 1：lifecycle/reconcile 的
                                  status 响应严格封闭——object==hermes.run + run_id
                                  精确相等 + 状态词表校验；缺失/冲突/词表外 →
@@ -224,41 +255,49 @@ DIRECT_DIALOGUE_BYPASS         = false（submit 只发送 canonical_user_request
                                  payload 证据，经 16E 信封，绝不直达对话）
 
 PRODUCTION_FILES_CHANGED       = furina/agent/backend/hermes.py（Reviewer Patch 1
-                                 重写 + Patch 2 六组收紧：审批边界 permit 化（issuer
-                                 注入 + consume_permit 立即边界原子消费）、
-                                 expected_profile_tools/contract_authorizer/
-                                 permit_issuers 构造期封闭、submit 新鲜 probe 门、
-                                 run 账本 POST 前预留 + run_id 冲突不覆盖、approval
-                                 容量封闭状态机、events/stop correlation 校验、
-                                 精确媒体类型 + 全端点流式有界读取；
-                                 furina/agent/backend/__init__.py 零改动）；
-                                 frozen C1–C7/16A/16B/16D/16E 零改动
+                                 重写 + Patch 2 六组收紧 + Patch 3 三组收紧：
+                                 16D 四层 Gate 恢复（approval_gates + permission_decider
+                                 构造注入；PermitIssuer 直接持有/注册/issue 全部删除；
+                                 approval.request 与 resolve 一律经 ApprovalGate.
+                                 check_step + gate.consume_permit 立即边界原子消费）、
+                                 工具面全等闭合（set(映射键)==set(expected_profile_tools)，
+                                 审批面三重封闭）、HTTP 真正有界（读异常抛类型化错误
+                                 零前缀、单 chunk extend 前检查余量、错误码 JSON 严格
+                                 媒体类型、text/plain 错误码不认）；保留 Patch 1/2
+                                 全部边界（expected_profile_tools/contract_authorizer
+                                 构造期封闭、submit 新鲜 probe 门、run 账本 POST 前
+                                 预留 + run_id 冲突不覆盖、approval 容量封闭状态机、
+                                 events/stop correlation 校验、精确媒体类型 + 全端点
+                                 流式有界读取）；furina/agent/backend/__init__.py 零
+                                 改动）；frozen C1–C7/16A/16B/16D/16E 零改动
 TEST_FILES_CHANGED             = tests/agent/integration/test_phase16c_hermes_api_
-                                 adapter.py（Reviewer Patch 1 36 项 + Patch 2 新增
-                                 12 项 reviewer 专项 = 48 项；既有用例按新构造面
-                                 （authorizer/expected_profile_tools/issuer 注入/
-                                 preprobe）与 run 容量新语义准确升级）
-TARGETED_TESTS                 = 16C 专项 48 passed（Patch 1 全量 36 项保持通过 +
-                                 Patch 2 新增 12 项：未 probe submit 零 POST、probe
-                                 过期 submit 零 POST、toolsets 多/少/未知/坏类型/
-                                 platform 越界 unhealthy + 精确相等正例、
-                                 expected_profile_tools 构造期封闭矩阵、撤销落在
-                                 decision 与 POST 边界之间绝不 once（consume_permit
-                                 入口注入撤销 + issuer 缺失同样绝不 once）、run
-                                 ledger cap=1 第二次提交零 POST、两 contract 同
-                                 run_id 不覆盖 + 原 owner 事件归属不变、伪造
-                                 correlation events/stop 拒绝零 HTTP、approval
-                                 cap=1 并发攻击最终索引 ≤1 且零第二个 16D request、
-                                 未授权合法自哈希 WorkContract 零 HTTP（含 authorizer
-                                 异常/非 True/hash 不同）、application/jsonp 与
-                                 text/application/json-evil 及非 charset 参数拒绝 +
-                                 charset 正例、202 超 4MiB 与 500 超 64KiB 有界且
-                                 超限内容不入异常 + 小错误体片段正例）
+                                 adapter.py（Reviewer Patch 1 36 项 + Patch 2 12 项
+                                 + Patch 3 12 项 = 60 项；Patch 3 既有用例按新构造面
+                                 （approval_gates/permission_decider 注入取代
+                                 permit_issuers）与 Gate 流程准确升级——approval 专项
+                                 全部走 16D Gate 四层判定）
+TARGETED_TESTS                 = 16C 专项 60 passed（Patch 1/2 全量 48 项保持通过 +
+                                 Patch 3 新增 12 项：PM DENY + 用户 APPROVE_ONCE →
+                                 Hermes 只收 deny、PM 在 approval 后 POST 前由 allow
+                                 变 deny → 零 once、源码结构断言无 PermitIssuer.issue/
+                                 直接 issuer 注册路径（AST 级）、Gate 契约/hash 不匹配
+                                 → 零 once、Gate ALLOW + permit 原子消费 → 恰好一个
+                                 once、extra tool_capability_map 构造期拒绝（多/未知/
+                                 空白未规范化名字）、approval.request 使用 expected 外
+                                 工具 → 零 request + deny、202 先给合法 JSON 前缀随后
+                                 读取中断 → 拒绝（reservation 中毒零重提）、单 chunk
+                                 超上限 → extend 前拒绝（白盒记录 extend 长度）、
+                                 text/plain 的 run_not_found/approval_not_pending →
+                                 拒绝（probe unhealthy + 409 协议错误）、application/
+                                 json 正常错误码无回归、Patch 2 四组锁定测试（run
+                                 capacity/run_id collision/contract authorizer/fresh
+                                 probe）保持）
 BACKEND_PERMISSION_REGRESSION  = 16A/16B/16D/16E 四套件 251 passed + tests/agent
-                                 全量回归 380 passed（16C 专项 Patch 2 新增 12 项计入；
-                                 frozen 16D 公开 API 零改动即完成外部边界表达）
+                                 全量回归 392 passed（16C 专项 Patch 3 新增 12 项计入；
+                                 frozen 16D 公开 API 零改动即完成外部边界表达——未触发
+                                 BLOCKED_BY_16D_EXTERNAL_GATE_API_GAP）
 COGNITION_SUITE                = 279 passed
-FULL_SUITE                     = 1662 passed（0 failed；一次完整运行；15 条
+FULL_SUITE                     = 1674 passed（0 failed；一次完整运行；15 条
                                  warning 全部来自既有 tests/test_agent_tools.py
                                  子进程 reader 编码问题，与本 patch 无关）
 GIT_DIFF_CHECK                 = clean（git diff --check 零输出）
@@ -266,20 +305,55 @@ OPTIONAL_LIVE_SMOKE            = NOT_RUN/NOT_REQUIRED（Recon 阶段已对本机
                                  0.20.6 做只读 loopback 实测；本 patch 全部行为由
                                  fake server 按实测协议锁定）
 REMAINING_GAPS                 = (1) 实机 approval.request SSE 帧未 live 触发——帧
-                                 形状取自 Hermes 源码，适配器解析/16D 转发行为由
-                                 fake server 锁定；(2) run 侧工具面由服务器 profile
+                                 形状取自 Hermes 源码，适配器解析/16D Gate 转发行为
+                                 由 fake server 锁定；(2) run 侧工具面由服务器 profile
                                  配置决定（POST /v1/runs 无 per-run toolset 参数），
                                  适配器以 profile 身份绑定 + /v1/toolsets 快照 +
-                                 envelope 封闭相等 + 审批面工具级封闭映射双向封闭；
+                                 envelope 封闭相等 + 审批面工具级三重封闭双向封闭；
                                  服务器 profile 本身的 toolset 收敛属部署配置责任，
                                  已在 closeout 登记边界；(3) 非 202 明确拒绝可由
                                  操作方重新尝试，而结果不确定的 submit 永久中毒——
                                  durable 恢复/对账语义归 16H；(4) 断线/UNKNOWN 的
                                  run 诚实保留并发槽位（不淘汰不重复执行），槽位
                                  生命周期终局归 16H；(5) 远端（非 loopback）端点 +
-                                 TLS 策略在本 brief 默认面之外，未实现。
+                                 TLS 策略在本 brief 默认面之外，未实现；(6) 契约
+                                 Gate 由组合根构造期注入（contract_id → ApprovalGate），
+                                 动态新增契约需组合根同步注入对应 Gate，未注入契约
+                                 审批一律 fail-closed deny（如实登记的部署边界）。
 READY_FOR_REVIEW               = YES（不声明 16C_PASS）
 ```
+
+## Reviewer Patch 3 修复摘要（BASE 667ffab，2026-08-28）
+
+1. **恢复 16D 四层 Gate（三组 blocker 之首）**：删除 Hermes 对 PermitIssuer 的直接
+   持有、注册（`register_permit_issuer`）与 `issue` 调用（构造参数 permit_issuers
+   移除；源码结构 AST 断言锁定）；改由构造期注入 `approval_gates: contract_id →
+   ApprovalGate` 与 `permission_decider: (tool, capability, raw_args, contract_id,
+   run_id) → PermissionDecision`。approval.request 到达时经对应契约
+   `ApprovalGate.check_step` 四层判定（完整 WorkContract（submit 账本冻结）+ 真实
+   原始 args + **实时** PermissionDecision + 冻结 capability envelope；risk 下界 L2
+   ——PM 结果仍为 effective 上限，调用方不得降级；wait_for_approval=false）；
+   **仅 APPROVAL_PENDING 建立待审批记录**（approval 账本容量/预留/入账封闭状态机
+   保持）。resolve 时**重新取得实时 PermissionDecision 并再次调用同一
+   Gate.check_step**——GateResult=ALLOW 且携带 permit、随后 `gate.consume_permit`
+   在发送 once 的立即边界原子复核+单点提交成功，才 POST once；Gate 任何 DENY
+   （PM 拒绝/降级、契约/hash 不匹配、撤销、超时、已消费）、permit 消费失败 →
+   fail-closed deny 绝不 once；APPROVE_SESSION 仍只收窄转发 once。16D
+   ApprovalGate/ApprovalBroker/PermitIssuer 及全部 16D 文件**零改动**——未触发
+   `BLOCKED_BY_16D_EXTERNAL_GATE_API_GAP`（Gate 公开 API check_step/GateResult/
+   consume_permit 完整表达四层流程）。
+2. **工具面全等闭合**：构造期强制 `set(tool_capability_map.keys()) ==
+   set(expected_profile_tools)`——多映射/少映射/未知映射/空白或未规范化名字全部
+   构造期拒绝（Patch 2 的无归属/归属集≠envelope 检查保持）；approval.request 处理
+   时再次要求 tool ∈ probe 快照 ∩ expected_profile_tools ∩ tool→capability 映射，
+   任一不满足 → 自动 deny、零 16D 请求。
+3. **HTTP 真正有界**：`_bounded_body` 读取过程任何异常一律抛类型化 transport 错误
+   （**绝不返回已读前缀**——即使前缀恰好是合法 JSON 也不得接受，202 前缀+断流用例
+   锁定）；单 chunk 在 `extend` **前**检查余量（`len(chunk) > remaining` 立即拒绝，
+   白盒记录 extend 长度断言不先分配超限内存）；普通 JSON 与错误码 JSON **均**要求
+   精确 application/json 媒体类型——text/plain 承载的 run_not_found /
+   approval_not_pending 绝不当作已知错误码（probe 握手 unhealthy + approval 409
+   协议错误用例锁定）；超限/中断内容绝不进入异常文本、日志或保留缓冲。
 
 ## Reviewer Patch 2 修复摘要（BASE 9e79fc3，2026-08-28）
 

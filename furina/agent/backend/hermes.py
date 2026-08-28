@@ -65,26 +65,38 @@
   的 run_id 已属另一契约 → 不覆盖既有归属（原 owner/槽位/事件归属不变），本契约 reservation
   中毒 + typed conflict；events/stop 校验 ``handle.correlation == 契约 id``；events/
   reconcile 路径零 POST /v1/runs；
-- **approval 只走 16D 公开接口**：SSE approval.request 的 tool 必须映射到构造期
-  tool→capability 封闭映射、且该 capability ∈ 契约 allowed_capabilities，否则
-  **自动 deny（fail-closed，不向用户制造 16D 审批请求）**；映射成功经
-  ``broker.get_or_create_request`` 原子 get-or-create（完整身份含 operation_digest——
-  同 tool 同 preview 不同 command ⇒ 不同 approval）；approval 账本容量/预留/broker 创建/
-  入账为封闭状态机（并发 cap=1 最终索引 ≤1；容量失败不遗留可用 16D request，Hermes 只收
-  fail-closed deny）；决议只消费 ``broker.wait_for_resolution`` 的**真实 Furina 决议**；
-  **once 转发边界 = 16D 真实原子 permit/消费语义（Patch 2）**：经组合根注入的
-  ``PermitIssuer``（决策面 ``create_permit_issuer`` 创建）签发 permit，在发送 once 的
-  **立即边界** ``broker.consume_permit`` 单锁原子复核 contract_id/hash + run_id + tool +
-  capability + 原始 args + approval/grant 状态后单点提交——仅消费成功才 POST once；
-  决议与远端边界之间的撤销 → 消费失败 → fail-closed deny，绝不发送 once（"POST 后
-  broker.consume" 已废除）；转发只允许 ``once``/``deny``——**绝不发送 always/session**
-  （不放宽 16D 决议）；同一 approval 只向 Hermes 转发一次（并发 resolve 单请求获胜；
-  第二次调用 typed no-op）；``resolved==1`` 精确才声明成功；409 仅在错误码精确为
-  ``approval_not_pending`` 时视为 no-op；
-- **HTTP 严格边界（Patch 2）**：只接受精确媒体类型 ``application/json``（可带
-  ``; charset=…`` 参数；application/jsonp、text/application/json-evil、非 charset 参数
-  一律拒绝）；全部普通 JSON 响应**流式/有界读取**（> 4 MiB 立即拒绝，超限内容不入
-  异常）；错误码/诊断片段读取同样有界（64 KiB；超限只留标记）；
+- **approval 只走 16D 四层 Gate（Reviewer Patch 3）**：SSE approval.request 的 tool
+  必须通过**工具面三重封闭**（tool ∈ 最近 probe 快照 / 构造期 expected_profile_tools /
+  封闭 tool→capability 映射）且映射 capability ∈ 契约 allowed_capabilities，否则
+  **自动 deny（fail-closed，不向用户制造 16D 审批请求）**；此后经**对应契约的
+  ApprovalGate**（构造期注入 ``approval_gates: contract_id → ApprovalGate``）四层判定
+  （WorkContract scope ∩ 实时 PermissionManager decision ∩ explicit approval/grant ∩
+  backend capability）——``permission_decider``（构造期注入，签名
+  (tool, capability, raw_args, contract_id, run_id) → PermissionDecision）返回**真实
+  PermissionDecision**（decider 缺失/异常/非 PermissionDecision/granted=false 一律
+  deny，绝不手造 PM 结果）；Gate 的 ``check_step`` 使用 submit 账本冻结的**完整
+  WorkContract** + **真实原始 args** + 实时 PermissionDecision + 冻结 capability
+  envelope，risk 下界 L2（PM 结果仍为下界上限，调用方不得降级）、wait_for_approval=
+  false；**仅 APPROVAL_PENDING 建立待审批记录**（approval 账本容量/预留/入账封闭
+  状态机，并发 cap=1 最终索引 ≤1）；**resolve 时重新取得实时 PermissionDecision 并
+  再次调用同一 Gate.check_step**——只有 GateResult=ALLOW 且携带 permit、随后
+  ``gate.consume_permit`` 在发送 once 的**立即边界**原子复核（contract_id/hash +
+  run_id + tool + capability + 原始 args + approval/grant 状态）+ 单点提交成功，才
+  POST once；Gate 任何 DENY（PM 降级/拒绝、契约/hash 不匹配、撤销、超时、已消费）、
+  permit 消费失败 → fail-closed deny，绝不发送 once；**本适配器不直接持有/注册/调用
+  PermitIssuer**（permit 签发只存在于 Gate 内部，Patch 3 删除 issuer 注入面）；
+  APPROVE_SESSION 决议仍只收窄转发 once（不放宽 16D 决议）；转发只允许
+  ``once``/``deny``——**绝不发送 always/session**；同一 approval 只向 Hermes 转发一次
+  （并发 resolve 单请求获胜；第二次调用 typed no-op）；``resolved==1`` 精确才声明成功；
+  409 仅在错误码精确为 ``approval_not_pending`` 时视为 no-op；
+- **HTTP 严格边界（Patch 2 + Patch 3 收紧）**：只接受精确媒体类型
+  ``application/json``（可带 ``; charset=…`` 参数；application/jsonp、
+  text/application/json-evil、非 charset 参数一律拒绝）；全部普通 JSON 响应**流式/
+  有界读取**（> 4 MiB 立即拒绝，超限内容不入异常）；**错误码/诊断片段读取同样有界
+  （64 KiB；超限只留标记）且同样要求精确 application/json**——text/plain 承载的
+  run_not_found/approval_not_pending 绝不当作已知错误码；单 chunk 在 extend **前**
+  检查余量（绝不先分配超限内存）；读取中断绝不接受已读前缀（即使前缀恰好是合法
+  JSON 也一律类型化拒绝）；
 - ``hermes proxy`` 不注册、CLI 仅诊断、webhook 不作为结果通道：本模块没有任何对应代码路径。
 
 全部 buffer 有硬上限（SSE 行 256 KiB、单事件 payload 有界、JSON body 有界、
@@ -105,9 +117,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from furina.agent.approval import ApprovalBroker, ApprovalStateError, PermitIssuer
-from furina.agent.approval.models import ApprovalDecisionKind, ResolutionStatus
-from furina.agent.permission import Permission
+from furina.agent.approval import ApprovalBroker, ApprovalGate, ApprovalStateError, GateVerdict
+from furina.agent.approval.models import ResolutionStatus
+from furina.agent.permission import Permission, PermissionDecision
 from furina.agent.work_contract import WorkContract, WorkContractValidationError
 from furina.core import get_logger
 
@@ -280,18 +292,21 @@ def _plain_tree(obj: Any) -> Any:
 # ---------------------------------------------------------------------------
 class _RunRecord:
     """hermes run_id → 契约身份（进程内；无持久化；无审批缓存——审批身份唯一权威
-    在 16D broker 的完整身份原子 get-or-create）。"""
+    在 16D broker 的完整身份原子 get-or-create）。``contract`` 保留 submit 时经 16A
+    校验的完整 WorkContract，供审批面 Gate 四层判定使用（Reviewer Patch 3）。"""
 
     __slots__ = ("contract_id", "content_hash", "allowed_capabilities", "stopped",
-                 "slot_released")
+                 "slot_released", "contract")
 
     def __init__(self, contract_id: str, content_hash: str,
-                 allowed_capabilities: Tuple[str, ...]) -> None:
+                 allowed_capabilities: Tuple[str, ...],
+                 contract: Optional[WorkContract] = None) -> None:
         self.contract_id = contract_id
         self.content_hash = content_hash
         self.allowed_capabilities = tuple(allowed_capabilities)
         self.stopped = False
         self.slot_released = False
+        self.contract = contract
 
 
 class _ApprovalOpRecord:
@@ -383,7 +398,10 @@ class HermesExecutionBackend(ExecutionBackend):
         tool_capability_map: Mapping[str, str],
         contract_authorizer: Callable[[str, str], bool],
         capability_ids: Tuple[str, ...] = (),
-        permit_issuers: Optional[Mapping[str, PermitIssuer]] = None,
+        approval_gates: Optional[Mapping[str, ApprovalGate]] = None,
+        permission_decider: Optional[
+            Callable[[str, str, Mapping[str, Any], str, str], PermissionDecision]
+        ] = None,
         probe_ttl_seconds: float = 30.0,
         max_concurrent_runs: int = 1,
         max_tracked_contracts: int = _MAX_TRACKED_CONTRACTS,
@@ -419,6 +437,10 @@ class HermesExecutionBackend(ExecutionBackend):
                 raise HermesConfigurationError(f"tool_capability_map 键非法: {tool!r}")
             if not isinstance(cap, str) or not cap.strip():
                 raise HermesConfigurationError(f"tool_capability_map[{tool!r}] 值非法: {cap!r}")
+            if tool != tool.strip() or cap != cap.strip():
+                raise HermesConfigurationError(
+                    f"tool_capability_map 键/值未规范化: {tool!r}→{cap!r}"
+                    "（空白/未规范化名字一律拒绝）")
             if cap not in envelope:
                 raise HermesConfigurationError(
                     f"tool_capability_map[{tool!r}] → {cap!r} 不在本 backend 显式 envelope "
@@ -440,6 +462,10 @@ class HermesExecutionBackend(ExecutionBackend):
             if not isinstance(tool, str) or not tool.strip():
                 raise HermesConfigurationError(
                     f"expected_profile_tools 条目必须是非空 str，得到 {tool!r}")
+            if tool != tool.strip():
+                raise HermesConfigurationError(
+                    f"expected_profile_tools 条目未规范化: {tool!r}"
+                    "（空白/未规范化名字一律拒绝）")
             if tool in seen_tools:
                 raise HermesConfigurationError(
                     f"expected_profile_tools 出现重复条目 {tool!r}（封闭集合语义，拒绝）")
@@ -455,32 +481,45 @@ class HermesExecutionBackend(ExecutionBackend):
                 f"expected 工具的 capability 归属集 {sorted(attributed)} 与本 backend "
                 f"capability envelope {sorted(envelope)} 非封闭一致（每个 envelope 能力都必须"
                 "由至少一个 expected tool 归属，且归属不得越出 envelope）")
+        extra_mapped = sorted(set(frozen_map) - seen_tools)
+        if extra_mapped:
+            raise HermesConfigurationError(
+                f"tool_capability_map 存在超出 expected_profile_tools 的映射键 {extra_mapped}"
+                "（工具面必须精确封闭相等：set(映射键) == set(expected_profile_tools)，"
+                "多/少/未知映射一律构造期拒绝）")
         # -- 可信 contract authorizer（组合根注入；submit 前按 id+integrity hash 精确确认）--
         if not callable(contract_authorizer):
             raise HermesConfigurationError(
                 "contract_authorizer 必须是 callable（contract_id, content_hash）→ bool："
                 "由可信组合根确认该契约已获授权；缺失即拒绝构造（integrity hash 不声明"
                 "授权真实性）")
-        # -- permit issuers（16D 决策面创建、组合根注入；外部执行边界的 permit 来源）----
-        if permit_issuers is not None and not isinstance(permit_issuers, Mapping):
+        # -- permit issuers 删除（Reviewer Patch 3）：本适配器不直接持有/注册/调用
+        #    PermitIssuer——permit 签发只存在于 16D ApprovalGate 内部（四层判定 ALLOW
+        #    后由 Gate 经内部 issuer 签发）；构造期只注入 ``contract_id → ApprovalGate``
+        #    判定器与实时 ``permission_decider``（真实 PermissionManager 决策来源）。--
+        if approval_gates is not None and not isinstance(approval_gates, Mapping):
             raise HermesConfigurationError(
-                f"permit_issuers 必须是 contract_id → PermitIssuer Mapping 或 None，得到 "
-                f"{type(permit_issuers).__name__}")
-        frozen_issuers: Dict[str, PermitIssuer] = {}
-        if permit_issuers:
-            for cid, issuer in permit_issuers.items():
+                f"approval_gates 必须是 contract_id → ApprovalGate Mapping 或 None，"
+                f"得到 {type(approval_gates).__name__}")
+        frozen_gates: Dict[str, ApprovalGate] = {}
+        if approval_gates:
+            for cid, gate in approval_gates.items():
                 if not isinstance(cid, str) or not cid.strip():
-                    raise HermesConfigurationError(f"permit_issuers 键非法: {cid!r}")
-                if not isinstance(issuer, PermitIssuer):
+                    raise HermesConfigurationError(f"approval_gates 键非法: {cid!r}")
+                if not isinstance(gate, ApprovalGate):
                     raise HermesConfigurationError(
-                        f"permit_issuers[{cid!r}] 必须是 PermitIssuer（经 "
-                        f"broker.create_permit_issuer 于决策面创建），得到 "
-                        f"{type(issuer).__name__}")
-                if issuer.expected_contract_id != cid:
-                    raise HermesConfigurationError(
-                        f"permit_issuers 键 {cid!r} 与 issuer 内部绑定 "
-                        f"{issuer.expected_contract_id!r} 不一致（身份精确绑定，拒绝）")
-                frozen_issuers[cid] = issuer
+                        f"approval_gates[{cid!r}] 必须是 ApprovalGate（16D 四层判定器，"
+                        "由可信组合根以 owner 线程经 broker.create_permit_issuer 创建的"
+                        " issuer 构造），得到 "
+                        f"{type(gate).__name__}")
+                frozen_gates[cid] = gate
+        if permission_decider is not None and not callable(permission_decider):
+            raise HermesConfigurationError(
+                "permission_decider 必须是 callable"
+                "（tool, capability, raw_args, contract_id, run_id）→ PermissionDecision；"
+                "缺失/非法 → 审批一律 fail-closed deny（绝不手造 PM 结果）")
+        self._approval_gates: Dict[str, ApprovalGate] = frozen_gates
+        self._permission_decider = permission_decider
         if (isinstance(max_concurrent_runs, bool)
                 or not isinstance(max_concurrent_runs, int) or max_concurrent_runs < 1
                 or max_concurrent_runs > 1024):
@@ -506,7 +545,6 @@ class HermesExecutionBackend(ExecutionBackend):
         self._tool_capability_map: Dict[str, str] = frozen_map
         self._expected_profile_tools: Tuple[str, ...] = tuple(sorted(seen_tools))
         self._contract_authorizer = contract_authorizer
-        self._permit_issuers: Dict[str, PermitIssuer] = frozen_issuers
         self._probe_ttl = _finite_positive("probe_ttl_seconds", probe_ttl_seconds, upper=600.0)
         self._request_timeout = _finite_positive("request_timeout_seconds", request_timeout_seconds)
         self._sse_heartbeat_timeout = _finite_positive(
@@ -575,30 +613,6 @@ class HermesExecutionBackend(ExecutionBackend):
         """构造期冻结的 expected profile 工具面（probe 精确比对的封闭基准；不可变）。"""
         return self._expected_profile_tools
 
-    def register_permit_issuer(self, issuer: PermitIssuer) -> None:
-        """运行期注册 contract 的 PermitIssuer（**仅 broker owner 线程/决策面**）。
-
-        动态授权新契约时由可信组合根调用：issuer 本身只能经
-        ``broker.create_permit_issuer``（owner 线程）创建，producer 线程无法伪造
-        签发能力；同 contract_id 绑定不同 content hash 的 issuer 拒绝注册。
-        未注册 issuer 的契约在审批边界一律 fail-closed deny（绝不 once）。
-        """
-        if not isinstance(issuer, PermitIssuer):
-            raise HermesConfigurationError(
-                f"issuer 必须是 PermitIssuer，得到 {type(issuer).__name__}")
-        if not self._broker.is_owner():
-            raise HermesConfigurationError(
-                "register_permit_issuer 只允许 broker owner 线程（决策面）——"
-                "producer/executor 线程不得注册审批边界能力")
-        with self._lock:
-            existing = self._permit_issuers.get(issuer.expected_contract_id)
-            if existing is not None and existing is not issuer \
-                    and existing.expected_content_hash != issuer.expected_content_hash:
-                raise HermesConfigurationError(
-                    f"contract {issuer.expected_contract_id!r} 已绑定不同 content hash 的 "
-                    "issuer（换约需新 contract_id，拒绝注册）")
-            self._permit_issuers[issuer.expected_contract_id] = issuer
-
     # -- HTTP 客户端（显式生命周期） ------------------------------------------------
     def _get_client(self) -> httpx.Client:
         with self._lock:
@@ -659,18 +673,31 @@ class HermesExecutionBackend(ExecutionBackend):
         except Exception:
             pass
 
-    def _bounded_body(self, response: httpx.Response, limit: int) -> Optional[bytes]:
-        """有界读取：累计超过 ``limit`` 立即停止读取并返回 None（超限内容不进入
-        任何返回值/异常）；读途中传输异常 → 返回已读前缀（调用方严格解析后按
-        协议错误 fail-closed）。"""
+    def _bounded_body(self, response: httpx.Response, limit: int) -> bytes:
+        """有界读取（Reviewer Patch 3 收紧）：
+
+        - 单 chunk 在 ``extend`` **前**检查余量：``len(chunk) > remaining`` → 立即
+          拒绝（绝不先分配超限内存；超限内容绝不进入异常文本/日志/保留缓冲）；
+        - 读取过程任何异常（连接中断/超时/解码）→ 抛类型化 transport 错误，
+          **绝不返回已读前缀**——即使前缀恰好是合法 JSON 也不得接受；
+        - 超限 → 类型化 protocol 错误（消息固定形态，不含任何响应内容）。
+        """
         buf = bytearray()
+        remaining = limit
         try:
             for chunk in response.iter_bytes():
+                if len(chunk) > remaining:
+                    raise HermesProtocolError(
+                        f"hermes 响应 body 超过硬上限 {limit} bytes（流式有界读取，"
+                        "单 chunk 在 extend 前拒绝；超限内容不入异常）")
                 buf.extend(chunk)
-                if len(buf) > limit:
-                    return None
-        except Exception:
-            pass
+                remaining -= len(chunk)
+        except HermesProtocolError:
+            raise
+        except Exception as exc:
+            raise HermesTransportError(
+                f"hermes 响应体读取中断（已读前缀即使合法也绝不接受，fail-closed）: "
+                f"{type(exc).__name__}") from exc
         return bytes(buf)
 
     def _check_json_media_type(self, stage: str, response: httpx.Response) -> None:
@@ -695,14 +722,10 @@ class HermesExecutionBackend(ExecutionBackend):
 
     def _read_json_object(self, stage: str, response: httpx.Response) -> Dict[str, Any]:
         """2xx 已确认的流式响应体严格解析：精确媒体类型 + 有界读取
-        （> _MAX_JSON_BODY_BYTES 立即拒绝，超限内容不入异常）+ 严格 UTF-8/JSON
-        object；任一违反 → 类型化协议错误。"""
+        （> _MAX_JSON_BODY_BYTES 立即拒绝，超限内容不入异常；读取中断/前缀一律
+        类型化拒绝）+ 严格 UTF-8/JSON object；任一违反 → 类型化协议错误。"""
         self._check_json_media_type(stage, response)
         raw = self._bounded_body(response, _MAX_JSON_BODY_BYTES)
-        if raw is None:
-            raise HermesProtocolError(
-                f"hermes {stage} 响应 body 超过硬上限 {_MAX_JSON_BODY_BYTES} bytes"
-                "（流式有界读取，立即拒绝；超限内容不入异常）")
         try:
             body = json.loads(raw.decode("utf-8"))
         except Exception as exc:
@@ -713,13 +736,28 @@ class HermesExecutionBackend(ExecutionBackend):
                 f"hermes {stage} 响应必须是 JSON object，得到 {type(body).__name__}")
         return body
 
-    def _read_error_payload(self, response: httpx.Response) -> Tuple[Optional[str], str]:
-        """非 2xx 错误体的**有界**读取与解析：返回 (error.code, 脱敏片段)。错误体
-        超 _MAX_ERROR_BODY_BYTES → (None, 固定标记)（内容不留存）；JSON 严格解析，
-        形状损坏 → code=None（绝不当作已知码吞掉）。"""
-        raw = self._bounded_body(response, _MAX_ERROR_BODY_BYTES)
-        if raw is None:
+    def _read_error_payload(self, response: httpx.Response, *,
+                            stage: str = "error") -> Tuple[Optional[str], str]:
+        """非 2xx 错误体的**有界**读取与解析（Reviewer Patch 3 收紧）。
+
+        - **普通/错误码 JSON 一律要求精确 application/json 媒体类型**（Patch 3）：
+          text/plain 承载的 run_not_found / approval_not_pending **绝不**当作已知
+          错误码——非严格媒体类型 → (None, 固定标记)，不读取、不保留错误体；
+        - 错误体超 _MAX_ERROR_BODY_BYTES → (None, 固定标记)（内容不留存，不入
+          异常文本/日志/缓冲）；
+        - 读取中断 → (None, 固定标记)（已读前缀即使合法也不接受）；
+        - JSON 严格解析，形状损坏 → code=None（绝不当作已知码吞掉）。
+        """
+        try:
+            self._check_json_media_type(stage, response)
+        except HermesProtocolError:
+            return None, "[error body media type invalid]"
+        try:
+            raw = self._bounded_body(response, _MAX_ERROR_BODY_BYTES)
+        except HermesProtocolError:
             return None, "[error body over limit]"
+        except HermesTransportError as exc:
+            return None, f"[error body unavailable: {type(exc).__name__}]"
         if not raw:
             return None, ""
         code: Optional[str] = None
@@ -735,10 +773,12 @@ class HermesExecutionBackend(ExecutionBackend):
         snippet = self._redact(raw.decode("utf-8", "replace"))[:200]
         return code, snippet
 
-    def _error_code_of(self, response: httpx.Response) -> Optional[str]:
-        """404/409 特殊路径的真实错误码提取（复用有界严格读取；形状损坏/超限 →
-        None，绝不当作已知码吞掉，绝不无界读取 response.text/json）。"""
-        code, _snippet = self._read_error_payload(response)
+    def _error_code_of(self, response: httpx.Response, *,
+                       stage: str = "error") -> Optional[str]:
+        """404/409 特殊路径的真实错误码提取（严格媒体类型 + 有界读取；text/plain
+        承载或形状损坏/超限/读取中断 → None，绝不当作已知码吞掉，绝不无界读取
+        response.text/json）。"""
+        code, _snippet = self._read_error_payload(response, stage=stage)
         return code
 
     # -- 发现：主动握手 probe -----------------------------------------------------
@@ -879,7 +919,7 @@ class HermesExecutionBackend(ExecutionBackend):
                     return _fail("auth_rejected")
                 if response.status_code != 404:
                     return _fail(f"{stage}_endpoint_contradiction:{response.status_code}")
-                if self._error_code_of(response) != "run_not_found":
+                if self._error_code_of(response, stage=stage) != "run_not_found":
                     return _fail(f"{stage}_handshake_contradiction")
             finally:
                 self._close_stream(cm)
@@ -1026,7 +1066,8 @@ class HermesExecutionBackend(ExecutionBackend):
             if existing is None:
                 self._runs[hermes_run_id] = _RunRecord(contract.contract_id,
                                                        contract.content_hash,
-                                                       contract.allowed_capabilities)
+                                                       contract.allowed_capabilities,
+                                                       contract=contract)
             self._runs_reserved -= 1
             reservation.finish(handle=handle)
         return handle
@@ -1281,8 +1322,9 @@ class HermesExecutionBackend(ExecutionBackend):
             if response.status_code == 404:
                 # 传输缓冲已被清除（此前断线/终态清扫）→ 交由 status reconcile。
                 # 404 必须携带精确 run_not_found 错误码，否则按协议矛盾可观察
-                #（错误码经有界严格读取提取）。
-                if self._error_code_of(response) not in (None, "run_not_found"):
+                #（错误码经有界严格读取提取；text/plain 承载 → None，不得当作
+                # 已知码）。
+                if self._error_code_of(response, stage="sse_404") not in (None, "run_not_found"):
                     yield self._make_event(run_id, "protocol.error",
                                            {"reason": "sse_404_wrong_code"})
                 return
@@ -1426,8 +1468,9 @@ class HermesExecutionBackend(ExecutionBackend):
         try:
             if response.status_code == 404:
                 # 终态记录已被 Hermes 清扫（终态 + TTL 3600s 后）：仅当错误码**精确**
-                # 为 run_not_found 才可判 swept；其余 404 形状按协议矛盾继续轮询。
-                if self._error_code_of(response) == "run_not_found":
+                # 为 run_not_found 才可判 swept；其余 404 形状（含 text/plain 承载的
+                # 伪 run_not_found）按协议矛盾继续轮询。
+                if self._error_code_of(response, stage="status_404") == "run_not_found":
                     return "swept", None
                 return "identity_conflict_404", None
             if response.status_code == 401:
@@ -1566,43 +1609,67 @@ class HermesExecutionBackend(ExecutionBackend):
     def _handle_approval_request(self, run_id: str, record: _RunRecord,
                                  frame: Mapping[str, Any]
                                  ) -> Tuple[Optional[str], Optional[str]]:
-        """approval.request → 16D 请求（完整身份原子 get-or-create）或 fail-closed 自动 deny。
+        """approval.request → 16D 四层 Gate（唯一判定器）或 fail-closed 自动 deny。
 
-        扩权拒绝面（绝不向用户制造可扩权审批）：
+        Reviewer Patch 3 判定路径（恢复 16D 四层 Gate——PermitIssuer 的签发/消费只
+        发生在 ApprovalGate 的 ALLOW 路径内，本适配器**不直接持有/注册/调用 issuer**）：
 
-        - frame 工具缺失/非 str → 自动 deny（``approval_tool_missing``）；
-        - 工具不在构造期封闭 tool→capability 映射内 → 自动 deny
-          （``approval_tool_unmapped``）；
-        - 映射 capability 不在本 run 契约 allowed_capabilities 内（防御性复检）
-          → 自动 deny（``approval_capability_not_in_contract``）；
-        - approval 账本容量（含在途预留）已满 → 自动 deny（``approval_ledger_full``）。
+        1. 工具词法（缺失/非 str）→ 自动 deny（``approval_tool_missing``）；
+        2. **工具面三重封闭**（tool ∈ 最近 probe 快照 / 构造期 expected_profile_tools
+           / 封闭 tool→capability 映射）任一不满足 → 自动 deny
+           （``approval_tool_unmapped``），零 16D 请求；
+        3. 映射 capability ∉ 本 run 契约 allowed_capabilities（防御性复检）→ 自动
+           deny（``approval_capability_not_in_contract``）；
+        4. 契约对应 ApprovalGate 缺失（``approval_gate_missing``）→ 自动 deny——
+           无 Gate 即无 16D 判定面，绝不绕过 Gate 使用 issuer；
+        5. 实时 PermissionManager 决策（``permission_decider`` 构造期注入）：
+           decider 缺失/异常/非 PermissionDecision → 自动 deny
+           （``approval_pm_unavailable``），**绝不手造 PM 结果**；
+        6. 容量预留（封闭状态机；满 → deny **先于** Gate 调用，零 16D 请求）；
+        7. ``gate.check_step``（wait_for_approval=False）：
+           - 使用 submit 账本冻结的**完整 WorkContract**；
+           - 使用**真实原始 args**（帧全量减传输层字段，零 str() coercion、零截断）；
+           - 使用**实时 PermissionDecision**（granted=false → Gate 折为
+             DENY_PERMISSION，零 16D 请求）；
+           - backend capability 使用冻结 envelope；
+           - risk 下界 L2（PM 结果仍为下界上限，调用方不得降级）；
+           - **APPROVAL_PENDING → 唯一建立待审批记录**（approval 账本，帧时刻冻结
+             完整操作身份，供 resolve 边界使用）并返回 approval_id；
+           - ALLOW（会话 grant 覆盖）→ 立即边界 ``gate.consume_permit`` 原子复核+
+             单点提交成功才向 Hermes 转发 once（消费失败 → deny）；
+           - 任何 DENY / Gate 异常 → 自动 deny（``approval_gate_<verdict>``）。
 
-        自动 deny 只向 Hermes 转发 ``deny``，**不创建任何 16D 审批请求**。
-
-        容量封闭状态机（Patch 2）：容量检查、预留、broker 请求创建、approval_id 入账
-        构成单锁协调的封闭状态机——``len(账本) + 在途预留 ≤ cap`` 恒成立；并发
-        cap=1 时最终索引 ≤ 1；容量失败**绝不遗留第二个可用 16D request**（deny 先于
-        broker 创建发生），Hermes 只收到 fail-closed deny；预留的每条失败路径都精确
-        归还一次。映射成功 → ``broker.get_or_create_request``（producer 公开面）：
-        完整身份（contract/hash/run/tool/capability/scope/risk/policy/operation_digest，
-        其中 operation digest 由 16D broker 对**原始完整 args** 现场计算）原子去重——
-        同 tool 同 preview 不同 command 必然不同 approval_id；帧时刻冻结的完整操作
-        身份（tool/capability/原始 args）存入本账本，供 resolve 边界 permit 签发/
-        原子消费使用。绝不伪造 USER evidence、绝不签发 grant/permit；决议由 Furina
-        决策面（broker owner）做出。
+        自动 deny 只向 Hermes 转发 ``deny``，**不创建任何 16D 审批请求**（决议由
+        Furina 决策面（broker owner）做出；绝不伪造 USER evidence、绝不签发 grant/
+        permit）。
         """
         tool = frame.get("tool")
         if not isinstance(tool, str) or not tool.strip():
-            self._forward_auto_deny(run_id)
+            self._forward_choice(run_id, "deny")
             return None, "approval_tool_missing"
         tool = tool.strip()
-        capability = self._tool_capability_map.get(tool)
-        if capability is None:
-            self._forward_auto_deny(run_id)
+        # -- 工具面三重封闭（Patch 3）：probe 快照 / expected / 封闭映射任一不满足即 deny
+        snapshot = self._profile_tools_snapshot
+        if tool not in snapshot or tool not in self._expected_profile_tools \
+                or tool not in self._tool_capability_map:
+            self._forward_choice(run_id, "deny")
             return None, "approval_tool_unmapped"
+        capability = self._tool_capability_map[tool]
         if capability not in record.allowed_capabilities:
-            self._forward_auto_deny(run_id)
+            self._forward_choice(run_id, "deny")
             return None, "approval_capability_not_in_contract"
+        gate = self._approval_gates.get(record.contract_id)
+        if gate is None:
+            self._forward_choice(run_id, "deny")
+            return None, "approval_gate_missing"
+        # canonical operation args = frame 全量减传输层字段（零 str() coercion、零截断；
+        # 任何 command/args 差异 ⇒ 不同 operation digest ⇒ 不同 approval）。
+        op_args = {k: v for k, v in frame.items() if k not in _NON_OPERATION_FRAME_FIELDS}
+        pm = self._live_permission_decision(tool, capability, op_args,
+                                            record.contract_id, run_id)
+        if pm is None:
+            self._forward_choice(run_id, "deny")
+            return None, "approval_pm_unavailable"
         # 原子容量预留（封闭状态机第一步；网络 I/O 一律在锁外）
         with self._lock:
             full = len(self._approval_ops) + self._approvals_reserved \
@@ -1610,108 +1677,104 @@ class HermesExecutionBackend(ExecutionBackend):
             if not full:
                 self._approvals_reserved += 1
         if full:
-            self._forward_auto_deny(run_id)
+            self._forward_choice(run_id, "deny")
             return None, "approval_ledger_full"
-        # canonical operation args = frame 全量减传输层字段（零 str() coercion、零截断；
-        # 任何 command/args 差异 ⇒ 不同 operation digest ⇒ 不同 approval）。
-        op_args = {k: v for k, v in frame.items() if k not in _NON_OPERATION_FRAME_FIELDS}
-        reason = str(frame.get("preview") or frame.get("command") or "")[:200]   # 仅展示面
         try:
-            request, _created = self._broker.get_or_create_request(
-                contract_id=record.contract_id,
-                run_id=run_id,
-                tool=tool,
-                capability=capability,
-                args=op_args,
-                reason=reason,
-                risk_level=Permission.L2_HIGH_RISK,
-                requested_scope=(),
-                provenance="hermes_adapter",
-                policy_kind="approval_required_each_step",
-                contract_hash=record.content_hash,
-            )
-        except ApprovalStateError:
+            result = gate.check_step(
+                tool=tool, args=op_args, contract=record.contract,
+                pm_decision=pm,
+                backend_capability_ids=self._capabilities.capability_ids,
+                run_id=run_id, risk_level=Permission.L2_HIGH_RISK,
+                wait_for_approval=False)
+        except Exception as exc:   # noqa: BLE001 —— Gate 异常 fail-closed（零 once）
             with self._lock:
-                self._approvals_reserved -= 1   # broker 创建失败：精确归还预留
-            return None, "approval_forwarding_failed"
+                self._approvals_reserved -= 1
+            self._forward_choice(run_id, "deny")
+            return None, f"approval_gate_error:{type(exc).__name__}"
+        if result.verdict is GateVerdict.APPROVAL_PENDING and result.approval is not None:
+            # 唯一建立待审批记录的路径：Gate 已创建 16D 请求且状态 PENDING。
+            with self._lock:
+                if result.approval.approval_id not in self._approval_ops:
+                    self._approval_ops[result.approval.approval_id] = _ApprovalOpRecord(
+                        run_id=run_id, tool=tool, capability=capability, op_args=op_args)
+                self._approvals_reserved -= 1
+            return result.approval.approval_id, None
         with self._lock:
-            if request.approval_id in self._approval_ops:
-                # 并发同操作已入账（get-or-create 幂等复用）：归还本侧预留，复用既有
-                self._approvals_reserved -= 1
-            else:
-                self._approval_ops[request.approval_id] = _ApprovalOpRecord(
-                    run_id=run_id, tool=tool, capability=capability, op_args=op_args)
-                self._approvals_reserved -= 1
-        return request.approval_id, None
+            self._approvals_reserved -= 1   # 非 PENDING 路径：归还预留（未入账）
+        if result.verdict is GateVerdict.ALLOW and result.permit is not None:
+            # 会话 grant 覆盖的 ALLOW：立即边界原子消费成功才转发 once。
+            outcome = gate.consume_permit(result.permit, tool=tool,
+                                          capability=capability, args=op_args)
+            if outcome.ok:
+                self._forward_choice(run_id, "once")
+                return None, "approval_covered_by_grant_once"
+            self._forward_choice(run_id, "deny")
+            return None, "approval_grant_permit_denied"
+        self._forward_choice(run_id, "deny")
+        return None, f"approval_gate_{result.verdict.value}"
 
-    def _forward_auto_deny(self, run_id: str) -> None:
-        """fail-closed 自动 deny：直接向 Hermes 转发 deny（不建立 16D 请求）。
+    def _live_permission_decision(self, tool: str, capability: str,
+                                  raw_args: Mapping[str, Any], contract_id: str,
+                                  run_id: str) -> Optional[PermissionDecision]:
+        """实时 PermissionManager 决策（构造期注入 ``permission_decider``）。
 
-        转发失败仅记录（可观察），绝不重试、绝不出 fallback 通道；响应体不读取
-        （流式打开、只取状态码、立即关闭——零无界缓冲）。
+        decider 缺失/异常/返回非 PermissionDecision → None（调用方 fail-closed deny，
+        零 once）——**绝不手造 PermissionDecision 冒充 PM 结果**（Reviewer Patch 3
+        要求 9）。
         """
+        if self._permission_decider is None:
+            return None
+        try:
+            decision = self._permission_decider(tool, capability, dict(raw_args),
+                                                contract_id, run_id)
+        except Exception as exc:   # noqa: BLE001
+            log.warning("hermes run=%s permission_decider 异常（fail-closed deny）: %s",
+                        run_id, type(exc).__name__)
+            return None
+        if not isinstance(decision, PermissionDecision):
+            log.warning("hermes run=%s permission_decider 返回非 PermissionDecision"
+                        "（fail-closed deny）: %s", run_id, type(decision).__name__)
+            return None
+        return decision
+
+    def _forward_choice(self, run_id: str, choice: str) -> None:
+        """fail-closed 自动决策转发（deny/once）：直接向 Hermes 转发（不建立 16D
+        请求时唯一通道）。转发失败仅记录（可观察），绝不重试、绝不出 fallback 通道；
+        响应体不读取（流式打开、只取状态码、立即关闭——零无界缓冲）。"""
         try:
             response, cm = self._open_stream(
-                "auto_deny", "POST", _PATH_APPROVAL.format(run_id=run_id),
-                json_body={"choice": "deny"})
+                "auto_forward", "POST", _PATH_APPROVAL.format(run_id=run_id),
+                json_body={"choice": choice})
         except HermesTransportError as exc:
-            log.warning("hermes run=%s 自动 deny 转发失败: %s", run_id, exc)
+            log.warning("hermes run=%s 自动转发 %s 失败: %s", run_id, choice, exc)
             return
         try:
             if response.status_code not in (200, 409):
-                log.warning("hermes run=%s 自动 deny 转发异常 HTTP %s",
-                            run_id, response.status_code)
+                log.warning("hermes run=%s 自动转发 %s 异常 HTTP %s",
+                            run_id, choice, response.status_code)
         finally:
             self._close_stream(cm)
-
-    def _permit_at_boundary(self, approval_id: str,
-                            op: "_ApprovalOpRecord") -> Tuple[bool, str, str]:
-        """**发送 Hermes once 的立即边界**：经组合根注入的 PermitIssuer 签发 permit，
-        并由 16D broker 在单锁内**原子复核+消费**（全部校验通过后单点提交）。
-
-        复核维度（16D consume_permit 权威执行）：contract_id/content_hash（issuer
-        内部绑定 + approval 记录双重复核）、run_id、tool、capability、**原始 args**
-        （broker 密钥对帧时刻冻结的 op_args 重新计算 operation digest 比对）、
-        approval/grant 状态（REVOKED/DENIED/已消费/超窗一律拒绝）。任何失败 →
-        (False, typed reason)——**绝不发送 once**（fail-closed deny）。成功 →
-        消费已提交（approve_once 恰好一次；此后 POST 失败也绝不回滚/重发）。
-        """
-        with self._lock:
-            run_rec = self._runs.get(op.run_id)
-            issuer = self._permit_issuers.get(run_rec.contract_id) if run_rec else None
-        if run_rec is None:
-            return False, "boundary_run_unknown", ""
-        if issuer is None:
-            return False, "boundary_contract_issuer_missing", ""
-        if issuer.expected_content_hash != run_rec.content_hash:
-            return False, "boundary_contract_issuer_hash_mismatch", ""
-        try:
-            permit = issuer.issue(tool=op.tool, capability=op.capability,
-                                  args=dict(op.op_args), run_id=op.run_id,
-                                  approval_id=approval_id)
-        except ApprovalStateError as exc:
-            return False, "boundary_permit_issue_failed", str(exc)
-        try:
-            outcome = self._broker.consume_permit(permit, tool=op.tool,
-                                                  capability=op.capability,
-                                                  args=dict(op.op_args))
-        except ApprovalStateError as exc:
-            return False, "boundary_permit_consume_error", str(exc)
-        if not outcome.ok:
-            return False, "boundary_permit_denied", outcome.reason
-        return True, "", permit.permit_id
 
     def resolve_approval(self, approval_ref: str) -> Dict[str, Any]:
         """等待 16D 真实决议并**恰好一次**转发 Hermes（choice 只允许 once/deny）。
 
-        Patch 2 边界重构——顺序为 **decision → 立即边界原子 permit 消费 → POST**：
+        Reviewer Patch 3 边界重构——顺序为 **等待决议 → 同一 Gate 重新判定（实时 PM）
+        → 立即边界原子 permit 消费 → POST**：
 
-        - APPROVE_ONCE / APPROVE_SESSION 决议 → 先经注入的 PermitIssuer 签发 permit、
-          ``broker.consume_permit`` 在发送 once 的**立即边界**原子复核（contract_id/
-          hash + run_id + tool + capability + 原始 args + approval/grant 状态）并单点
-          提交消费；**仅消费成功才 POST once**。决议与远端边界之间的撤销/状态漂移 →
-          消费失败 → fail-closed 转发 deny，绝不发送 once（"POST 后 broker.consume"
-          已废除——它无法封住 ALLOW→远端执行边界之间的撤销窗口）；
+        - 先经 ``broker.wait_for_resolution``（有界）等待**真实 Furina 决议**；
+        - resolve 时**重新取得实时 PermissionDecision**（构造期注入
+          ``permission_decider``；缺失/异常/非决策 → fail-closed deny），并**再次调用
+          同一 ``ApprovalGate.check_step``**（完整 WorkContract + 真实原始 args +
+          冻结 envelope + risk 下界 L2，wait_for_approval=False——终态请求走
+          ``_verdict_for``）：
+          - GateResult=ALLOW 且携带 permit → ``gate.consume_permit`` 在发送 once 的
+            **立即边界**原子复核（contract_id/hash + run_id + tool + capability +
+            原始 args + approval/grant 状态）并单点提交消费；**仅消费成功才 POST
+            once**。决议与远端边界之间的撤销/状态漂移/PM 降级 → 消费失败或 Gate 重判
+            DENY → fail-closed 转发 deny，绝不发送 once；
+          - Gate 任何 DENY（PM 拒绝、契约/hash 不匹配、撤销、超时、已消费）、契约
+            Gate 缺失、permit 消费失败 → ``deny``（fail-closed）；
+          - APPROVE_SESSION 决议仍只收窄转发 once（不放宽 16D 决议）；
         - DENY / TIMEOUT / REVOKED / 未决（LATE/UNKNOWN）→ ``deny``（fail-closed）；
         - **exactly-once**：同一 approval 无论顺序重复还是并发 resolve，只有首个调用
           会 POST；其余调用返回 typed no-op（``forwarded=False``），绝不二次 POST；
@@ -1736,8 +1799,6 @@ class HermesExecutionBackend(ExecutionBackend):
             self._approval_forwarded.add(approval_id)   # 先占位：并发只有一个请求获胜
         resolution = self._broker.wait_for_resolution(approval_id,
                                                       timeout=self._approval_wait)
-        approved = bool(resolution.ok) and resolution.decision in (
-            ApprovalDecisionKind.APPROVE_ONCE, ApprovalDecisionKind.APPROVE_SESSION)
         resolution_status = str(resolution.status.value
                                 if isinstance(resolution.status, ResolutionStatus)
                                 else resolution.status)
@@ -1745,20 +1806,58 @@ class HermesExecutionBackend(ExecutionBackend):
         consumed = False
         permit_id = ""
         boundary_reason = ""
-        if approved:
-            permitted, boundary_reason, permit_id = self._permit_at_boundary(
-                approval_id, op)
-            if permitted:
-                # permit 已在发送边界**原子消费**（POST 前最后一道状态性操作）；
-                # 此后 POST 失败也绝不回滚消费/绝不重发（fail-closed exactly-once）。
-                choice = "once"
-                consumed = True
+        # -- resolve 时重新取得实时 PM 决策 + 同一 Gate 重新判定（Reviewer Patch 3）----
+        with self._lock:
+            run_rec = self._runs.get(op.run_id)
+        if run_rec is None:
+            boundary_reason = "boundary_run_unknown"
+        else:
+            gate = self._approval_gates.get(run_rec.contract_id)
+            if gate is None:
+                boundary_reason = "boundary_gate_missing"
             else:
-                log.warning(
-                    "hermes approval=%s 决议 %s 但远端边界 permit 消费未成立"
-                    "（fail-closed deny）: %s", approval_id,
-                    resolution.decision.value if resolution.decision else "?",
-                    boundary_reason)
+                pm = self._live_permission_decision(op.tool, op.capability, op.op_args,
+                                                    run_rec.contract_id, op.run_id)
+                if pm is None:
+                    boundary_reason = "boundary_permission_decider_unavailable"
+                else:
+                    try:
+                        result = gate.check_step(
+                            tool=op.tool, args=op.op_args, contract=run_rec.contract,
+                            pm_decision=pm,
+                            backend_capability_ids=self._capabilities.capability_ids,
+                            run_id=op.run_id, risk_level=Permission.L2_HIGH_RISK,
+                            wait_for_approval=False)
+                    except Exception as exc:   # noqa: BLE001 —— Gate 异常 fail-closed
+                        boundary_reason = f"boundary_gate_error:{type(exc).__name__}"
+                        result = None
+                    if result is not None and result.verdict is GateVerdict.ALLOW \
+                            and result.permit is not None:
+                        try:
+                            outcome = gate.consume_permit(
+                                result.permit, tool=op.tool, capability=op.capability,
+                                args=op.op_args)
+                        except ApprovalStateError as exc:
+                            boundary_reason = \
+                                f"boundary_permit_consume_error:{type(exc).__name__}"
+                            outcome = None
+                        if outcome is not None and outcome.ok:
+                            # permit 已在发送边界**原子消费**（POST 前最后一道状态性
+                            # 操作）；此后 POST 失败也绝不回滚消费/绝不重发。
+                            choice = "once"
+                            consumed = True
+                            permit_id = result.permit.permit_id
+                        else:
+                            boundary_reason = boundary_reason or "boundary_permit_denied"
+                            log.warning(
+                                "hermes approval=%s 决议 %s 但远端边界 permit 消费未成立"
+                                "（fail-closed deny）: %s", approval_id,
+                                resolution.decision.value if resolution.decision else "?",
+                                boundary_reason)
+                    else:
+                        boundary_reason = boundary_reason or (
+                            f"boundary_gate_{result.verdict.value}"
+                            if result is not None else "boundary_gate_error")
         client = self._get_client()
         try:
             response, cm = self._open_stream(
@@ -1768,7 +1867,7 @@ class HermesExecutionBackend(ExecutionBackend):
             raise self._transport_failure("approval", exc) from exc
         try:
             if response.status_code == 409:
-                code, snippet = self._read_error_payload(response)
+                code, snippet = self._read_error_payload(response, stage="approval_409")
                 if code != "approval_not_pending":
                     raise HermesProtocolError(
                         f"hermes approval 409 错误码非 approval_not_pending: {snippet}")
@@ -1777,7 +1876,7 @@ class HermesExecutionBackend(ExecutionBackend):
                         "consumed": consumed, "permit_id": permit_id,
                         "resolution_status": resolution_status}
             if response.status_code != 200:
-                _code, snippet = self._read_error_payload(response)
+                _code, snippet = self._read_error_payload(response, stage="approval")
                 raise HermesTransportError(
                     f"hermes approval HTTP {response.status_code}: {snippet}")
             try:
