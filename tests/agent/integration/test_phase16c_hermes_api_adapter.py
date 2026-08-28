@@ -3,18 +3,29 @@
 
 权威 recon（本机 Hermes Agent v0.20.6 / upstream 4e7eb399 实测 + 源码）：
 
-- POST /v1/runs → 202 {"run_id":"run_<hex>","status":"started"}；
+- POST /v1/runs → 202 {"run_id":"run_<hex>","status":"started"}（body 无 toolset/profile
+  限定参数）；
+- GET /v1/capabilities → object=hermes.api_server.capabilities + auth + features + model
+  （model = active profile 身份广告，非 default/custom profile 名进入 model）；
+- GET /v1/toolsets → {"object":"list","platform":"api_server","data":[{name,enabled,
+  configured,tools:[…]}]} —— api_server 平台实际暴露给 run agent 的工具面；
 - GET /v1/runs/{id} → {"object":"hermes.run",…}，status ∈ queued/running/
   waiting_for_approval/stopping/completed/cancelled/failed；
 - GET /v1/runs/{id}/events → text/event-stream：``data: {json}\\n\\n`` 帧 +
   ``: keepalive`` 心跳 + ``: stream closed`` 哨兵；
 - POST /v1/runs/{id}/approval → 200 {"object":"hermes.run.approval_response",…}
-  / 409 approval_not_pending；
-- POST /v1/runs/{id}/stop → 200 {"run_id","status":"stopping"}（≠ CANCELLED）。
+  / 409 approval_not_pending·approval_not_active / 400 invalid_approval_choice /
+  404 run_not_found；
+- POST /v1/runs/{id}/stop → 200 {"run_id","status":"stopping"}（≠ CANCELLED）；
+- 不存在 run_id 上 status/events/approval/stop 四端点 → 全部 404 run_not_found
+  且零副作用（probe 无副作用主动握手面）。
 
-任务书 §7 十二项最低锁定（全部以确定性 fake HTTP/SSE server 承载）+ 真实协议形态、
-身份精确绑定、断线零重复 submit、approval 绝不 always/session、非 loopback 与
-URL 凭证拒绝、3xx 非本地重定向 fail-closed、C1–C7 零依赖。
+Reviewer Patch 1 锁定面：完整 WorkContract projection（16A exact-schema + content_hash
+复核）为唯一合法 submit 主路径、expected profile identity 绑定、capability envelope
+封闭相等、approval 完整操作身份 + exactly-once 转发、submit 原子 reservation 单 POST、
+max_concurrent_runs/账本硬容量、status 身份封闭、content-type/错误码精确校验、
+SSE 严格 UTF-8 + 超限 discard-until-blank、裸 key 值脱敏、lying capabilities probe
+unhealthy。
 """
 from __future__ import annotations
 
@@ -47,9 +58,18 @@ from furina.agent.events import (
     WorkExecutionReducer,
     WorkExecutionState,
 )
+from furina.agent.work_contract import (
+    ApprovalPolicyRef,
+    CostBudget,
+    ExecutionBudget,
+    VerificationStandard,
+    WorkspaceScope,
+    WorkContract,
+)
 
 CONTRACT_ID = "wc_16c_test_001"
-CONTENT_HASH = "a" * 64
+PROFILE_ID = "hermes-agent"
+DEFAULT_TOOL_MAP = {"terminal": "cap.filesystem"}
 
 
 # ================================================================ fake Hermes API Server
@@ -85,6 +105,17 @@ class _FakeHermesHandler(BaseHTTPRequestHandler):
         data = json.dumps(body).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    def _send_raw(self, status: int, content_type: str, data: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         try:
@@ -149,14 +180,21 @@ class _FakeHermesHandler(BaseHTTPRequestHandler):
             status, body = self.server.capabilities
             self._send_json(status, body)
             return
+        if path == "/v1/toolsets":
+            if not self._auth_ok():
+                self._unauthorized()
+                return
+            status, body = self.server.toolsets
+            self._send_json(status, body)
+            return
         if path.startswith("/v1/runs/") and path.endswith("/events"):
             run_id = path[len("/v1/runs/"):-len("/events")]
             if not self._auth_ok():
                 self._unauthorized()
                 return
-            seq = self.server.run_status.get(run_id)
-            if seq and seq[0][0] == 404:
-                self._not_found_run(run_id)
+            override = self.server.route_override.get("events")
+            if override is not None:
+                self._send_json(override[0], override[1])
                 return
             if run_id not in self.server.runs:
                 self._not_found_run(run_id)
@@ -167,6 +205,10 @@ class _FakeHermesHandler(BaseHTTPRequestHandler):
             run_id = path[len("/v1/runs/"):]
             if not self._auth_ok():
                 self._unauthorized()
+                return
+            override = self.server.route_override.get("status")
+            if override is not None:
+                self._send_json(override[0], override[1])
                 return
             seq = self.server.run_status.get(run_id)
             if seq:
@@ -193,6 +235,17 @@ class _FakeHermesHandler(BaseHTTPRequestHandler):
             return
         path = self.path
         if path == "/v1/runs":
+            if self.server.drop_next_submit:
+                self.server.drop_next_submit = False
+                self.close_connection = True
+                return   # 不给任何响应：客户端侧"结果不确定"
+            if self.server.submit_delay > 0:
+                time.sleep(self.server.submit_delay)
+            if self.server.submit_raw is not None:
+                status, ctype, data = self.server.submit_raw
+                self.server.submit_raw = None   # one-shot
+                self._send_raw(status, ctype, data)
+                return
             status, body = self.server.submit_response
             if body.get("run_id") == "@auto":
                 run_id = f"run_{self.server.wrapper.next_run_id()}"
@@ -202,6 +255,16 @@ class _FakeHermesHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/v1/runs/") and path.endswith("/approval"):
             run_id = path[len("/v1/runs/"):-len("/approval")]
+            if not self._auth_ok():
+                self._unauthorized()
+                return
+            override = self.server.route_override.get("approval")
+            if override is not None:
+                self._send_json(override[0], override[1])
+                return
+            if run_id not in self.server.runs:
+                self._not_found_run(run_id)   # 零副作用：未知 run 在解析 body 前拒绝
+                return
             self.server.approval_requests.append((run_id, dict(body_req)))
             status, body = self.server.approval_response.get(
                 run_id,
@@ -211,6 +274,16 @@ class _FakeHermesHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/v1/runs/") and path.endswith("/stop"):
             run_id = path[len("/v1/runs/"):-len("/stop")]
+            if not self._auth_ok():
+                self._unauthorized()
+                return
+            override = self.server.route_override.get("stop")
+            if override is not None:
+                self._send_json(override[0], override[1])
+                return
+            if run_id not in self.server.runs:
+                self._not_found_run(run_id)   # 零副作用：未知 run 无 agent/task 可停
+                return
             self.server.stop_requests.append(run_id)
             status, body = self.server.stop_response.get(
                 run_id, (200, {"run_id": run_id, "status": "stopping"}))
@@ -237,7 +310,7 @@ class _FakeHermesServer:
         self.capabilities = (200, {
             "object": "hermes.api_server.capabilities",
             "platform": "hermes-agent",
-            "model": "hermes-agent",
+            "model": PROFILE_ID,
             "auth": {"type": "bearer", "required": True},
             "features": {
                 "chat_completions": True,
@@ -251,7 +324,25 @@ class _FakeHermesServer:
                 "tool_progress_events": True,
             },
         })
+        self.toolsets = (200, {
+            "object": "list",
+            "platform": "api_server",
+            "data": [
+                {"name": "terminal", "label": "Terminal", "description": "",
+                 "enabled": True, "configured": True,
+                 "tools": ["bash", "terminal", "process"]},
+                {"name": "filesystem", "label": "FS", "description": "",
+                 "enabled": True, "configured": True,
+                 "tools": ["read_file", "write_file"]},
+                {"name": "web", "label": "Web", "description": "",
+                 "enabled": False, "configured": False, "tools": ["web_fetch"]},
+            ],
+        })
         self.submit_response = (202, {"run_id": "@auto", "status": "started"})
+        self.submit_delay = 0.0
+        self.drop_next_submit = False
+        self.submit_raw: Optional[Tuple[int, str, bytes]] = None
+        self.route_override: Dict[str, Tuple[int, Any]] = {}
         self.run_status = {}
         self.sse = {}
         self.approval_response = {}
@@ -289,12 +380,52 @@ class _FakeHermesServer:
         self._http.capabilities = value
 
     @property
+    def toolsets(self) -> Any:
+        return self._http.toolsets
+
+    @toolsets.setter
+    def toolsets(self, value: Any) -> None:
+        self._http.toolsets = value
+
+    @property
     def submit_response(self) -> Any:
         return self._http.submit_response
 
     @submit_response.setter
     def submit_response(self, value: Any) -> None:
         self._http.submit_response = value
+
+    @property
+    def submit_delay(self) -> float:
+        return self._http.submit_delay
+
+    @submit_delay.setter
+    def submit_delay(self, value: float) -> None:
+        self._http.submit_delay = value
+
+    @property
+    def drop_next_submit(self) -> bool:
+        return self._http.drop_next_submit
+
+    @drop_next_submit.setter
+    def drop_next_submit(self, value: bool) -> None:
+        self._http.drop_next_submit = value
+
+    @property
+    def submit_raw(self) -> Any:
+        return self._http.submit_raw
+
+    @submit_raw.setter
+    def submit_raw(self, value: Any) -> None:
+        self._http.submit_raw = value
+
+    @property
+    def route_override(self) -> Dict[str, Tuple[int, Any]]:
+        return self._http.route_override
+
+    @route_override.setter
+    def route_override(self, value: Dict[str, Tuple[int, Any]]) -> None:
+        self._http.route_override = value
 
     @property
     def run_status(self) -> Any:
@@ -352,9 +483,9 @@ class _FakeHermesServer:
                 seq.append((200, body))
         self.run_status[run_id] = seq
 
-    def requests_to(self, path_prefix: str, method: Optional[str] = None) -> List[Dict[str, Any]]:
+    def requests_to(self, path: str, method: Optional[str] = None) -> List[Dict[str, Any]]:
         return [r for r in self.requests
-                if r["path"].startswith(path_prefix)
+                if r["path"] == path
                 and (method is None or r["method"] == method)]
 
     def shutdown(self) -> None:
@@ -363,29 +494,81 @@ class _FakeHermesServer:
 
 
 # ================================================================ fixtures / helpers
-def _projection(**overrides: Any) -> Dict[str, Any]:
-    """合法最小 WorkContract projection（与 16A to_backend_projection 字段对齐）。"""
-    base: Dict[str, Any] = {
-        "contract_id": CONTRACT_ID,
-        "content_hash": CONTENT_HASH,
-        "canonical_user_request": "在 Hermes 侧完成一个最小探活任务并回显 OK",
-        "allowed_backends": ("hermes", "native"),
-        "allowed_capabilities": ("cap.filesystem",),
-        "workspace_scope": {"read_roots": (), "write_roots": ()},
-    }
-    base.update(overrides)
-    return base
+def _make_contract(contract_id: str = CONTRACT_ID, request: Optional[str] = None,
+                   caps: Tuple[str, ...] = ("cap.filesystem",),
+                   backends: Tuple[str, ...] = ("hermes", "native"),
+                   workspace_scope: Optional[WorkspaceScope] = None) -> WorkContract:
+    """真实 16A WorkContract（合法主路径一律经 to_backend_projection）。"""
+    return WorkContract(
+        contract_id=contract_id,
+        contract_version="1.0.0",
+        canonical_user_request=request or "在 Hermes 侧完成一个最小探活任务并回显 OK",
+        objective="最小探活（16C fake server 行为锁定）",
+        commitment_scope_included=("最小探活任务",),
+        workspace_scope=workspace_scope or WorkspaceScope(),
+        budget=ExecutionBudget(max_duration_seconds=600.0,
+                               cost_limit=CostBudget(amount=5.0, currency="CNY"),
+                               max_attempts=1),
+        verification_standard=VerificationStandard(
+            criteria=(), verifier_refs=("furina.verify.hermes_probe",)),
+        approval_policy=ApprovalPolicyRef(policy_id="policy_hermes_probe",
+                                          policy_kind="approval_required_each_step",
+                                          scope_note="仅 16C fake server 行为锁定"),
+        source_event_id="lev_1756000000000_deadbeef",
+        allowed_capabilities=caps,
+        allowed_backends=backends,
+    )
+
+
+def _projection(contract: Optional[WorkContract] = None,
+                **overrides: Any) -> Dict[str, Any]:
+    """合法 projection = 真实 WorkContract.to_backend_projection 的可变深拷贝。"""
+    c = contract if contract is not None else _make_contract()
+    d = json.loads(json.dumps(c.to_dict()))   # plain 深拷贝（list/dict/标量）
+    for key, value in overrides.items():
+        if value is _DELETE:
+            d.pop(key, None)
+        else:
+            d[key] = value
+    return d
+
+
+class _Delete:
+    """占位哨兵：_projection(key=_DELETE) 表示删除该键（不完整 projection 用例）。"""
+
+
+_DELETE = _Delete()
+
+
+class _label:
+    """失败标注上下文（pytest.raises 无 msg 形参；仅用于报告可读性）。"""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc is not None:
+            print(f"[case] {self.text}: {exc}")
+        return False
 
 
 def _make_backend(server: _FakeHermesServer,
-                  broker: Optional[ApprovalBroker] = None, **kw: Any) -> HermesExecutionBackend:
+                  broker: Optional[ApprovalBroker] = None,
+                  contract: Optional[WorkContract] = None, **kw: Any) -> HermesExecutionBackend:
     if broker is None:
         broker = ApprovalBroker()
+    caps = tuple(contract.allowed_capabilities) if contract is not None \
+        else ("cap.filesystem",)
     defaults: Dict[str, Any] = dict(
         base_url=server.base_url,
         api_key=server.api_key,
         approval_broker=broker,
-        capability_ids=("cap.filesystem",),
+        expected_profile_identity=PROFILE_ID,
+        tool_capability_map=dict(DEFAULT_TOOL_MAP),
+        capability_ids=caps,
         probe_ttl_seconds=30.0,
         reconnect_poll_interval_seconds=0.05,
         reconnect_poll_budget_seconds=5.0,
@@ -433,7 +616,8 @@ def server():
 
 # ================================================================ 1–2: probe 主动握手
 def test_01_probe_active_handshake_success_and_ttl(server):
-    """§7.2：主动握手成功（/health + /v1/capabilities + runs 404 握手）；TTL 内走缓存。"""
+    """主动握手成功（/health + /v1/capabilities + /v1/toolsets + runs 四端点 404 握手）；
+    profile 工具面快照捕获；TTL 内走缓存；TTL 过期重新握手。"""
     backend = _make_backend(server, probe_ttl_seconds=30.0)
     h1 = backend.probe()
     assert isinstance(h1, BackendHealth)
@@ -442,8 +626,16 @@ def test_01_probe_active_handshake_success_and_ttl(server):
     paths = {(r["method"], r["path"]) for r in server.requests}
     assert ("GET", "/health") in paths
     assert ("GET", "/v1/capabilities") in paths
-    assert any(r["path"].startswith("/v1/runs/prb_") for r in server.requests), \
-        "必须含 runs 面主动握手（probe run_id → 404 run_not_found）"
+    assert ("GET", "/v1/toolsets") in paths
+    probe_paths = [r["path"] for r in server.requests if "/v1/runs/prb_" in r["path"]]
+    assert any(p.endswith("/events") for p in probe_paths), "events 端点必须主动握手"
+    assert any(p.endswith("/approval") for p in probe_paths), "approval 端点必须主动握手"
+    assert any(p.endswith("/stop") for p in probe_paths), "stop 端点必须主动握手"
+    assert any(not p.endswith(("/events", "/approval", "/stop")) for p in probe_paths), \
+        "status 端点必须主动握手"
+    assert backend.profile_tools_snapshot == ("bash", "process", "read_file",
+                                              "terminal", "write_file"), \
+        "probe 必须捕获 enabled 工具面快照（disabled web_fetch 不得进入）"
     n_requests = len(server.requests)
     h2 = backend.probe()
     assert (h2.healthy, h2.installed, h2.reachable, h2.reason) == \
@@ -461,8 +653,12 @@ def test_01_probe_active_handshake_success_and_ttl(server):
 
 
 def test_02_probe_failclosed_matrix(server):
-    """§7.1：capability 缺失/说谎/坏载荷/认证失败/形状矛盾/不可达 全部 fail-closed。"""
-    good_caps = _FakeHermesServer().capabilities[1]
+    """capability 缺失/说谎/坏载荷/认证失败/形状矛盾/profile 身份不一致/不可达
+    全部 fail-closed。"""
+    fresh = _FakeHermesServer()
+    good_caps = fresh.capabilities[1]
+    good_toolsets = fresh.toolsets
+    fresh.shutdown()
     # capability 广告缺失（说谎 False）——每个场景用 fresh backend（独立探针缓存）
     server.capabilities = (200, {**good_caps,
                                  "features": {**good_caps["features"],
@@ -486,6 +682,7 @@ def test_02_probe_failclosed_matrix(server):
     backend.close()
     # 坏载荷（features 非 Mapping）→ fail-closed（typed reason）
     server.capabilities = (200, {"object": "hermes.api_server.capabilities",
+                                 "model": PROFILE_ID,
                                  "auth": {"type": "bearer", "required": True},
                                  "features": "not-a-mapping"})
     backend = _make_backend(server)
@@ -506,7 +703,15 @@ def test_02_probe_failclosed_matrix(server):
     h = backend.probe()
     assert not h.healthy and "health_shape_contradiction" in h.reason
     backend.close()
+    # toolsets 端点缺失（dedicated toolset 证据面不可用）→ fail-closed
+    server.health = (200, {"status": "ok", "platform": "hermes-agent", "version": "0.20.6"})
+    server.toolsets = (404, {"error": {"message": "not found", "code": "not_found"}})
+    backend = _make_backend(server)
+    h = backend.probe()
+    assert not h.healthy and "toolsets_endpoint_missing" in h.reason
+    backend.close()
     # 不可达：连接拒绝（closed port）
+    server.toolsets = good_toolsets
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     dead_port = s.getsockname()[1]
@@ -519,10 +724,12 @@ def test_02_probe_failclosed_matrix(server):
 
 # ================================================================ 3: submit / correlation
 def test_03_submit_protocol_shape_and_correlation(server):
-    """§7.3：202 协议形态 + 最小 projection + 幂等 correlation（Hermes 非幂等所有者）。"""
-    backend = _make_backend(server)
+    """202 协议形态 + 最小 projection（仅请求文本，无 instructions）+
+    幂等 correlation（同 id 同 hash 重放同 handle；同 id 异 hash 类型化冲突）。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
     assert backend.probe().healthy
-    handle = backend.submit(_projection())
+    handle = backend.submit(contract.to_backend_projection())
     assert isinstance(handle, BackendRunHandle)
     assert handle.backend_id == "hermes"
     assert handle.correlation == CONTRACT_ID
@@ -530,68 +737,89 @@ def test_03_submit_protocol_shape_and_correlation(server):
     submits = server.requests_to("/v1/runs", method="POST")
     assert len(submits) == 1
     sent = submits[0]["body"]
-    assert sent == {"input": "在 Hermes 侧完成一个最小探活任务并回显 OK"}, \
-        f"submit 只允许最小 projection（仅请求文本），实际发送: {sent}"
+    assert sent == {"input": contract.canonical_user_request}, \
+        f"submit 只允许最小 projection（仅请求文本、无 instructions/Persona），实际: {sent}"
     assert submits[0]["auth"] == f"Bearer {server.api_key}"
-    # 幂等重放：同契约 → 同 handle，零重复 submit
-    handle2 = backend.submit(_projection())
+    # 幂等重放：同契约（重新构造 → created_at 不同但 content_hash 相同）→ 同 handle，
+    # 零重复 submit
+    replay = _make_contract().to_backend_projection()
+    handle2 = backend.submit(replay)
     assert handle2 == handle
     assert len(server.requests_to("/v1/runs", method="POST")) == 1
-    # 同 id 异内容 → 类型化冲突，零新 submit
+    # 同 id 异内容（自身一致的有效契约）→ 类型化冲突，零新 submit
+    conflicting = _make_contract(request="完全不同的请求文本").to_backend_projection()
     with pytest.raises(BackendScopeViolation, match="不同内容摘要"):
-        backend.submit(_projection(content_hash="b" * 64))
+        backend.submit(conflicting)
     assert len(server.requests_to("/v1/runs", method="POST")) == 1
     backend.close()
 
 
 def test_04_submit_failclosed_matrix(server):
-    """身份/scope/坏响应全部 fail-closed；失败路径零重试零 fallback。"""
-    backend = _make_backend(server)
+    """篡改/不完整/未知字段/缺失字段/越权 caps/路径 scope 全部 submit 前拒绝（零 HTTP）；
+    坏响应 fail-closed 零重试零 fallback。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    d = contract.to_backend_projection()
     bad_projections = [
-        _projection(canonical_user_request=""),
-        _projection(contract_id=""),
-        _projection(content_hash="short"),
-        _projection(allowed_backends=("native",)),
-        _projection(allowed_capabilities=()),
-        _projection(allowed_capabilities=("cap.unknown",)),
-        _projection(workspace_scope={"read_roots": ("C:/w/docs",), "write_roots": ()}),
+        ("空请求文本", _projection(contract, canonical_user_request="")),
+        ("空 contract_id", _projection(contract, contract_id="")),
+        ("hash 格式非法", _projection(contract, content_hash="short")),
+        ("hash 篡改（内容-摘要不符）", _projection(contract, content_hash="b" * 64)),
+        ("载荷篡改（canonical_user_request 改动）",
+         _projection(contract, canonical_user_request="被篡改的请求")),
+        ("未知字段", {**d, "self_granted_power": "root"}),
+        ("缺失字段", _projection(contract, objective=_DELETE)),
+        # 以下三个用重签过的合法 projection：精确命中 backend 授权检查层
+        ("allowed_backends 不含 hermes",
+         _make_contract(backends=("native",)).to_backend_projection()),
+        ("caps 超 envelope（自签扩权）",
+         _make_contract(caps=("cap.filesystem", "cap.evil")).to_backend_projection()),
+        ("路径 scope",
+         _make_contract(workspace_scope=WorkspaceScope(
+             read_roots=("C:/w/docs",))).to_backend_projection()),
     ]
-    for bad in bad_projections:
-        with pytest.raises(BackendScopeViolation):
+    for label, bad in bad_projections:
+        with pytest.raises(BackendScopeViolation), _label(label):
             backend.submit(bad)
     assert not server.requests_to("/v1/runs", method="POST"), \
         "submit 前 fail-closed 必须零 HTTP 请求"
-    # 非 202（实测契约：202 started）
-    for status, body in ((200, {"run_id": "run_x", "status": "started"}),
-                         (500, {"error": {"message": "boom"}}),
-                         (429, {"error": {"message": "slow down"}})):
+    # 非 202（实测契约：202 started）——每例独立契约（确定性失败不占账本）
+    for i, (status, body) in enumerate(((200, {"run_id": "run_x", "status": "started"}),
+                                        (500, {"error": {"message": "boom"}}),
+                                        (429, {"error": {"message": "slow down"}}))):
         server.submit_response = (status, body)
         with pytest.raises((HermesProtocolError, HermesTransportError)):
-            backend.submit(_projection(contract_id=f"wc_16c_bad_{status}"))
+            backend.submit(
+                _make_contract(contract_id=f"wc_16c_bad_{status}").to_backend_projection())
     assert len(server.requests_to("/v1/runs", method="POST")) == 3, "失败路径零重试/零 fallback"
-    # 202 但形状非法
+    # 202 但形状非法（服务器可能已启动 run → 结果不确定；用独立契约）
     server.submit_response = (202, {"run_id": "@auto"})
-    with pytest.raises(HermesProtocolError):
-        backend.submit(_projection(contract_id="wc_16c_bad_nostatus"))
+    with pytest.raises((HermesProtocolError, HermesTransportError)):
+        backend.submit(_make_contract(contract_id="wc_16c_bad_nostatus")
+                       .to_backend_projection())
     server.submit_response = (202, {"status": "started"})
-    with pytest.raises(HermesProtocolError):
-        backend.submit(_projection(contract_id="wc_16c_bad_norunid"))
+    with pytest.raises((HermesProtocolError, HermesTransportError)):
+        backend.submit(_make_contract(contract_id="wc_16c_bad_norunid")
+                       .to_backend_projection())
     server.submit_response = (202, {"run_id": "@auto", "status": "queued"})
-    with pytest.raises(HermesProtocolError):
-        backend.submit(_projection(contract_id="wc_16c_bad_statusword"))
+    with pytest.raises((HermesProtocolError, HermesTransportError)):
+        backend.submit(_make_contract(contract_id="wc_16c_bad_statusword")
+                       .to_backend_projection())
     # 302 非本地重定向 fail-closed
     server.submit_response = (302, {"run_id": "@auto", "status": "started"})
     with pytest.raises(HermesProtocolError, match="redirect"):
-        backend.submit(_projection(contract_id="wc_16c_bad_redirect"))
+        backend.submit(_make_contract(contract_id="wc_16c_bad_redirect")
+                       .to_backend_projection())
     assert len(server.requests_to("/v1/runs", method="POST")) == 7
     backend.close()
 
 
 # ================================================================ 5/7: 全生命周期 completed
 def test_05_full_lifecycle_completed_maps_unverified(server):
-    """§7.7：SSE 真实词表全流程 → 16E BACKEND_DONE_UNVERIFIED；VERIFIED 永不可达。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    """SSE 真实词表全流程 → 16E BACKEND_DONE_UNVERIFIED；VERIFIED 永不可达。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {})])
     server.sse[run_id] = [
@@ -620,14 +848,16 @@ def test_05_full_lifecycle_completed_maps_unverified(server):
 
 # ================================================================ 4: SSE 分片/心跳
 def test_06_sse_fragmentation_and_heartbeat(server):
-    """§7.4a：分片帧与心跳不破坏解析；心跳绝不折算事件。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    """分片帧与心跳不破坏解析（含多字节 UTF-8 严格解码正路径）；心跳绝不折算事件。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {})])
     server.sse[run_id] = [
         ("heartbeat",),
-        ("fragment", {"event": "tool.started", "tool": "terminal", "preview": "echo"}, 7),
+        ("fragment", {"event": "tool.started", "tool": "terminal",
+                      "preview": "echo 中文多字节√"}, 7),
         ("heartbeat",),
         ("heartbeat",),
         ("fragment", {"event": "run.completed", "output": "done",
@@ -645,10 +875,12 @@ def test_06_sse_fragmentation_and_heartbeat(server):
 
 
 # ================================================================ 4b: 超限 fail-closed
-def test_07_sse_over_limit_failclosed(server):
-    """§7.4b：单行超硬上限 → protocol.error + 断流；status reconcile 收口权威终态。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+def test_07_sse_line_over_limit_failclosed(server):
+    """单行超硬上限 → protocol.error + 断流；status reconcile 收口权威终态；
+    断流后同流后续帧不得复活为业务/终态事件。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {}), ("completed", {"output": "OK"})])
     server.sse[run_id] = [
@@ -672,8 +904,9 @@ def test_07_sse_over_limit_failclosed(server):
 
 def test_08_sse_bad_frames_failclosed(server):
     """坏 JSON/非 object/缺 event/身份冲突帧 → protocol.error（流继续，零状态变更）。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {})])
     server.sse[run_id] = [
@@ -710,8 +943,9 @@ def test_08_sse_bad_frames_failclosed(server):
 
 def test_09_sse_duplicate_terminal_reducer_absorbs(server):
     """SSE 重复终态帧 → 16E 终态吸收；状态不被二次转移破坏。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {})])
     server.sse[run_id] = [
@@ -735,9 +969,10 @@ def test_09_sse_duplicate_terminal_reducer_absorbs(server):
 
 # ================================================================ 4c: 断线 reconcile
 def test_10_disconnect_reconciles_via_status_no_resubmit(server):
-    """§7.4c：SSE 断线 → status 轮询 reconcile → 权威终态；全程零重复 submit。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    """SSE 断线 → status 轮询 reconcile → 权威终态；全程零重复 submit。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {}), ("running", {}),
                                         ("completed", {"output": "OK"})])
@@ -759,9 +994,11 @@ def test_10_disconnect_reconciles_via_status_no_resubmit(server):
 
 
 def test_11_disconnect_unknown_boundary(server):
-    """§7.4d：不可恢复断线 / 终态记录被清扫 → 16E UNKNOWN；仍零重复 submit。"""
-    backend = _make_backend(server, reconnect_poll_budget_seconds=0.3)
-    handle = backend.submit(_projection())
+    """不可恢复断线 / 终态记录被清扫（404 + 精确 run_not_found）→ 16E UNKNOWN；仍零重复 submit。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract,
+                            reconnect_poll_budget_seconds=0.3)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {})])
     server.sse[run_id] = [("close",)]
@@ -769,11 +1006,12 @@ def test_11_disconnect_unknown_boundary(server):
     assert "transport.disconnected" in _kinds(records)
     assert reducer.view.primary is WorkExecutionState.UNKNOWN
     assert len(server.requests_to("/v1/runs", method="POST")) == 1
-    # 终态记录已被清扫（status/SSE 均 404）→ UNKNOWN，绝不臆造终态
+    # 终态记录已被清扫（status/SSE 均 404 run_not_found）→ UNKNOWN，绝不臆造终态
     n_submits_before = len(server.requests_to("/v1/runs", method="POST"))
-    backend2 = _make_backend(server, reconnect_poll_budget_seconds=0.3)
-    handle2 = backend2.submit(_projection(contract_id="wc_16c_swept",
-                                          content_hash="c" * 64))
+    contract2 = _make_contract(contract_id="wc_16c_swept")
+    backend2 = _make_backend(server, contract=contract2,
+                             reconnect_poll_budget_seconds=0.3)
+    handle2 = backend2.submit(contract2.to_backend_projection())
     server.set_status_sequence(handle2.run_id, [(404, {"error": {"code": "run_not_found"}})])
     server.sse[handle2.run_id] = [("close",)]
     records2, reducer2 = _drain_events(backend2, handle2, "wc_16c_swept")
@@ -788,9 +1026,10 @@ def test_11_disconnect_unknown_boundary(server):
 
 # ================================================================ 6: stop 不提前 CANCELLED
 def test_12_stop_waits_for_authoritative_terminal(server):
-    """§7.6：stop 200 stopping ≠ CANCELLED；CANCELLED 只来自 Hermes 权威终态。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    """stop 200 stopping ≠ CANCELLED；CANCELLED 只来自 Hermes 权威终态。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {})])
     release = threading.Event()
@@ -835,23 +1074,31 @@ def test_12_stop_waits_for_authoritative_terminal(server):
 
 
 def test_12b_stop_response_contract_shape(server):
-    """stop 响应必须符合实测契约（200 stopping + run_id 回显）；404 → 类型化失败。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    """stop 响应必须符合实测契约（200 stopping + run_id 回显）；
+    404 仅在错误码精确 run_not_found 时类型化"不声明 CANCELLED"；错误码不符 = 协议矛盾。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     backend.stop(handle)
     assert server.stop_requests == [handle.run_id]
     server.stop_response[handle.run_id] = (404, {"error": {"code": "run_not_found"}})
     with pytest.raises(HermesTransportError, match="不声明 CANCELLED"):
+        backend.stop(handle)
+    # 404 但错误码不符 → 绝不按 run_not_found 语义吞掉
+    server.stop_response[handle.run_id] = (404, {"error": {"code": "not_found"}})
+    with pytest.raises(HermesProtocolError, match="run_not_found"):
         backend.stop(handle)
     backend.close()
 
 
 # ================================================================ 5: approval 走 16D
 def test_13_approval_resolved_via_16d_forwards_once(server):
-    """§7.5a：approval.request → 16D 请求建立；真实 APPROVE_ONCE 决议 → 只转发 once。"""
+    """approval.request → 16D 请求建立（tool→capability 封闭映射）；真实 APPROVE_ONCE
+    决议 → 只转发 once、resolved==1 精确、16D approval 真实消费。"""
     broker = ApprovalBroker(owner_thread_id=threading.get_ident())
-    backend = _make_backend(server, broker=broker)
-    handle = backend.submit(_projection())
+    contract = _make_contract()
+    backend = _make_backend(server, broker=broker, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("waiting_for_approval", {}), ("running", {})])
     approved = threading.Event()
@@ -889,6 +1136,8 @@ def test_13_approval_resolved_via_16d_forwards_once(server):
     approved.set()
     result = backend.resolve_approval(approval_id)
     assert result["choice"] == "once" and result["resolved"] == 1
+    assert result["forwarded"] is True
+    assert broker.is_consumed(approval_id), "APPROVE_ONCE 转发成功后必须真实消费 16D approval"
     t.join(timeout=10)
     assert not t.is_alive()
     # Hermes 只收到 once；全程无 always/session
@@ -899,10 +1148,12 @@ def test_13_approval_resolved_via_16d_forwards_once(server):
 
 
 def test_14_approval_deny_and_timeout_failclosed(server):
-    """§7.5b：DENY → deny；未获决议（LATE）→ deny；全程绝不 always/session。"""
+    """DENY → deny；未获决议（LATE）→ deny；全程绝不 always/session。"""
     broker = ApprovalBroker(owner_thread_id=threading.get_ident())
-    backend = _make_backend(server, broker=broker, approval_wait_seconds=0.3)
-    handle = backend.submit(_projection())
+    contract = _make_contract()
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_wait_seconds=0.3, max_concurrent_runs=4)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("waiting_for_approval", {})])
     server.sse[run_id] = [
@@ -935,8 +1186,8 @@ def test_14_approval_deny_and_timeout_failclosed(server):
     t.join(timeout=10)
     assert not t.is_alive()
     # 超时：无任何决议 → LATE → fail-closed deny
-    handle2 = backend.submit(_projection(contract_id="wc_16c_ap_timeout",
-                                         content_hash="d" * 64))
+    contract2 = _make_contract(contract_id="wc_16c_ap_timeout")
+    handle2 = backend.submit(contract2.to_backend_projection())
     server.set_status_sequence(handle2.run_id, [("waiting_for_approval", {})])
     server.sse[handle2.run_id] = [
         ("frame", {"event": "approval.request", "tool": "terminal",
@@ -950,7 +1201,7 @@ def test_14_approval_deny_and_timeout_failclosed(server):
                                             contract_id="wc_16c_ap_timeout",
                                             run_id=handle2.run_id)
         for be in backend.events(handle2):
-            reducer2_ne = normalizer.normalize(be)
+            normalizer.normalize(be)
             if be.event_type == "approval.request":
                 container2["approval_id"] = be.payload.get("approval_id")
 
@@ -968,10 +1219,12 @@ def test_14_approval_deny_and_timeout_failclosed(server):
 
 
 def test_15_adapter_cannot_self_approve_or_bypass_16d(server):
-    """§7.5c：decision 面锁定的 broker 永远等不到决议（适配器不能自批）；16D 身份绑定。"""
+    """decision 面锁定的 broker 永远等不到决议（适配器不能自批）；16D 身份绑定真实契约。"""
     broker = ApprovalBroker(owner_thread_id=None)   # decision 面永久锁定（fail-closed）
-    backend = _make_backend(server, broker=broker, approval_wait_seconds=0.2)
-    handle = backend.submit(_projection())
+    contract = _make_contract()
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            approval_wait_seconds=0.2)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("waiting_for_approval", {})])
     server.sse[run_id] = [
@@ -995,12 +1248,12 @@ def test_15_adapter_cannot_self_approve_or_bypass_16d(server):
     t.join(timeout=10)
     assert not t.is_alive()
     assert server.approval_requests[0][1] == {"choice": "deny"}
-    # 16D 请求身份绑定本契约（contract_id/hash 来自 submit 账本）
+    # 16D 请求身份绑定本契约（contract_id/hash 来自 submit 账本的真实 WorkContract）
     requested = [e for e in broker.events if e.etype == "approval.requested"]
     assert requested, "16D 必须收到真实审批请求事件"
     payload = dict(requested[0].payload)
     assert payload["contract_id"] == CONTRACT_ID
-    assert payload["contract_hash"] == CONTENT_HASH
+    assert payload["contract_hash"] == contract.content_hash
     assert payload["run_id"] == run_id
     assert payload["provenance"] == "hermes_adapter"
     # 未知 approval_ref 拒绝（身份精确绑定）
@@ -1011,9 +1264,10 @@ def test_15_adapter_cannot_self_approve_or_bypass_16d(server):
 
 # ================================================================ 8/9: 秘密零泄漏
 def test_16_secret_redaction_no_leak(server):
-    """§7.9：payload 秘密经 16E 信封脱敏；错误文本/API key 零泄漏。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    """payload 秘密经 16E 信封脱敏；错误文本/API key 零泄漏。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {})])
     server.sse[run_id] = [
@@ -1039,17 +1293,18 @@ def test_16_secret_redaction_no_leak(server):
     # 认证失败错误文本零 API key
     server.submit_response = (401, {"error": {"message": "bad key"}})
     with pytest.raises(HermesTransportError) as exc_info:
-        backend.submit(_projection(contract_id="wc_16c_leak", content_hash="e" * 64))
+        backend.submit(_make_contract(contract_id="wc_16c_leak").to_backend_projection())
     assert server.api_key not in str(exc_info.value)
     backend.close()
 
 
 # ================================================================ 10: 端点封闭集
 def test_17_no_cli_proxy_webhook_fallback(server):
-    """§7.10：全部通信只在封闭端点集；失败路径无任何其它通道 fallback。"""
-    backend = _make_backend(server)
+    """全部通信只在封闭端点集；失败路径无任何其它通道 fallback。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
     backend.probe()
-    handle = backend.submit(_projection())
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {}), ("failed", {"error": "x"})])
     server.sse[run_id] = [("frame", {"event": "run.failed", "error": "x"}), ("close",)]
@@ -1057,7 +1312,7 @@ def test_17_no_cli_proxy_webhook_fallback(server):
     backend.stop(handle)
     for r in server.requests:
         p = r["path"]
-        assert (p == "/health" or p == "/v1/capabilities"
+        assert (p == "/health" or p == "/v1/capabilities" or p == "/v1/toolsets"
                 or p.startswith("/v1/runs")), f"越界端点请求: {p}"
         assert "?" not in p and "proxy" not in p and "webhook" not in p \
             and "chat" not in p and "completions" not in p
@@ -1065,7 +1320,7 @@ def test_17_no_cli_proxy_webhook_fallback(server):
     n_before = len(server.requests)
     server.submit_response = (500, {"error": {"message": "down"}})
     with pytest.raises(HermesTransportError):
-        backend.submit(_projection(contract_id="wc_16c_fb", content_hash="f" * 64))
+        backend.submit(_make_contract(contract_id="wc_16c_fb").to_backend_projection())
     new_requests = server.requests[n_before:]
     assert new_requests and all(r["path"] == "/v1/runs" for r in new_requests)
     backend.close()
@@ -1074,8 +1329,9 @@ def test_17_no_cli_proxy_webhook_fallback(server):
 # ================================================================ 4e: 身份精确绑定
 def test_18_identity_binding_strict(server):
     """身份精确绑定：外来 handle / 未知 run / 外来 approval_ref 全部类型化拒绝。"""
-    backend = _make_backend(server)
-    handle = backend.submit(_projection())
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
     foreign = BackendRunHandle(backend_id="native", run_id=handle.run_id)
     with pytest.raises(HermesProtocolError, match="backend_id"):
         list(backend.events(foreign))
@@ -1093,7 +1349,8 @@ def test_18_identity_binding_strict(server):
 
 # ================================================================ 5c: loopback / URL 纪律
 def test_19_loopback_and_url_discipline(server):
-    """§5：默认仅 loopback；URL 凭证/https/query/path/非 loopback 构造期拒绝。"""
+    """默认仅 loopback；URL 凭证/https/query/path/非法端口/非 loopback 构造期统一
+    HermesConfigurationError。"""
     broker = ApprovalBroker()
     bad_urls = [
         "http://10.1.2.3:8642",
@@ -1105,29 +1362,58 @@ def test_19_loopback_and_url_discipline(server):
         "http://127.0.0.1:8642/subpath",
         "ftp://127.0.0.1:8642",
         "",
+        # 非法端口：非数字 / 越界 / 负数 —— 统一折为 HermesConfigurationError
+        "http://127.0.0.1:notaport",
+        "http://127.0.0.1:99999",
+        "http://127.0.0.1:0",
+        "http://127.0.0.1:-1",
     ]
     for url in bad_urls:
         with pytest.raises(HermesConfigurationError):
-            HermesExecutionBackend(base_url=url, api_key="k" * 16, approval_broker=broker)
+            HermesExecutionBackend(base_url=url, api_key="k" * 16, approval_broker=broker,
+                                   expected_profile_identity=PROFILE_ID,
+                                   tool_capability_map=dict(DEFAULT_TOOL_MAP))
     with pytest.raises(HermesConfigurationError):
         HermesExecutionBackend(base_url=server.base_url, api_key="k" * 16,
-                               approval_broker="not-a-broker")
+                               approval_broker="not-a-broker",
+                               expected_profile_identity=PROFILE_ID,
+                               tool_capability_map=dict(DEFAULT_TOOL_MAP))
     with pytest.raises(HermesConfigurationError):
         HermesExecutionBackend(base_url=server.base_url, api_key="",
-                               approval_broker=broker)
+                               approval_broker=broker,
+                               expected_profile_identity=PROFILE_ID,
+                               tool_capability_map=dict(DEFAULT_TOOL_MAP))
     with pytest.raises(HermesConfigurationError):
         HermesExecutionBackend(base_url=server.base_url, api_key="k" * 16,
-                               approval_broker=broker, probe_ttl_seconds=-1)
+                               approval_broker=broker,
+                               expected_profile_identity=PROFILE_ID,
+                               tool_capability_map=dict(DEFAULT_TOOL_MAP),
+                               probe_ttl_seconds=-1)
     with pytest.raises(HermesConfigurationError):
         HermesExecutionBackend(base_url=server.base_url, api_key="k" * 16,
-                               approval_broker=broker, max_event_bytes=1)
+                               approval_broker=broker,
+                               expected_profile_identity=PROFILE_ID,
+                               tool_capability_map=dict(DEFAULT_TOOL_MAP),
+                               max_event_bytes=1)
+    # profile 身份缺失 / tool 映射越权 → 构造期拒绝
+    with pytest.raises(HermesConfigurationError, match="expected_profile_identity"):
+        HermesExecutionBackend(base_url=server.base_url, api_key="k" * 16,
+                               approval_broker=broker, expected_profile_identity="",
+                               tool_capability_map=dict(DEFAULT_TOOL_MAP))
+    with pytest.raises(HermesConfigurationError, match="越权|envelope"):
+        HermesExecutionBackend(base_url=server.base_url, api_key="k" * 16,
+                               approval_broker=broker,
+                               expected_profile_identity=PROFILE_ID,
+                               tool_capability_map={"terminal": "cap.evil"},
+                               capability_ids=("cap.filesystem",))
 
 
 # ================================================================ 12: registry/router interop
 def test_20_native_regression_and_router_interop(server):
-    """§7.12：registry/router 与 hermes/native 并存；workspace 诚实边界；16B 语义不变。"""
+    """registry/router 与 hermes/native 并存；workspace 诚实边界；16B 语义不变。"""
     registry = ExecutionBackendRegistry()
-    backend = _make_backend(server)
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
     registry.register(backend)
     registry.register(_StaticNativeForInterop())
     with pytest.raises(Exception):
@@ -1192,10 +1478,11 @@ class _StaticNativeForInterop(ExecutionBackend):
 
 # ================================================================ 11: 资源清理
 def test_21_close_and_generator_cleanup(server):
-    """§7.11：close 幂等；生成器提前关闭（cancel-safe）；close 后仍可重新探活。"""
-    backend = _make_backend(server)
+    """close 幂等；生成器提前关闭（cancel-safe）；close 后仍可重新探活。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
     backend.probe()
-    handle = backend.submit(_projection())
+    handle = backend.submit(contract.to_backend_projection())
     run_id = handle.run_id
     server.set_status_sequence(run_id, [("running", {})])
     release = threading.Event()
@@ -1214,7 +1501,7 @@ def test_21_close_and_generator_cleanup(server):
 
 # ================================================================ 8b: C1–C7 隔离
 def test_22_no_cognition_persona_db_dependency(server):
-    """§7.8：16C 模块零 cognition/db/shell 依赖；端点封闭集恰为 7 个 method+path。"""
+    """16C 模块零 cognition/db/shell 依赖；端点封闭集恰为 8 个 method+path。"""
     import furina.agent.backend.hermes as hermes_mod
     with open(hermes_mod.__file__, encoding="utf-8") as f:
         source = f.read()
@@ -1223,6 +1510,653 @@ def test_22_no_cognition_persona_db_dependency(server):
                       "urllib.request", "requests.post"):
         assert forbidden not in source, f"16C 模块出现禁止依赖: {forbidden}"
     paths = set(re.findall(r'_PATH_[A-Z_]+ = "([^"]+)"', source))
-    assert paths == {"/health", "/v1/capabilities", "/v1/runs", "/v1/runs/{run_id}",
-                     "/v1/runs/{run_id}/events", "/v1/runs/{run_id}/approval",
-                     "/v1/runs/{run_id}/stop"}
+    assert paths == {"/health", "/v1/capabilities", "/v1/toolsets", "/v1/runs",
+                     "/v1/runs/{run_id}", "/v1/runs/{run_id}/events",
+                     "/v1/runs/{run_id}/approval", "/v1/runs/{run_id}/stop"}
+
+
+# =================================================================================
+# ================================ Reviewer Patch 1 专项 ============================
+# =================================================================================
+
+# --------------------------------------------------------------- R1: contract 权威
+def test_23_reviewer_tampered_or_incomplete_contract_rejected(server):
+    """R1-locked：篡改/不完整 WorkContract projection 一律 submit 前拒绝（零 HTTP）；
+    合法主路径必须经真实 to_backend_projection。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    # 不完整 projection（旧版手写 dict 形态）不再是合法输入
+    with pytest.raises(BackendScopeViolation, match="缺失必需键"):
+        backend.submit({"contract_id": CONTRACT_ID,
+                        "canonical_user_request": "手工裁剪 dict",
+                        "content_hash": "a" * 64,
+                        "allowed_backends": ["hermes"],
+                        "allowed_capabilities": ["cap.filesystem"]})
+    # 未知字段（自签扩权注入）拒绝
+    tampered = _projection(contract)
+    tampered["operator_override"] = {"allowed_capabilities": ["cap.god"]}
+    with pytest.raises(BackendScopeViolation, match="未知字段"):
+        backend.submit(tampered)
+    # 篡改 hash 拒绝（16A 从不重新签名）
+    with pytest.raises(BackendScopeViolation, match="content_hash"):
+        backend.submit(_projection(contract, content_hash="c" * 64))
+    # 篡改载荷拒绝（重算摘要不符）
+    with pytest.raises(BackendScopeViolation, match="content_hash"):
+        backend.submit(_projection(contract, objective="被替换的目标"))
+    # envelope 封闭相等：多一方（重签合法 projection）也拒绝（不能只证明"是子集"）
+    with pytest.raises(BackendScopeViolation, match="封闭相等"):
+        backend.submit(_make_contract(
+            caps=("cap.filesystem", "cap.filesystem.extra")).to_backend_projection())
+    # 合法主路径：真实 projection 全键集 + 内容摘要复核通过
+    handle = backend.submit(contract.to_backend_projection())
+    assert handle.correlation == CONTRACT_ID
+    assert len(server.requests_to("/v1/runs", method="POST")) == 1
+    backend.close()
+
+
+def test_24_reviewer_expected_profile_identity_bound(server):
+    """R1-locked：probe 必须绑定 expected Hermes profile identity；
+    /v1/capabilities 返回的 profile/model 缺失或不一致 → unhealthy。"""
+    fresh = _FakeHermesServer()
+    good_caps = fresh.capabilities[1]
+    fresh.shutdown()
+    # model 不一致 → unhealthy
+    server.capabilities = (200, {**good_caps, "model": "another-profile"})
+    backend = _make_backend(server)
+    h = backend.probe()
+    assert not h.healthy and "profile_identity_mismatch" in h.reason
+    assert "another-profile" in h.reason and "hermes-agent" in h.reason
+    backend.close()
+    # model 缺失 → unhealthy（fail-closed）
+    caps_no_model = {k: v for k, v in good_caps.items() if k != "model"}
+    server.capabilities = (200, caps_no_model)
+    backend = _make_backend(server)
+    h = backend.probe()
+    assert not h.healthy and "profile_identity_missing" in h.reason
+    backend.close()
+    # 一致 → healthy，且 profile 身份来自构造期绑定（不可缺省）
+    server.capabilities = (200, good_caps)
+    backend = _make_backend(server)
+    assert backend.probe().healthy
+    backend.close()
+    with pytest.raises(TypeError):
+        HermesExecutionBackend(base_url=server.base_url, api_key=server.api_key,
+                               approval_broker=ApprovalBroker(),
+                               tool_capability_map=dict(DEFAULT_TOOL_MAP),
+                               capability_ids=("cap.filesystem",))
+
+
+# --------------------------------------------------------------- R1: capability/tool 映射
+def test_25_reviewer_capability_tool_escalation_denied(server):
+    """R1-locked：未知工具/缺失工具自动 deny（fail-closed，零 16D 请求、零可扩权审批）；
+    帧自带 capability 声明不被信任；映射越权构造期拒绝。"""
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract()
+    backend = _make_backend(server, broker=broker, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
+    run_id = handle.run_id
+    server.set_status_sequence(run_id, [("running", {}), ("completed", {"output": "OK"})])
+    server.sse[run_id] = [
+        # 未知工具（不在封闭映射内）→ 自动 deny
+        ("frame", {"event": "approval.request", "tool": "file_editor",
+                   "command": "write /etc/hosts", "preview": "write /etc/hosts"}),
+        # 工具缺失 → 自动 deny
+        ("frame", {"event": "approval.request", "command": "no tool at all"}),
+        # 未知工具 + 帧自带 capability 自签声明 → 仍自动 deny（帧 capability 不被信任）
+        ("frame", {"event": "approval.request", "tool": "memory_tool",
+                   "capability": "cap.filesystem", "command": "steal secrets"}),
+        # 映射内工具 → 正常 16D 请求
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "command": "echo ok", "preview": "echo ok"}),
+        ("frame", {"event": "run.completed", "output": "OK",
+                   "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}),
+        ("close",),
+    ]
+    approval_ids: List[str] = []
+    for be in backend.events(handle):
+        if be.event_type == "approval.request":
+            approval_ids.append(be.payload["approval_id"])
+    # 三次扩权尝试全部自动 deny（Hermes 收到 3 条 deny + 无 16D 请求）
+    denies = [body for _, body in server.approval_requests if body.get("choice") == "deny"]
+    assert len(denies) == 3, f"未知/缺失工具必须自动 deny: {server.approval_requests}"
+    assert len(approval_ids) == 1, "只有映射内工具才建立 16D 请求"
+    requested = [e for e in broker.events if e.etype == "approval.requested"]
+    assert len(requested) == 1
+    assert dict(requested[0].payload)["tool"] == "terminal"
+    assert dict(requested[0].payload)["capability"] == "cap.filesystem"
+    # 映射越权（值不在 envelope 内）构造期拒绝——不向可扩权映射开放
+    with pytest.raises(HermesConfigurationError):
+        _make_backend(server, contract=contract,
+                      tool_capability_map={"terminal": "cap.filesystem",
+                                           "god_tool": "cap.omnipotence"})
+    backend.close()
+
+
+# --------------------------------------------------------------- R2: approval exact identity
+def test_26_reviewer_same_preview_different_command_distinct_approvals(server):
+    """R2-locked：同 tool 同 preview、不同 command ⇒ 不同 operation digest ⇒ 不同
+    16D approval（(tool, preview) 有损身份缓存已废除）；相同操作帧幂等复用。"""
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract()
+    backend = _make_backend(server, broker=broker, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
+    run_id = handle.run_id
+    server.set_status_sequence(run_id, [("running", {}), ("completed", {"output": "OK"})])
+    server.sse[run_id] = [
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "preview": "echo OK", "command": "echo OK"}),
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "preview": "echo OK", "command": "echo OK; rm -rf /tmp/x"}),
+        # 完全相同的操作帧 → broker 原子 get-or-create 幂等复用同一 approval
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "preview": "echo OK", "command": "echo OK"}),
+        ("frame", {"event": "run.completed", "output": "OK",
+                   "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}),
+        ("close",),
+    ]
+    seen: List[str] = []
+    for be in backend.events(handle):
+        if be.event_type == "approval.request":
+            seen.append(be.payload["approval_id"])
+    assert len(seen) == 3
+    assert seen[0] != seen[1], "同 preview 不同 command 必须得到不同 approval"
+    assert seen[0] == seen[2], "完全相同的操作帧必须幂等复用同一 approval"
+    requested = [e for e in broker.events if e.etype == "approval.requested"]
+    assert len(requested) == 2, "16D 只创建两个不同操作身份的请求"
+    backend.close()
+
+
+def test_27_reviewer_approval_forward_exactly_once(server):
+    """R2-locked：同一 approval 顺序重复/并发 resolve 只有一个 Hermes POST；
+    第二次调用 typed no-op；409 仅精确 approval_not_pending 才是 no-op。"""
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    contract = _make_contract()
+    backend = _make_backend(server, broker=broker, contract=contract,
+                            reconnect_poll_budget_seconds=0.5, max_concurrent_runs=8)
+    handle = backend.submit(contract.to_backend_projection())
+    run_id = handle.run_id
+    server.set_status_sequence(run_id, [("waiting_for_approval", {})])
+    server.sse[run_id] = [
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "command": "echo once", "preview": "echo once"}),
+        ("close",),
+    ]
+    container: Dict[str, Any] = {}
+
+    def consume() -> None:
+        for be in backend.events(handle):
+            if be.event_type == "approval.request":
+                container["approval_id"] = be.payload.get("approval_id")
+
+    t = threading.Thread(target=consume, daemon=True)
+    t.start()
+    assert _wait_until(lambda: "approval_id" in container)
+    approval_id = container["approval_id"]
+    assert broker.resolve(approval_id, ApprovalDecisionKind.APPROVE_ONCE).ok
+    # 顺序重复：第二次 typed no-op，零新 POST
+    first = backend.resolve_approval(approval_id)
+    assert first["forwarded"] is True and first["resolved"] == 1
+    second = backend.resolve_approval(approval_id)
+    assert second["forwarded"] is False and second["resolved"] == 0, \
+        "重复 resolve 必须 typed no-op"
+    # 并发 resolve：单请求获胜，只有一个 POST
+    server.approval_requests.clear()
+    contract2 = _make_contract(contract_id="wc_16c_concurrent_ap")
+    handle2 = backend.submit(contract2.to_backend_projection())
+    server.set_status_sequence(handle2.run_id, [("waiting_for_approval", {})])
+    server.sse[handle2.run_id] = [
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "command": "echo concurrent", "preview": "echo concurrent"}),
+        ("close",),
+    ]
+    container2: Dict[str, Any] = {}
+
+    def consume2() -> None:
+        for be in backend.events(handle2):
+            if be.event_type == "approval.request":
+                container2["approval_id"] = be.payload.get("approval_id")
+
+    t2 = threading.Thread(target=consume2, daemon=True)
+    t2.start()
+    assert _wait_until(lambda: "approval_id" in container2)
+    approval_id2 = container2["approval_id"]
+    assert broker.resolve(approval_id2, ApprovalDecisionKind.APPROVE_ONCE).ok
+    barrier = threading.Barrier(4)
+    results: List[Dict[str, Any]] = []
+
+    def racer() -> None:
+        barrier.wait()
+        results.append(backend.resolve_approval(approval_id2))
+
+    threads = [threading.Thread(target=racer, daemon=True) for _ in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=10)
+    assert len(results) == 4
+    forwarded = [r for r in results if r.get("forwarded") is True]
+    noops = [r for r in results if r.get("forwarded") is False]
+    assert len(forwarded) == 1, f"并发 resolve 只能一个请求获胜: {results}"
+    assert len(noops) == 3
+    assert forwarded[0]["resolved"] == 1 and forwarded[0]["choice"] == "once"
+    assert len(server.approval_requests) == 1, \
+        f"同 approval 并发 resolve 只能有一个 Hermes POST: {server.approval_requests}"
+    # 409 错误码精确校验：approval_not_pending → typed no-op；其他 409 → 协议错误
+    contract3 = _make_contract(contract_id="wc_16c_409_exact")
+    handle3 = backend.submit(contract3.to_backend_projection())
+    server.set_status_sequence(handle3.run_id, [("waiting_for_approval", {})])
+    server.sse[handle3.run_id] = [
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "command": "echo 409", "preview": "echo 409"}),
+        ("close",),
+    ]
+    container3: Dict[str, Any] = {}
+
+    def consume3() -> None:
+        for be in backend.events(handle3):
+            if be.event_type == "approval.request":
+                container3["approval_id"] = be.payload.get("approval_id")
+
+    t3 = threading.Thread(target=consume3, daemon=True)
+    t3.start()
+    assert _wait_until(lambda: "approval_id" in container3)
+    approval_id3 = container3["approval_id"]
+    assert broker.resolve(approval_id3, ApprovalDecisionKind.APPROVE_ONCE).ok
+    server.approval_response[handle3.run_id] = (
+        409, {"error": {"message": "no pending", "code": "approval_not_pending"}})
+    result409 = backend.resolve_approval(approval_id3)
+    assert result409["resolved"] == 0 and result409["forwarded"] is True
+    server.approval_response[handle3.run_id] = (
+        409, {"error": {"message": "no session", "code": "approval_not_active"}})
+    contract4 = _make_contract(contract_id="wc_16c_409_wrong")
+    handle4 = backend.submit(contract4.to_backend_projection())
+    server.set_status_sequence(handle4.run_id, [("waiting_for_approval", {})])
+    server.sse[handle4.run_id] = [
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "command": "echo 409b", "preview": "echo 409b"}),
+        ("close",),
+    ]
+    container4: Dict[str, Any] = {}
+
+    def consume4() -> None:
+        for be in backend.events(handle4):
+            if be.event_type == "approval.request":
+                container4["approval_id"] = be.payload.get("approval_id")
+
+    t4 = threading.Thread(target=consume4, daemon=True)
+    t4.start()
+    assert _wait_until(lambda: "approval_id" in container4)
+    assert broker.resolve(container4["approval_id"], ApprovalDecisionKind.APPROVE_ONCE).ok
+    server.approval_response[handle4.run_id] = (
+        409, {"error": {"message": "no session", "code": "approval_not_active"}})
+    with pytest.raises(HermesProtocolError, match="approval_not_pending"):
+        backend.resolve_approval(container4["approval_id"])
+    # resolved != 1 的 200 绝不虚报成功
+    contract5 = _make_contract(contract_id="wc_16c_resolved0")
+    handle5 = backend.submit(contract5.to_backend_projection())
+    server.set_status_sequence(handle5.run_id, [("waiting_for_approval", {})])
+    server.sse[handle5.run_id] = [
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "command": "echo r0", "preview": "echo r0"}),
+        ("close",),
+    ]
+    container5: Dict[str, Any] = {}
+
+    def consume5() -> None:
+        for be in backend.events(handle5):
+            if be.event_type == "approval.request":
+                container5["approval_id"] = be.payload.get("approval_id")
+
+    t5 = threading.Thread(target=consume5, daemon=True)
+    t5.start()
+    assert _wait_until(lambda: "approval_id" in container5)
+    assert broker.resolve(container5["approval_id"], ApprovalDecisionKind.APPROVE_ONCE).ok
+    server.approval_response[handle5.run_id] = (
+        200, {"object": "hermes.run.approval_response", "run_id": handle5.run_id,
+              "choice": "once", "resolved": 0})
+    with pytest.raises(HermesProtocolError, match="resolved"):
+        backend.resolve_approval(container5["approval_id"])
+    for th in (t, t2, t3, t4, t5):
+        th.join(timeout=5)
+    backend.close()
+
+
+# --------------------------------------------------------------- R3: submit 原子幂等
+def test_28_reviewer_concurrent_duplicate_submit_single_post(server):
+    """R3-locked：两线程提交同一 contract → 服务器只收到一个 POST，两者获得同一结果；
+    首次 submit 结果不确定后绝不自动重提。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    server.submit_delay = 0.4   # 拉开并发窗口
+    barrier = threading.Barrier(2)
+    results: List[Any] = []
+
+    def submitter() -> None:
+        barrier.wait()
+        try:
+            results.append(("ok", backend.submit(contract.to_backend_projection())))
+        except Exception as exc:   # noqa: BLE001
+            results.append(("err", exc))
+
+    threads = [threading.Thread(target=submitter, daemon=True) for _ in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=15)
+    server.submit_delay = 0.0
+    assert len(results) == 2
+    outcomes = {kind for kind, _ in results}
+    assert outcomes == {"ok"}, f"并发同契约必须同结果: {results}"
+    run_ids = {r.run_id for _, r in results}
+    assert len(run_ids) == 1, f"两者必须获得同一 run handle: {results}"
+    posts = server.requests_to("/v1/runs", method="POST")
+    assert len(posts) == 1, f"服务器只能收到一个 POST: {len(posts)}"
+    # 结果不确定（连接被切断）→ reservation 中毒：同 contract 后续 submit 一律拒绝，
+    # 绝不自动重提（始终只有第一个 POST）
+    contract_b = _make_contract(contract_id="wc_16c_ambiguous")
+    backend_b = _make_backend(server, contract=contract_b)
+    server.drop_next_submit = True
+    with pytest.raises(HermesTransportError, match="不确定"):
+        backend_b.submit(contract_b.to_backend_projection())
+    n_posts = len(server.requests_to("/v1/runs", method="POST"))
+    with pytest.raises(HermesTransportError, match="不自动重提"):
+        backend_b.submit(contract_b.to_backend_projection())
+    with pytest.raises(HermesTransportError, match="不自动重提"):
+        backend_b.submit(contract_b.to_backend_projection())
+    assert len(server.requests_to("/v1/runs", method="POST")) == n_posts, \
+        "结果不确定后绝无第二次 POST"
+    backend.close()
+    backend_b.close()
+
+
+def test_29_reviewer_concurrency_and_ledger_hard_capacity(server):
+    """R3-locked：max_concurrent_runs 真实执行（终态交付才释放槽位）；
+    contract/run/approval 账本硬容量 fail-closed，不淘汰、不诱导重执行。"""
+    contract_a = _make_contract(contract_id="wc_16c_cap_a")
+    backend = _make_backend(server, contract=contract_a,
+                            max_concurrent_runs=1, max_tracked_contracts=2,
+                            max_tracked_runs=8)
+    handle_a = backend.submit(contract_a.to_backend_projection())
+    # 并发槽满：第二个不同契约 submit fail-closed（reservation 释放，不占账本）
+    contract_b = _make_contract(contract_id="wc_16c_cap_b")
+    with pytest.raises(BackendScopeViolation, match="max_concurrent_runs"):
+        backend.submit(contract_b.to_backend_projection())
+    # A 权威终态交付 → 槽位释放 → B 可提交
+    server.set_status_sequence(handle_a.run_id, [("running", {})])
+    server.sse[handle_a.run_id] = [
+        ("frame", {"event": "run.completed", "output": "OK",
+                   "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}),
+        ("close",),
+    ]
+    list(backend.events(handle_a))
+    handle_b = backend.submit(contract_b.to_backend_projection())
+    server.set_status_sequence(handle_b.run_id, [("running", {})])
+    server.sse[handle_b.run_id] = [
+        ("frame", {"event": "run.completed", "output": "OK",
+                   "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}),
+        ("close",),
+    ]
+    list(backend.events(handle_b))
+    # contract 账本硬容量（=2）：第三个契约 fail-closed；不淘汰 → A 幂等重放仍返回
+    # 同一 handle 且零新 POST
+    contract_c = _make_contract(contract_id="wc_16c_cap_c")
+    with pytest.raises(BackendScopeViolation, match="硬容量"):
+        backend.submit(contract_c.to_backend_projection())
+    assert backend.submit(contract_a.to_backend_projection()) == handle_a
+    assert len(server.requests_to("/v1/runs", method="POST")) == 2, \
+        "账本不淘汰：重放零新 POST"
+    # run 账本硬容量：提交时 run 记录无法入账 → 结果不确定中毒，绝不静默超账本
+    backend_r = _make_backend(server, contract=_make_contract(contract_id="wc_16c_cap_r"),
+                              max_concurrent_runs=4, max_tracked_runs=1)
+    contract_r1 = _make_contract(contract_id="wc_16c_cap_r")
+    contract_r2 = _make_contract(contract_id="wc_16c_cap_r2")
+    backend_r.submit(contract_r1.to_backend_projection())
+    with pytest.raises(HermesTransportError, match="硬容量"):
+        backend_r.submit(contract_r2.to_backend_projection())
+    with pytest.raises(HermesTransportError, match="不自动重提"):
+        backend_r.submit(contract_r2.to_backend_projection())
+    backend_r.close()
+    # approval 账本硬容量：满容量后新审批 fail-closed 自动 deny，不建立 16D 请求
+    broker = ApprovalBroker(owner_thread_id=threading.get_ident())
+    backend_p = _make_backend(server, broker=broker,
+                              contract=_make_contract(contract_id="wc_16c_cap_p"),
+                              max_concurrent_runs=4, max_tracked_approvals=1)
+    contract_p = _make_contract(contract_id="wc_16c_cap_p")
+    handle_p = backend_p.submit(contract_p.to_backend_projection())
+    server.set_status_sequence(handle_p.run_id, [("running", {}),
+                                                 ("completed", {"output": "OK"})])
+    server.sse[handle_p.run_id] = [
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "command": "echo one", "preview": "echo one"}),
+        ("frame", {"event": "approval.request", "tool": "terminal",
+                   "command": "echo two", "preview": "echo two"}),
+        ("frame", {"event": "run.completed", "output": "OK",
+                   "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}),
+        ("close",),
+    ]
+    approval_ids = [be.payload["approval_id"] for be in backend_p.events(handle_p)
+                    if be.event_type == "approval.request"]
+    assert len(approval_ids) == 1, "容量满后不得建立第二个 16D 请求"
+    denies = [body for _, body in server.approval_requests
+              if body.get("choice") == "deny"]
+    assert len(denies) == 1, "容量满的新审批必须 fail-closed 自动 deny"
+    backend.close()
+    backend_p.close()
+
+
+# --------------------------------------------------------------- R4: HTTP/status 身份封闭
+def test_30_reviewer_status_wrong_run_id_never_terminal(server):
+    """R4-locked：status/reconcile 返回的 run_id 缺失或冲突 → 绝不产生终态；
+    身份冲突可观察（protocol.error），窗口耗尽按 UNKNOWN 收口，零重复 submit。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract,
+                            reconnect_poll_budget_seconds=0.3)
+    handle = backend.submit(contract.to_backend_projection())
+    run_id = handle.run_id
+    # run_id 冲突的"completed"必须被拒绝
+    server.set_status_sequence(run_id, [("running", {}),
+                                        ("completed", {"run_id": "run_other",
+                                                       "output": "EVIL"})])
+    server.sse[run_id] = [("close",)]   # SSE 立即断线 → reconcile
+    records, reducer = _drain_events(backend, handle, CONTRACT_ID)
+    kinds = _kinds(records)
+    assert "run.completed" not in kinds, f"错 run_id 的 completed 不得终态: {kinds}"
+    assert "status_identity_conflict" in [be.payload.get("reason")
+                                          for be, _, _ in records
+                                          if be.event_type == "protocol.error"]
+    assert "transport.disconnected" in kinds
+    assert reducer.view.primary is WorkExecutionState.UNKNOWN
+    assert len(server.requests_to("/v1/runs", method="POST")) == 1
+    # run_id 缺失同样不得终态
+    contract2 = _make_contract(contract_id="wc_16c_missing_rid")
+    backend2 = _make_backend(server, contract=contract2,
+                             reconnect_poll_budget_seconds=0.3)
+    handle2 = backend2.submit(contract2.to_backend_projection())
+    server.set_status_sequence(handle2.run_id,
+                               [("completed", {"run_id": None, "output": "EVIL"})])
+    server.sse[handle2.run_id] = [("close",)]
+    records2, reducer2 = _drain_events(backend2, handle2, "wc_16c_missing_rid")
+    assert "run.completed" not in _kinds(records2)
+    assert reducer2.view.primary is WorkExecutionState.UNKNOWN
+    backend.close()
+    backend2.close()
+
+
+def test_31_reviewer_json_content_type_and_exact_error_codes(server):
+    """R4-locked：text/plain JSON 拒绝；404/409 特殊路径必须验证真实错误码；
+    状态词表外/身份形状损坏绝不折算终态。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    # text/plain 承载合法 JSON 的 202 → 协议错误（且结果不确定 → 契约中毒防重提）
+    server.submit_raw = (202, "text/plain",
+                         json.dumps({"run_id": "run_rawtext",
+                                     "status": "started"}).encode("utf-8"))
+    bad_ct = _make_contract(contract_id="wc_16c_textplain")
+    with pytest.raises(HermesProtocolError, match="application/json"):
+        backend.submit(bad_ct.to_backend_projection())
+    with pytest.raises(HermesTransportError, match="不自动重提"):
+        backend.submit(bad_ct.to_backend_projection())
+    # reconcile 404 错误码不符 → 不按 swept 吞掉（继续轮询至预算耗尽）
+    contract2 = _make_contract(contract_id="wc_16c_404code")
+    backend2 = _make_backend(server, contract=contract2,
+                             reconnect_poll_budget_seconds=0.25)
+    handle2 = backend2.submit(contract2.to_backend_projection())
+    server.route_override["status"] = (404, {"error": {"message": "gone",
+                                                       "code": "nope"}})
+    server.sse[handle2.run_id] = [("close",)]
+    records2, reducer2 = _drain_events(backend2, handle2, "wc_16c_404code")
+    swept = [be for be, _, _ in records2
+             if be.event_type == "transport.disconnected"
+             and be.payload.get("reason") == "run_record_swept"]
+    assert not swept, "错误码不符的 404 绝不按 run_record_swept 吞掉"
+    wrong_code = [be.payload.get("reason") for be, _, _ in records2
+                  if be.event_type == "protocol.error"]
+    assert "status_404_wrong_code" in wrong_code
+    assert reducer2.view.primary is WorkExecutionState.UNKNOWN
+    # 状态词表外的 status → 绝不终态
+    server.route_override.clear()
+    contract3 = _make_contract(contract_id="wc_16c_badword")
+    backend3 = _make_backend(server, contract=contract3,
+                             reconnect_poll_budget_seconds=0.25)
+    handle3 = backend3.submit(contract3.to_backend_projection())
+    server.set_status_sequence(handle3.run_id, [("exploded", {"output": "EVIL"})])
+    server.sse[handle3.run_id] = [("close",)]
+    records3, reducer3 = _drain_events(backend3, handle3, "wc_16c_badword")
+    assert "run.exploded" not in _kinds(records3)
+    assert "run.completed" not in _kinds(records3)
+    assert reducer3.view.primary is WorkExecutionState.UNKNOWN
+    backend.close()
+    backend2.close()
+    backend3.close()
+
+
+# --------------------------------------------------------------- R5: SSE parser
+def test_32_reviewer_oversize_suffix_never_revives_terminal(server):
+    """R5-locked：事件超限（原始 UTF-8 bytes 计数）→ discard-until-blank；
+    同一超限事件的后续 data 行绝不重新解释/复活为 terminal；流后续合法帧继续交付。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract, max_event_bytes=1024)
+    handle = backend.submit(contract.to_backend_projection())
+    run_id = handle.run_id
+    server.set_status_sequence(run_id, [("running", {})])
+    evil1 = json.dumps({"event": "run.completed", "output": "EVIL-1"}).encode()
+    evil2 = json.dumps({"event": "run.completed", "output": "EVIL-2"}).encode()
+    ok_failed = json.dumps({"event": "run.failed", "error": "authoritative"}).encode()
+    server.sse[run_id] = [
+        # 一个事件 = 连续 data 行直到空行：line1(1000B) + line2 超过 1024B 事件上限
+        ("raw", b"data: " + b"A" * 1000 + b"\n"),
+        ("raw", b"data: " + evil1 + b"\n"),
+        # 超限事件的"后半段"：不得复活为新事件/terminal
+        ("raw", b"data: " + evil2 + b"\n"),
+        ("raw", b"\n"),   # 空行：discard 状态结束
+        ("raw", b"data: " + ok_failed + b"\n\n"),
+        ("close",),
+    ]
+    records, reducer = _drain_events(backend, handle, CONTRACT_ID)
+    kinds = _kinds(records)
+    assert kinds.count("run.completed") == 0, \
+        f"超限事件后半段绝不复活为 terminal: {kinds}"
+    over = [be for be, _, _ in records
+            if be.event_type == "protocol.error"
+            and be.payload.get("reason") == "sse_event_over_limit"]
+    assert over, "必须报告 sse_event_over_limit"
+    assert kinds.count("run.failed") == 1, "空行后的后续合法帧继续交付"
+    assert reducer.view.primary is WorkExecutionState.FAILED
+    backend.close()
+
+
+def test_33_reviewer_invalid_utf8_never_business_event(server):
+    """R5-locked：非法 UTF-8 字节 → protocol.error，且不得形成业务/终态事件；
+    权威终态只来自 status reconcile。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    handle = backend.submit(contract.to_backend_projection())
+    run_id = handle.run_id
+    server.set_status_sequence(run_id, [("running", {}), ("completed", {"output": "OK"})])
+    server.sse[run_id] = [
+        ("raw", b"data: {\"event\": \"tool.started\", \"tool\": \"t\xff\xfebad\"}\n\n"),
+        ("raw", b"data: {\"event\": \"run.completed\", \"output\": \"EVIL\"}\n\n"),
+        ("close",),
+    ]
+    records, reducer = _drain_events(backend, handle, CONTRACT_ID)
+    kinds = _kinds(records)
+    assert "tool.started" not in kinds, "非法 UTF-8 不得形成业务事件"
+    assert "run.completed" not in kinds or \
+        all(be.payload.get("output") == "OK" for be, _, _ in records
+            if be.event_type == "run.completed"), "EVIL 帧不得成为终态 payload"
+    invalid = [be for be, _, _ in records
+               if be.event_type == "protocol.error"
+               and be.payload.get("reason") == "sse_invalid_utf8"]
+    assert invalid, "必须报告 sse_invalid_utf8"
+    completed = [be for be, _, _ in records if be.event_type == "run.completed"]
+    assert len(completed) == 1 and completed[0].payload.get("output") == "OK", \
+        "终态只来自权威 status reconcile"
+    assert reducer.view.primary is WorkExecutionState.BACKEND_DONE_UNVERIFIED
+    backend.close()
+
+
+# --------------------------------------------------------------- R4: 裸 key 零泄漏
+def test_34_reviewer_bare_api_key_echo_zero_leak(server):
+    """裸 API key 回显：先按精确 key 值脱敏、再做秘密形态脱敏——服务端把 key 原样
+    放进错误消息也不得进入异常文本。"""
+    contract = _make_contract()
+    backend = _make_backend(server, contract=contract)
+    # 形态脱敏抓不到的裸值回显（无 key=/token= 形态）
+    server.submit_response = (401, {"error": {"message":
+                                              f"invalid credential {server.api_key} rejected"}})
+    with pytest.raises(HermesTransportError) as exc_info:
+        backend.submit(_make_contract(contract_id="wc_16c_barekey")
+                       .to_backend_projection())
+    assert server.api_key not in str(exc_info.value), \
+        f"裸 key 值泄漏进异常: {exc_info.value}"
+    assert "[REDACTED]" in str(exc_info.value)
+    # 秘密形态回显同样零泄漏
+    server.submit_response = (500, {"error": {"message":
+                                              f"boom api_key={server.api_key} internal"}})
+    with pytest.raises(HermesTransportError) as exc_info2:
+        backend.submit(_make_contract(contract_id="wc_16c_formkey")
+                       .to_backend_projection())
+    assert server.api_key not in str(exc_info2.value)
+    backend.close()
+
+
+# --------------------------------------------------------------- R6: lying capabilities
+def test_35_reviewer_lying_capabilities_probe_unhealthy(server):
+    """R6-locked：required feature 只广告但实际 endpoint 缺失（错误码不符的 404）、
+    认证异常或形状矛盾 → probe 必须 unhealthy；probe 全程无副作用（零真实 run）。"""
+    # events 端点缺失（404 但错误码不是 run_not_found = 路由不存在）
+    server.route_override["events"] = (404, {"error": {"message": "no route",
+                                                       "code": "not_found"}})
+    backend = _make_backend(server)
+    h = backend.probe()
+    assert not h.healthy and "run_events" in h.reason
+    backend.close()
+    # approval 端点缺失
+    server.route_override = {"approval": (404, {"error": {"message": "no route",
+                                                          "code": "not_found"}})}
+    backend = _make_backend(server)
+    h = backend.probe()
+    assert not h.healthy and "run_approval" in h.reason
+    backend.close()
+    # stop 端点缺失
+    server.route_override = {"stop": (404, {"error": {"message": "no route",
+                                                      "code": "not_found"}})}
+    backend = _make_backend(server)
+    h = backend.probe()
+    assert not h.healthy and "run_stop" in h.reason
+    backend.close()
+    # status 端点形状矛盾（200 而非 404 → 广告与实际矛盾）
+    server.route_override = {"status": (200, {"object": "hermes.run", "status": "queued"})}
+    backend = _make_backend(server)
+    h = backend.probe()
+    assert not h.healthy and "run_status" in h.reason
+    backend.close()
+    # events 端点认证异常（401）
+    server.route_override = {"events": (401, {"error": {"code": "gateway_auth_failed"}})}
+    backend = _make_backend(server)
+    h = backend.probe()
+    assert not h.healthy and "auth_rejected" in h.reason
+    backend.close()
+    # 副作用封闭：probe 全程零 POST /v1/runs、零真实 run 注册
+    assert not server.requests_to("/v1/runs", method="POST")
+    assert all(rid.startswith("prb_") for rid in server.runs) or not server.runs
