@@ -2,20 +2,22 @@
 # Closeout Report — EXACT TEMPLATE
 
 ```text
-STATUS                         = EXECUTED — Reviewer Patch 5（Gate→ApprovalBroker
-                                 绑定证明完整身份化：approval 经 claimed
-                                 ApprovalRequest 字段独立重算 + 主 broker 公开
-                                 全身份查询面 matching_request、命中 approval_id
-                                 精确等于 Gate 返回值；grant 经主 broker
-                                 covering_grant 全匹配、有效 grant_id 精确等于
-                                 Gate 返回值；同名 ID 不同身份（UUID 碰撞/换
-                                 args/run_id/契约 hash/scope）一律 fail-closed；
-                                 resolve 边界 once 前补同一证明；_deep_freeze_json
-                                 收紧为真正 JSON 值域（tuple 拒绝，不静默转 list）
-                                 + 5 项 reviewer 专项否证新增，全量测试通过，等待
-                                 外部验收；不声明 16C_PASS）
-BASE_SHA                       = 7f5dbc80fc5740dbbab1db487f6ed9c8a7ee89e4
-                                 （16C Reviewer Patch 4 提交；本 patch 唯一父提交）
+STATUS                         = EXECUTED — Reviewer Patch 6（permit 最终消费收归
+                                 主 broker：两个真实远端副作用边界——新操作
+                                 grant-covered once 与 resolve 后 once——的 permit
+                                 一律由构造期注入主 broker 公开 producer API
+                                 consume_permit（真实 tool/capability/帧时刻冻结
+                                 args）原子消费，绝不 gate.consume_permit（Gate 恒
+                                 委托其自身 broker——foreign Gate 会把 permit 消费
+                                 到 foreign broker 台账的跨 broker TOCTOU 封闭）；
+                                 foreign permit 即使 grant_id/approval_id/契约/
+                                 tool/capability/scope 全同且主 broker 存在同名
+                                 有效授权，也因 permit 不在主 broker 台账被拒绝
+                                 零 once；主 broker 撤销/超时/消费状态在唯一消费锁
+                                 内重查 + 4 项 reviewer 专项否证新增，全量测试通过，
+                                 等待外部验收；不声明 16C_PASS）
+BASE_SHA                       = 0684753e7e0e3a6c1abbb29011577588b4d77664
+                                 （16C Reviewer Patch 5 提交；本 patch 唯一父提交）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，
                                  沿用 16A/16B/16D/16E 惯例）
 BRANCH                         = feature/phase16-16c-hermes-api-adapter
@@ -123,7 +125,10 @@ APPROVAL_GATE_FOUR_LAYER       = true（Reviewer Patch 3：approval.request 一�
                                  APPROVAL_PENDING 建立待审批记录**；resolve 时重新
                                  取得实时 PermissionDecision 并再次调用同一
                                  Gate.check_step——GateResult=ALLOW 且携带 permit、
-                                 随后 gate.consume_permit 原子消费成功才 POST once；
+                                 随后**主 broker** 公开 producer API
+                                 consume_permit 原子消费成功才 POST once
+                                 （Patch 6：最终消费收归主 broker，见
+                                 PERMIT_CONSUMED_BY_CONFIGURED_BROKER）；
                                  Gate 任何 DENY/撤销/超时/PM 拒绝或降级/契约 hash
                                  不匹配/permit 消费失败 → deny 绝不 once；
                                  APPROVE_SESSION 仍只收窄转发 once）
@@ -145,6 +150,23 @@ DIRECT_PERMIT_ISSUER_USE       = false（Reviewer Patch 3：Hermes **不再直�
                                  ALLOW 后经内部 issuer 签发）；源码结构 AST 断言锁定
                                  （无 PermitIssuer 名称/issue 调用/create_permit_issuer/
                                  register 路径），零绕过 Gate 直接使用 issuer 的代码路径）
+PERMIT_CONSUMED_BY_CONFIGURED_BROKER = true（Reviewer Patch 6：permit **最终消费**
+                                 收归构造期注入主 broker——两个真实远端副作用边界
+                                 （新操作 grant-covered once / resolve 后 once）
+                                 一律经 ``self._broker.consume_permit``（真实
+                                 tool/capability/帧时刻冻结 args，仅消费成功才
+                                 POST once）；**绝不 ``gate.consume_permit``**——
+                                 Gate 恒委托其自身 broker，foreign Gate 会把
+                                 permit 消费到 foreign broker 台账（跨 broker
+                                 TOCTOU）；foreign permit 即使 grant_id/
+                                 approval_id/契约/tool/capability/scope 全同且
+                                 主 broker 在证明时刻存在同名有效授权，也因
+                                 permit 不在主 broker permit registry 被拒绝、
+                                 零 once；授权来源（approval/grant）状态复核与
+                                 唯一提交点全部在主 broker 单一消费锁内——绑定
+                                 证明与消费之间撤销/超时/已消费均在锁内重查拦截；
+                                 不直接使用 PermitIssuer、不触碰任何 16D 私有
+                                 字段）
 APPROVAL_CAPACITY_ATOMIC       = true（Reviewer Patch 2 + Patch 3：approval 容量检查、
                                  预留、Gate 内请求创建、approval_id 入账构成单锁协调
                                  封闭状态机——len(账本)+在途预留 ≤ cap 恒成立；并发
@@ -265,7 +287,12 @@ DIRECT_DIALOGUE_BYPASS         = false（submit 只发送 canonical_user_request
 
 PRODUCTION_FILES_CHANGED       = furina/agent/backend/hermes.py（Reviewer Patch 1
                                  重写 + Patch 2 六组收紧 + Patch 3 三组收紧 +
-                                 Patch 5 两组收紧：Gate→ApprovalBroker 绑定证明
+                                 Patch 5 两组收紧 + Patch 6 一组收紧：permit 最终
+                                 消费收归主 broker——新操作 grant-covered once 与
+                                 resolve 后 once 两处消费点由 ``gate.consume_permit``
+                                 改为 ``self._broker.consume_permit``（构造期注入
+                                 主 broker 公开 producer API），跨 broker TOCTOU
+                                 封闭）、Gate→ApprovalBroker 绑定证明
                                  完整身份化（approval: claimed 字段独立重算 +
                                  matching_request 全身份查询 + 命中 approval_id
                                  精确相等；grant: covering_grant 全匹配 + 有效
@@ -276,7 +303,8 @@ PRODUCTION_FILES_CHANGED       = furina/agent/backend/hermes.py（Reviewer Patch
                                  16D 四层 Gate 恢复（approval_gates + permission_decider
                                  构造注入；PermitIssuer 直接持有/注册/issue 全部删除；
                                  approval.request 与 resolve 一律经 ApprovalGate.
-                                 check_step + gate.consume_permit 立即边界原子消费）、
+                                 check_step + 主 broker consume_permit 立即边界
+                                 原子消费）、
                                  工具面全等闭合（set(映射键)==set(expected_profile_tools)，
                                  审批面三重封闭）、HTTP 真正有界（读异常抛类型化错误
                                  零前缀、单 chunk extend 前检查余量、错误码 JSON 严格
@@ -290,34 +318,43 @@ PRODUCTION_FILES_CHANGED       = furina/agent/backend/hermes.py（Reviewer Patch
 TEST_FILES_CHANGED             = tests/agent/integration/test_phase16c_hermes_api_
                                  adapter.py（Reviewer Patch 1 36 项 + Patch 2 12 项
                                  + Patch 3 12 项 + Patch 4 6 项 + Patch 5 5 项
-                                 = 71 项；Patch 3 既有用例按新构造面
+                                 + Patch 6 4 项
+                                 = 75 项；Patch 3 既有用例按新构造面
                                  （approval_gates/permission_decider 注入取代
                                  permit_issuers）与 Gate 流程准确升级——approval 专项
                                  全部走 16D Gate 四层判定）
-TARGETED_TESTS                 = 16C 专项 71 passed（Patch 1–4 全量 66 项保持通过 +
-                                 Patch 5 新增 5 项：approval 同名 ID UUID 碰撞拒绝
-                                 （不同操作身份 → fail-closed，不进账本零 once，
-                                 主 broker 原记录不覆盖不串用，对照组完整身份正例
-                                 通过）、同名 ID 身份逐维否证（不同 args / 不同
-                                 run_id / 不同 contract hash 各自不得通过绑定证明 +
-                                 完整身份正例）、grant 同名 ID 碰撞拒绝（主 broker
-                                 有效但不同 tool / 绑定另一契约的 grant → 零 permit
-                                 消费零 once，consume 之前拦截；对照组合法覆盖
-                                 grant → once）、合法 approval/grant 正例保持通过
-                                 （PENDING 建立 + APPROVE_ONCE resolve 边界二次 Gate
-                                 + 绑定证明 + 原子消费 → 恰好一个 once）、
-                                 _deep_freeze_json 真正 JSON 值域（tuple 顶层/嵌套
-                                 拒绝不静默转 list，帧路径 approval_args_not_
-                                 canonical 零 16D 请求；JSON 正例零共享嵌套引用
-                                 保持））
+TARGETED_TESTS                 = 16C 专项 75 passed（Patch 1–5 全量 71 项保持通过 +
+                                 Patch 6 新增 4 项：foreign permit 主 broker
+                                 permit registry 拒绝（主/foreign broker 完全相同
+                                 契约/tool/capability/workspace + UUID 桩同名
+                                 grant_id 的有效 grant，foreign Gate 返回 ALLOW +
+                                 foreign permit，绑定证明经主 broker 公开查询面
+                                 **通过**后仍在主 broker 台账处拒绝，零 once；前置
+                                 对照同一 permit 在签发 broker 真实可消费）、证明
+                                 与消费之间撤销主 broker grant（主 broker Gate
+                                 合法路径，revoke_grant 注入消费入口与真实消费
+                                 之间 → 主 broker 锁内状态复核拒绝零 once，
+                                 foreign 同名 grant 全程有效不影响结果）、resolve
+                                 路径 foreign permit（claimed approval 与主 broker
+                                 请求身份完全一致 + 提交 foreign Gate 签发 permit
+                                 → 主 broker permit registry 拒绝 boundary_
+                                 permit_denied，主 approval 零消费零 once）、
+                                 approve_once/approve_session/grant 三条正例恰好
+                                 消费一次（主 broker consume_permit 恰一次且
+                                 ok=True，Hermes 恰好一个 once））
 BACKEND_PERMISSION_REGRESSION  = 16A/16B/16D/16E 四套件 251 passed + tests/agent
-                                 全量回归（含 agent tools）403 passed（16C 专项
-                                 Patch 5 新增 5 项计入；
+                                 全量回归（含 agent tools）407 passed（16C 专项
+                                 Patch 5–6 新增 9 项计入；
                                  frozen 16D 公开 API 零改动即完成完整身份绑定证明
                                  （matching_request / covering_grant 公开查询面）
-                                 ——未触发 BLOCKED_BY_16D_GATE_BROKER_BINDING_GAP）
-COGNITION_SUITE                = 279 passed
-FULL_SUITE                     = 1685 passed（0 failed；一次完整运行；15 条
+                                 与主 broker 最终消费（consume_permit 公开 producer
+                                 API）——未触发 BLOCKED_BY_16D_GATE_BROKER_BINDING_GAP）
+COGNITION_SUITE                = 285 passed
+FULL_SUITE                     = 1689 passed（0 failed；两次完整运行：首跑 1688
+                                 passed + 1 failed——tests/test_gui_integration.py::
+                                 test_gui_timer_advances_runtime 计时型偶发，该
+                                 测试与 furina.agent.backend 零导入耦合、隔离运行
+                                 通过、复跑全量 0 failed，与本 patch 无关；15 条
                                  warning 全部来自既有 tests/test_agent_tools.py
                                  子进程 reader 编码问题，与本 patch 无关）
 GIT_DIFF_CHECK                 = clean（git diff --check 零输出）
@@ -342,6 +379,53 @@ REMAINING_GAPS                 = (1) 实机 approval.request SSE 帧未 live 触
                                  审批一律 fail-closed deny（如实登记的部署边界）。
 READY_FOR_REVIEW               = YES（不声明 16C_PASS）
 ```
+
+## Reviewer Patch 6 修复摘要（BASE 0684753，2026-08-29）
+
+1. **permit 最终消费收归主 broker（跨 broker TOCTOU 封闭，blocker 一）**：Patch 5
+   之后仍存在一个缺口——Gate 绑定证明用主 broker 公开查询面，但最终 permit 消费走
+   `gate.consume_permit`，而 Gate 恒把消费委托给**其自身持有的 broker**（16D
+   `ApprovalGate.consume_permit` → `self._broker.consume_permit`）：当
+   `approval_gates` 中注入的 Gate 绑定 foreign broker 时，permit 会被消费到
+   foreign broker 的台账上——绑定证明（主 broker）与最终消费（foreign broker）
+   不属于同一 authority，构成跨 broker TOCTOU。本 patch 收紧为：
+   - **两个真实远端副作用边界全部改由主 broker 原子消费**：新操作 grant-covered
+     once（`_approval_new_operation` grant 路径）与 resolve 后 once
+     （`resolve_approval` 边界）的 `gate.consume_permit(...)` 一律改为
+     `self._broker.consume_permit(permit, tool=真实 tool, capability=真实
+     capability, args=帧时刻冻结 args)`（frozen 16D 公开 producer API）；
+   - **职责分界不变**：Gate 仍负责四层 `check_step`、决策、permit mint；主 broker
+     负责最终 authority registry（permit 必须在其台账 + gate_id 属其决策面注册
+     issuer）、授权来源（approval/grant）状态复核与唯一提交点原子消费——全部在
+     主 broker 单一消费锁内完成，"先查询证明、后由另一 broker 消费"的窗口不存在；
+   - **foreign permit 一律拒绝**：即使 grant_id/approval_id/契约/tool/capability/
+     scope 全同且主 broker 在证明时刻存在同名有效授权，permit 不在主 broker
+     台账 → `PermitOutcome(False)` → fail-closed deny 零 once（16D broker 自身
+     "permit 非本 broker 签发或字段已被篡改" 判定承担该拒绝）；
+   - **不直接使用 PermitIssuer、不触碰任何 16D 私有字段**（消费面 = 主 broker
+     公开 `consume_permit`；AST 结构断言保持——无 PermitIssuer 名称/issue/
+     create_permit_issuer/register 路径）。
+2. **Reviewer-locked 否证（P6 A–D，4 项新增）**：
+   - **A（foreign permit 主 broker registry 拒绝）**：主/foreign broker 创建
+     完全相同 contract/tool/capability/workspace、UUID 桩同名 grant_id 的有效
+     grant；foreign Gate 返回 ALLOW + foreign permit——绑定证明经主 broker
+     `covering_grant` **通过**（同名有效授权存在），消费边界真实到达（white-box
+     记录 presented permit），仍在主 broker 台账处拒绝（`approval_grant_permit_
+     denied`）零 once；前置对照：同一 permit 在其签发 broker 上真实可消费——
+     拒绝的唯一原因是 permit 不属于主 broker 台账；主 broker grant 状态零污染；
+   - **B（证明与消费之间撤销主 grant）**：主 broker Gate 合法路径 + foreign broker
+     同名 grant 全程有效；`revoke_grant` 注入在绑定证明（已通过）与真实消费之间
+     → 主 broker 唯一消费锁内 grant 状态复核拒绝，零 once、mint 的 permit 零
+     消费；foreign 同名 grant 的有效性不影响结果；
+   - **C（resolve 路径 foreign permit）**：claimed approval 与主 broker 请求身份
+     完全一致（真实主 broker approval，绑定证明通过），提交的 permit 却是
+     foreign Gate 为同一操作经完整决议链签发 → 主 broker permit registry 拒绝
+     （`boundary_permit_denied`），主 approval 零消费、零 once；前置对照同一
+     foreign permit 在签发 broker 真实可消费；
+   - **D（三条正例保持通过）**：主 broker Gate 的 approve_once / approve_session /
+     grant 三条路径每条 permit 恰好经主 broker `consume_permit` 消费恰一次且
+     ok=True，Hermes 恰好一个 once（approve_session 决议经 canonical USER 证据
+     nonce 真实决议链路，决议本身不因转发而改变）。
 
 ## Reviewer Patch 5 修复摘要（BASE 7f5dbc8，2026-08-29）
 

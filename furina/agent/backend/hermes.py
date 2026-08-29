@@ -80,11 +80,19 @@
   false；**仅 APPROVAL_PENDING 建立待审批记录**（approval 账本容量/预留/入账封闭
   状态机，并发 cap=1 最终索引 ≤1）；**resolve 时重新取得实时 PermissionDecision 并
   再次调用同一 Gate.check_step**——只有 GateResult=ALLOW 且携带 permit、随后
-  ``gate.consume_permit`` 在发送 once 的**立即边界**原子复核（contract_id/hash +
-  run_id + tool + capability + 原始 args + approval/grant 状态）+ 单点提交成功，才
+  **主 broker**（构造期注入 ``approval_broker``）公开 producer API
+  ``self._broker.consume_permit`` 在发送 once 的**立即边界**原子复核（permit 属主
+  broker 台账 + contract_id/hash + run_id + tool + capability + 原始 args +
+  approval/grant 状态，全部在 broker 唯一消费锁内重查）+ 单点提交成功，才
   POST once；Gate 任何 DENY（PM 降级/拒绝、契约/hash 不匹配、撤销、超时、已消费）、
   permit 消费失败 → fail-closed deny，绝不发送 once；**本适配器不直接持有/注册/调用
-  PermitIssuer**（permit 签发只存在于 Gate 内部，Patch 3 删除 issuer 注入面）；
+  PermitIssuer**（permit 签发只存在于 Gate 内部，Patch 3 删除 issuer 注入面），
+  **最终消费也绝不 ``gate.consume_permit``**（Reviewer Patch 6 blocker 一：Gate 恒
+  委托其自身 broker——foreign Gate 会把 permit 消费到 foreign broker 台账，构成
+  跨 broker TOCTOU；两处真实远端副作用边界——新操作 grant-covered once 与
+  resolve 后 once——的 permit 一律由主 broker 原子消费，foreign Gate 签发的 permit
+  即使 grant_id/approval_id/契约/tool/capability/scope 全同且主 broker 存在同名
+  有效授权，也因 permit 不在主 broker 台账被拒绝，零 once）；
   APPROVE_SESSION 决议仍只收窄转发 once（不放宽 16D 决议）；转发只允许
   ``once``/``deny``——**绝不发送 always/session**；同一 approval 只向 Hermes 转发一次
   （并发 resolve 单请求获胜；第二次调用 typed no-op）；``resolved==1`` 精确才声明成功；
@@ -593,7 +601,13 @@ class HermesExecutionBackend(ExecutionBackend):
         # -- permit issuers 删除（Reviewer Patch 3）：本适配器不直接持有/注册/调用
         #    PermitIssuer——permit 签发只存在于 16D ApprovalGate 内部（四层判定 ALLOW
         #    后由 Gate 经内部 issuer 签发）；构造期只注入 ``contract_id → ApprovalGate``
-        #    判定器与实时 ``permission_decider``（真实 PermissionManager 决策来源）。--
+        #    判定器与实时 ``permission_decider``（真实 PermissionManager 决策来源）。
+        #    Reviewer Patch 6（blocker 一）：permit 的**最终消费**也绝不委托 Gate
+        #    （``gate.consume_permit`` 恒转发 Gate 自身 broker——foreign Gate 会把
+        #    permit 消费到 foreign broker 台账，跨 broker TOCTOU）；两处真实远端
+        #    副作用边界（新操作 grant-covered once / resolve 后 once）一律由
+        #    ``self._broker.consume_permit``（构造期注入的主 broker 公开 producer
+        #    API）在唯一消费锁内复核并原子消费。--
         if approval_gates is not None and not isinstance(approval_gates, Mapping):
             raise HermesConfigurationError(
                 f"approval_gates 必须是 contract_id → ApprovalGate Mapping 或 None，"
@@ -1770,10 +1784,12 @@ class HermesExecutionBackend(ExecutionBackend):
         9. **ALLOW 来源区分**（blocker 二）：``result.approval`` 非空 → 属已有
            approval，必须进入统一 exactly-once 路径（绝不立即 POST）；仅
            ``result.grant`` 非空才允许作为新的 grant-covered action 立即边界
-           ``gate.consume_permit`` 原子消费成功后转发 once（grant 绑定先经主
-           broker 公开查询面 ``covering_grant`` 全匹配证明：契约/tool/capability/
-           paths/write_paths 全部匹配且有效 grant_id 精确等于 Gate 返回值——
-           证明失败在 consume **之前**拦截，零 permit 消费）。
+           **主 broker**（``self._broker.consume_permit``，Reviewer Patch 6）原子
+           消费成功后转发 once（grant 绑定先经主 broker 公开查询面
+           ``covering_grant`` 全匹配证明：契约/tool/capability/paths/write_paths
+           全部匹配且有效 grant_id 精确等于 Gate 返回值——证明失败在 consume
+           **之前**拦截，零 permit 消费；foreign Gate 的 permit 因不在主 broker
+           台账在 consume 处拒绝，零 once）。
 
         自动 deny 只向 Hermes 转发 ``deny``，不创建任何 16D 审批请求（决议由
         Furina 决策面（broker owner）做出；绝不伪造 USER evidence、绝不签发 grant/
@@ -2040,9 +2056,15 @@ class HermesExecutionBackend(ExecutionBackend):
                 if binding is not None:
                     self._forward_choice(run_id, "deny")
                     return None, binding
-                outcome = gate.consume_permit(result.permit, tool=tool,
-                                              capability=capability,
-                                              args=_deep_freeze_json(op_args))
+                # Patch 6（blocker 一）：最终消费必须由构造期注入的**主 broker** 经
+                # 公开 producer API 原子完成（绝不 gate.consume_permit——外部 Gate
+                # 会转而消费其自身 broker 的 permit，跨 broker TOCTOU）；foreign
+                # permit 即使同名 grant_id/同契约同操作在主 broker 有同名有效授权，
+                # 也因 permit 不在主 broker 台账被拒绝（单锁内先复核来源状态后
+                # 单点提交，零 once）。
+                outcome = self._broker.consume_permit(
+                    result.permit, tool=tool, capability=capability,
+                    args=_deep_freeze_json(op_args))
                 if outcome.ok:
                     self._forward_choice(run_id, "once")
                     return None, "approval_covered_by_grant_once"
@@ -2116,11 +2138,15 @@ class HermesExecutionBackend(ExecutionBackend):
           - GateResult=ALLOW 且携带 permit → **先经 Gate 绑定证明（Patch 5）**：
             ``result.approval`` / ``result.grant`` 必须证明产生于主 broker 且与
             帧时刻冻结的完整操作身份一致（外部 Gate / 同名 ID 不同身份在
-            consume **之前**拦截），随后 ``gate.consume_permit`` 在发送 once 的
-            **立即边界**原子复核（contract_id/hash + run_id + tool + capability +
-            原始 args + approval/grant 状态）并单点提交消费；**仅消费成功才 POST
-            once**。决议与远端边界之间的撤销/状态漂移/PM 降级 → 绑定证明失败、
-            消费失败或 Gate 重判 DENY → fail-closed 转发 deny，绝不发送 once；
+            consume **之前**拦截），随后**主 broker** 公开 producer API
+            ``self._broker.consume_permit``（Reviewer Patch 6：绝不
+            ``gate.consume_permit``——Gate 恒委托其自身 broker，foreign Gate 会把
+            permit 消费到 foreign broker 台账）在发送 once 的**立即边界**原子复核
+            （permit 属主 broker 台账 + contract_id/hash + run_id + tool +
+            capability + 原始 args + approval/grant 状态，全部在 broker 唯一消费锁
+            内重查）并单点提交消费；**仅消费成功才 POST once**。决议与远端边界
+            之间的撤销/状态漂移/PM 降级 → 绑定证明失败、消费失败或 Gate 重判
+            DENY → fail-closed 转发 deny，绝不发送 once；
           - Gate 任何 DENY（PM 拒绝、契约/hash 不匹配、撤销、超时、已消费）、契约
             Gate 缺失、permit 消费失败 → ``deny``（fail-closed）；
           - APPROVE_SESSION 决议仍只收窄转发 once（不放宽 16D 决议）；
@@ -2219,8 +2245,13 @@ class HermesExecutionBackend(ExecutionBackend):
                             if binding is not None:
                                 boundary_reason = f"boundary_{binding}"
                             else:
+                                # Patch 6（blocker 一）：resolve 边界的最终消费同样
+                                # 只由**主 broker** 公开 producer API 原子完成——
+                                # foreign Gate 签发的 permit 不在主 broker 台账，
+                                # 一律拒绝（绝不经 gate.consume_permit 委托到
+                                # foreign broker 的台账）。
                                 try:
-                                    outcome = gate.consume_permit(
+                                    outcome = self._broker.consume_permit(
                                         result.permit, tool=op.tool,
                                         capability=op.capability,
                                         args=_deep_freeze_json(op.op_args))

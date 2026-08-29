@@ -60,6 +60,18 @@ Gate 返回值；UUID 碰撞 / 换 args / 换 run_id / 换契约 hash / 换 scop
 fail-closed deny（不进账本、不消费 permit、零 once、原记录不覆盖不串用）；
 resolve 边界 once 前同样先绑定证明；``_deep_freeze_json`` 只接受真正 JSON 值域
 （tuple 不得静默转 list → ``approval_args_not_canonical``）。
+
+Reviewer Patch 6 锁定面：**permit 最终消费收归主 broker（跨 broker TOCTOU 封闭）**
+——Gate 仍负责四层 check_step/决策/permit mint，但两个真实远端副作用边界（新操作
+grant-covered once / resolve 后 once）的最终消费一律由构造期注入的主 broker 公开
+producer API ``self._broker.consume_permit``（真实 tool/capability/帧时刻冻结 args）
+原子完成，**绝不 ``gate.consume_permit``**（Gate 恒委托其自身 broker——foreign Gate
+会把 permit 消费到 foreign broker 台账）：foreign Gate 签发的 permit 即使
+grant_id/approval_id/契约/tool/capability/scope 全同且主 broker 存在同名有效授权，
+也因 permit 不在主 broker 台账被拒绝（零 once）；绑定证明与消费之间撤销主 broker
+grant → 主 broker 唯一消费锁内状态复核拒绝（foreign 同名 grant 仍有效不影响结果）；
+主 broker Gate 的 approve_once/approve_session/grant 三条正例恰好消费一次、恰好
+一个 once。
 """
 from __future__ import annotations
 
@@ -71,7 +83,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pytest
 
@@ -80,7 +92,10 @@ from furina.agent.approval import (
     ApprovalDecisionKind,
     ApprovalGate,
     ApprovalState,
+    ApprovalStateError,
     EvidenceContext,
+    GateResult,
+    GateVerdict,
 )
 from furina.agent.backend import (
     BackendHealth,
@@ -2882,7 +2897,8 @@ def test_50_reviewer_no_direct_permit_issuer_path():
     src = ast.unparse(tree)
     assert "ApprovalGate" in src, "approval 判定必须引用 16D ApprovalGate"
     assert "check_step" in src, "approval 必须经 Gate.check_step"
-    assert "consume_permit" in src, "once 转发边界必须经 gate.consume_permit"
+    assert "consume_permit" in src, \
+        "once 转发边界必须经主 broker 公开 consume_permit（Patch 6）"
 
 
 # --------------------------------------------------------------- P3-4: Gate 契约/hash 不匹配
@@ -3988,3 +4004,323 @@ def test_70_reviewer_deep_freeze_strict_json_domain(server):
          "command": "echo list-ok", "argv": ["echo", "hi"]})
     assert a and r is None, f"等价 list 帧必须正常建立审批: {(a, r)}"
     backend.close()
+
+
+# ------------------------------------------------- P6: permit 消费收归主 broker
+def _recording_broker_consume(broker: ApprovalBroker) -> Tuple[List[Any], List[Any]]:
+    """记录主 broker ``consume_permit`` 调用（permit 与 outcome）；返回
+    (presented_permits, outcomes)。white-box：只包一层实例属性，委托真实实现。"""
+    real_consume = broker.consume_permit
+    presented: List[Any] = []
+    outcomes: List[Any] = []
+
+    def _recording(permit: Any, *, tool: str, capability: str,
+                   args: Mapping[str, Any]) -> Any:
+        presented.append(permit)
+        outcome = real_consume(permit, tool=tool, capability=capability, args=args)
+        outcomes.append(outcome)
+        return outcome
+
+    broker.consume_permit = _recording   # type: ignore[method-assign]
+    return presented, outcomes
+
+
+def _approve_session_with_evidence(broker: ApprovalBroker, request: Any) -> Any:
+    """APPROVE_SESSION 决议（owner 线程）：完整 ApprovalRequest 身份 EvidenceContext
+    → canonical nonce → resolve(user_evidence=nonce)（16D 决议面真实链路；
+    always-true 证据验证器 broker 下免预记录台账）。"""
+    ctx = EvidenceContext(
+        decision="approve_session", approval_id=request.approval_id,
+        contract_id=request.contract_id, contract_hash=request.contract_hash,
+        run_id=request.run_id, tool=request.tool, capability=request.capability,
+        requested_scope=request.requested_scope, risk_level=request.risk_level.name,
+        policy_kind=request.policy_kind, operation_digest=request.operation_digest)
+    ev_id = f"lev_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    nonce = broker.request_user_evidence(ev_id, context=ctx)
+    return broker.resolve(request.approval_id, ApprovalDecisionKind.APPROVE_SESSION,
+                          user_evidence=nonce)
+
+
+def test_71_reviewer_foreign_permit_rejected_by_main_broker_registry(
+        server, monkeypatch):
+    """P6-locked（blocker 一/A）：主/foreign broker 创建**完全相同**
+    contract/tool/capability/workspace、相同 grant_id 的有效 grant（UUID 桩同名），
+    foreign Gate 返回 ALLOW + foreign permit——绑定证明经主 broker 公开查询面
+    **通过**（同名有效授权存在），但最终消费在主 broker 处执行：foreign permit
+    不在主 broker permit 台账 → 拒绝，零 once。前置对照：同一 permit 在其签发
+    broker 上真实可消费（拒绝的唯一原因是"不属于主 broker 台账"）。"""
+    ws = WorkspaceScope(read_roots=("C:/ws/p6",), write_roots=("C:/ws/p6",))
+    contract = _make_contract(contract_id="wc_16c_p6_foreign_permit",
+                              workspace_scope=ws)
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo p6a", "preview": "echo p6a"}
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id)
+    _patch_uuid4(monkeypatch)
+
+    # 主/foreign broker 各建一份**完全相同身份**的有效覆盖 grant（同名 grant_id）
+    broker_main = _make_evidence_broker()
+    main_grant = _create_session_grant(broker_main, contract)
+    assert main_grant.grant_id == f"gr_{_FIXED_UUID_HEX[:12]}", \
+        "前置：UUID 桩必须使主 broker 生成固定同名 grant_id"
+    assert broker_main.is_grant_active(main_grant.grant_id)
+    broker_foreign = _make_evidence_broker()
+    foreign_grant = _create_session_grant(broker_foreign, contract)
+    assert foreign_grant.grant_id == main_grant.grant_id, \
+        "前置：同名 grant_id 碰撞成立（完全相同契约/tool/capability/workspace）"
+    assert broker_foreign.is_grant_active(foreign_grant.grant_id)
+
+    foreign_gate = _make_gate(broker_foreign, contract)
+    backend = _make_backend(server, broker=broker_main, contract=contract,
+                            approval_gates={contract.contract_id: foreign_gate})
+    presented, outcomes = _recording_broker_consume(broker_main)
+    r = backend._handle_approval_request(run_id, _p5_run_record(contract),
+                                         dict(frame))
+    assert r == (None, "approval_grant_permit_denied"), \
+        f"foreign permit 必须在主 broker 台账处拒绝（而非证明层拦截）: {r}"
+    # 证明通过 → 消费边界真实到达，且 presented 是 foreign permit（跨 broker 场景成立）
+    assert len(presented) == 1 and presented[0] is not None, \
+        "前置：绑定证明通过后必须到达主 broker 消费边界"
+    assert presented[0].grant_id == main_grant.grant_id
+    assert outcomes and outcomes[0].ok is False, "主 broker 必须拒绝 foreign permit"
+    assert _onces_for(server, run_id) == [], "foreign permit 拒绝 → 零 once"
+    denies = _denies_for(server, run_id)
+    assert denies and all(b.get("choice") == "deny" for b in denies)
+    # 主 broker 台账无此 permit；主 broker 授权状态零变更
+    with pytest.raises(ApprovalStateError):
+        broker_main.permit_state(presented[0].permit_id)
+    assert broker_main.is_grant_active(main_grant.grant_id), \
+        "拒绝不得污染主 broker grant 状态"
+    # 前置对照：同一 foreign permit 在其签发 broker 上真实可消费——拒绝的唯一
+    # 原因是 permit 不属于主 broker 台账
+    op_args = {k: v for k, v in frame.items()
+               if k not in hermes_module._NON_OPERATION_FRAME_FIELDS}
+    outcome_foreign = broker_foreign.consume_permit(
+        presented[0], tool="terminal", capability="cap.filesystem", args=op_args)
+    assert outcome_foreign.ok, \
+        f"前置：foreign permit 在签发 broker 上必须真实可消费: {outcome_foreign}"
+    backend.close()
+
+
+def test_72_reviewer_revoke_main_grant_between_proof_and_consume(server,
+                                                                 monkeypatch):
+    """P6-locked（blocker 一/B）：绑定证明返回成功后、permit consume 前撤销主
+    broker grant → 主 broker 唯一消费锁内状态复核拒绝（零 once）；foreign broker
+    中同 grant_id 的 grant 全程有效——不得影响结果（最终消费只认主 broker 台账）。"""
+    ws = WorkspaceScope(read_roots=("C:/ws/p6",), write_roots=("C:/ws/p6",))
+    contract = _make_contract(contract_id="wc_16c_p6_revoke_window",
+                              workspace_scope=ws)
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo p6b", "preview": "echo p6b"}
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id)
+    _patch_uuid4(monkeypatch)
+
+    broker_main = _make_evidence_broker()
+    main_grant = _create_session_grant(broker_main, contract)
+    gid = main_grant.grant_id
+    assert broker_main.is_grant_active(gid)
+    broker_foreign = _make_evidence_broker()
+    _create_session_grant(broker_foreign, contract)   # 同名 grant（foreign 侧）
+    foreign_gid_active = broker_foreign.is_grant_active(gid)
+    assert foreign_gid_active, "前置：foreign 同名 grant 有效"
+
+    backend = _make_backend(server, broker=broker_main, contract=contract,
+                            approval_gates=_make_gates(broker_main, contract))
+    presented, _outcomes = _recording_broker_consume(broker_main)
+
+    # 在绑定证明（已通过）与真实消费之间精确注入撤销：再包一层主 broker 消费入口
+    recording = broker_main.consume_permit
+
+    def _revoke_then_consume(permit: Any, *, tool: str, capability: str,
+                             args: Mapping[str, Any]) -> Any:
+        revoked = broker_main.revoke_grant(gid, reason="p6B revoke in window")
+        assert revoked.grant_id == gid and broker_main.is_grant_active(gid) is False, \
+            "证明与消费之间撤销主 broker grant 必须成功落入窗口"
+        return recording(permit, tool=tool, capability=capability, args=args)
+
+    broker_main.consume_permit = _revoke_then_consume   # type: ignore[method-assign]
+    r = backend._handle_approval_request(run_id, _p5_run_record(contract),
+                                         dict(frame))
+    assert r == (None, "approval_grant_permit_denied"), \
+        f"证明与消费之间撤销主 grant 必须拒绝（绑定证明已通过）: {r}"
+    assert len(presented) == 1, "前置：消费边界到达（拒绝发生在主 broker 锁内复核）"
+    assert _onces_for(server, run_id) == [], "撤销窗口内拒绝 → 零 once"
+    denies = _denies_for(server, run_id)
+    assert denies and all(b.get("choice") == "deny" for b in denies)
+    assert not broker_main.is_grant_active(gid), "主 broker grant 已被撤销"
+    assert broker_foreign.is_grant_active(gid), \
+        "foreign 同名 grant 全程有效——其有效性不得影响结果"
+    # 主 broker mint 的 permit 零消费（拒绝即零状态变更）
+    assert broker_main.permit_state(presented[0].permit_id)["consumed_at"] is None
+    backend.close()
+
+
+class _ForeignPermitGate:
+    """P6-C 专用：委托真实主 broker Gate 判定，ALLOW 时把 permit 换成 foreign
+    Gate 签发的 permit（claimed approval 身份保持主 broker 真实记录）——模拟
+    "证明通过但 permit 来自外部 broker" 的跨 broker 提交。"""
+
+    def __init__(self, inner: ApprovalGate, foreign_permit: Any) -> None:
+        self._inner = inner
+        self._foreign_permit = foreign_permit
+
+    def check_step(self, **kw: Any) -> Any:
+        result = self._inner.check_step(**kw)
+        if result.verdict is GateVerdict.ALLOW and result.permit is not None:
+            return GateResult(GateVerdict.ALLOW, "p6-C foreign permit substituted",
+                              approval=result.approval, grant=result.grant,
+                              permit=self._foreign_permit)
+        return result
+
+
+def test_73_reviewer_resolve_foreign_permit_rejected_by_main_registry(server):
+    """P6-locked（blocker 一/C）：resolve 路径构造 foreign permit——claimed
+    approval 与主 broker 请求身份完全一致（真实主 broker approval，绑定证明通过），
+    提交的 permit 却是 foreign Gate 签发：最终必须由主 broker permit registry
+    拒绝，零 once；主 broker approval 不被消费。前置对照：同一 foreign permit 在
+    其签发 broker 上真实可消费。"""
+    contract = _make_contract(contract_id="wc_16c_p6_resolve_foreign")
+    frame = {"event": "approval.request", "tool": "terminal",
+             "command": "echo p6c", "preview": "echo p6c"}
+    op_args = {k: v for k, v in frame.items()
+               if k not in hermes_module._NON_OPERATION_FRAME_FIELDS}
+    broker_main = ApprovalBroker(owner_thread_id=threading.get_ident())
+    main_gates = _make_gates(broker_main, contract)
+    backend = _make_backend(server, broker=broker_main, contract=contract,
+                            approval_gates=dict(main_gates))
+    handle = backend.submit(contract.to_backend_projection())
+    record = backend._runs[handle.run_id]
+    a1, r1 = backend._handle_approval_request(handle.run_id, record, dict(frame))
+    assert a1 and r1 is None, f"合法 approval 必须先建立: {(a1, r1)}"
+    assert broker_main.resolve(a1, ApprovalDecisionKind.APPROVE_ONCE).ok
+
+    # foreign Gate 为同一操作签发真实可消费的 permit（foreign broker 决议链完整）
+    broker_foreign = _make_evidence_broker()
+    foreign_gate = _make_gate(broker_foreign, contract)
+    frozen_args = hermes_module._deep_freeze_json(op_args)
+    first = foreign_gate.check_step(
+        tool="terminal", args=hermes_module._deep_freeze_json(op_args),
+        contract=contract, pm_decision=_default_permission_decider(
+            "terminal", "cap.filesystem", op_args, contract.contract_id,
+            handle.run_id),
+        backend_capability_ids=tuple(contract.allowed_capabilities),
+        run_id=handle.run_id, risk_level=Permission.L2_HIGH_RISK,
+        wait_for_approval=False)
+    assert first.verdict is GateVerdict.APPROVAL_PENDING and first.approval
+    assert broker_foreign.resolve(first.approval.approval_id,
+                                  ApprovalDecisionKind.APPROVE_ONCE).ok
+    second = foreign_gate.check_step(
+        tool="terminal", args=hermes_module._deep_freeze_json(op_args),
+        contract=contract, pm_decision=_default_permission_decider(
+            "terminal", "cap.filesystem", op_args, contract.contract_id,
+            handle.run_id),
+        backend_capability_ids=tuple(contract.allowed_capabilities),
+        run_id=handle.run_id, risk_level=Permission.L2_HIGH_RISK,
+        wait_for_approval=False)
+    assert second.verdict is GateVerdict.ALLOW and second.permit is not None, \
+        "前置：foreign Gate 必须能为同一操作签发 ALLOW permit"
+    foreign_permit = second.permit
+
+    # resolve 时 Gate 返回真实主 broker approval（证明通过）+ foreign permit
+    backend._approval_gates[contract.contract_id] = _ForeignPermitGate(
+        main_gates[contract.contract_id], foreign_permit)
+    result = backend.resolve_approval(a1)
+    assert result["choice"] == "deny", \
+        f"foreign permit 必须由主 broker permit registry 拒绝: {result}"
+    assert result.get("boundary") == "boundary_permit_denied", \
+        f"拒绝必须发生在消费边界（证明通过后）: {result}"
+    assert result["consumed"] is not True
+    assert not broker_main.is_consumed(a1), "主 broker approval 零消费"
+    onces = _onces_for(server, handle.run_id)
+    assert onces == [], f"resolve 路径 foreign permit 零 once: {onces}"
+    denies = _denies_for(server, handle.run_id)
+    assert denies and all(b.get("choice") == "deny" for b in denies), \
+        "恰好一次 deny 转发"
+    # foreign permit 不在主 broker permit 台账
+    with pytest.raises(ApprovalStateError):
+        broker_main.permit_state(foreign_permit.permit_id)
+    # 前置对照：同一 foreign permit 在签发 broker 上真实可消费
+    outcome_foreign = broker_foreign.consume_permit(
+        foreign_permit, tool="terminal", capability="cap.filesystem",
+        args=dict(op_args))
+    assert outcome_foreign.ok, \
+        f"前置：foreign permit 在签发 broker 上必须真实可消费: {outcome_foreign}"
+    assert frozen_args == op_args   # 冻结副本语义不回归
+    backend.close()
+
+
+def test_74_reviewer_positive_paths_consume_exactly_once(server):
+    """P6-locked（blocker 一/D）：主 broker Gate 的 approve_once / approve_session /
+    grant 三条正例在"最终消费收归主 broker"后保持通过——每条路径 permit 恰好经
+    主 broker consume_permit 消费一次（ok=True 恰一次）、Hermes 恰好一个 once。"""
+    broker = _make_evidence_broker()   # approve_session 决议面需要证据验证器
+    contract_once = _make_contract(contract_id="wc_16c_p6_positive_once")
+    contract_sess = _make_contract(contract_id="wc_16c_p6_positive_session")
+    backend = _make_backend(server, broker=broker, contract=contract_once,
+                            approval_gates=_make_gates(broker, contract_once,
+                                                       contract_sess),
+                            max_concurrent_runs=4)
+    presented, outcomes = _recording_broker_consume(broker)
+
+    # (1) approve_once：resolve 边界消费 → 恰好一个 once
+    h1 = backend.submit(contract_once.to_backend_projection())
+    a1, r1 = backend._handle_approval_request(
+        h1.run_id, backend._runs[h1.run_id],
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo p6-once", "preview": "echo p6-once"})
+    assert a1 and r1 is None, f"approve_once 前置建立失败: {(a1, r1)}"
+    assert broker.resolve(a1, ApprovalDecisionKind.APPROVE_ONCE).ok
+    res1 = backend.resolve_approval(a1)
+    assert res1["choice"] == "once" and res1["resolved"] == 1, \
+        f"approve_once 正例必须恰好转发一次 once: {res1}"
+    assert res1["consumed"] is True and res1["permit_id"]
+    assert broker.is_consumed(a1)
+    assert len(presented) == 1 and outcomes[0].ok, \
+        "approve_once：主 broker 恰好消费一次 permit 且成功"
+    assert _onces_for(server, h1.run_id) == [{"choice": "once"}]
+
+    # (2) approve_session：resolve 边界消费 → 恰好一个 once（决议仍只收窄 once）
+    h2 = backend.submit(contract_sess.to_backend_projection())
+    a2, r2 = backend._handle_approval_request(
+        h2.run_id, backend._runs[h2.run_id],
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo p6-session", "preview": "echo p6-session"})
+    assert a2 and r2 is None, f"approve_session 前置建立失败: {(a2, r2)}"
+    # APPROVE_SESSION 决议必须携带 canonical USER 证据（16D 决议面真实链路）：
+    # 审批请求对象经白盒取回（operation_digest 为 broker 密钥 HMAC，不经审计导出）
+    request2 = broker._requests[a2].request   # white-box：仅测试构造决议证据
+    assert _approve_session_with_evidence(broker, request2).ok
+    res2 = backend.resolve_approval(a2)
+    assert res2["choice"] == "once" and res2["resolved"] == 1, \
+        f"approve_session 正例必须恰好转发一次 once: {res2}"
+    assert res2["consumed"] is True and res2["permit_id"]
+    assert broker.state_of(a2) is ApprovalState.APPROVED_SESSION, \
+        "APPROVE_SESSION 决议本身不因转发而改变"
+    assert len(presented) == 2 and outcomes[1].ok, \
+        "approve_session：主 broker 恰好再消费一次 permit 且成功"
+    assert _onces_for(server, h2.run_id) == [{"choice": "once"}]
+    backend.close()
+
+    # (3) grant：新操作 grant-covered 立即边界消费 → 恰好一个 once
+    ws = WorkspaceScope(read_roots=("C:/ws/p6",), write_roots=("C:/ws/p6",))
+    contract_g = _make_contract(contract_id="wc_16c_p6_positive_grant",
+                                workspace_scope=ws)
+    broker_g = _make_evidence_broker()
+    backend_g = _make_backend(
+        server, broker=broker_g, contract=contract_g,
+        approval_gates={contract_g.contract_id: _make_gate(broker_g, contract_g)})
+    _create_session_grant(broker_g, contract_g)
+    presented_g, outcomes_g = _recording_broker_consume(broker_g)
+    run_id_g = f"run_{uuid.uuid4().hex[:12]}"
+    server.register_run(run_id_g)
+    r3 = backend_g._handle_approval_request(
+        run_id_g, _p5_run_record(contract_g),
+        {"event": "approval.request", "tool": "terminal",
+         "command": "echo p6-grant", "preview": "echo p6-grant"})
+    assert r3 == (None, "approval_covered_by_grant_once"), \
+        f"grant 正例不得被收归主 broker 消费误伤: {r3}"
+    assert len(presented_g) == 1 and outcomes_g[0].ok, \
+        "grant：主 broker 恰好消费一次 permit 且成功"
+    assert _onces_for(server, run_id_g) == [{"choice": "once"}]
+    backend_g.close()
