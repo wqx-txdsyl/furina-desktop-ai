@@ -1,6 +1,6 @@
 """Phase 16F — IndependentVerifier：任务级独立校验器（VERIFIED 唯一授权入口）。
 
-权威模型（16F 任务书 §1/§3 + 关键锁定 1–3）：
+权威模型（16F 任务书 §1/§3 + 关键锁定 1–3 + Reviewer Patch 1）：
 
 - **VERIFIED 只能由本类在真实执行全部确定性检查且全部通过后产生**。任何其它
   代码路径构造 verdict=VERIFIED 的报告要么被 :class:`VerificationAuthorityError`
@@ -8,17 +8,35 @@
   :meth:`seal_is_authentic` 真实性复核（seal 是验证器构造期随机密钥对
   report_digest 的 HMAC-SHA256——与 16D broker 密钥 HMAC 同模式，绝不依赖
   _private / 对象身份 / 调用方自报字段冒充 authority）。
+- **substantive gate（blocker 1）**：verifier_ref 只表示"选择/支持哪个
+  verifier"，terminal claim 只表示"可以开始校验"，backend allowlist 只表示
+  "证据可归属"——三者全 PASS **不构成成功证据**。没有至少一项真实
+  substantive deterministic check（WorkContract 判据本地确定性 PASS 或
+  required artifact 真实本地检查 PASS）时，最终裁定强制 INCONCLUSIVE，
+  绝不 VERIFIED、绝不签 seal。
+- **内容 MIME（blocker 2）**：产物 MIME 观察真值来自**内容识别**（PNG/JPEG/
+  PDF 魔数 + JSON/text 有界规则），扩展名只是命名层交叉核对（未知后缀 /
+  命名与内容矛盾一律 fail-closed）；``ArtifactExpectation.artifact_type`` 经
+  16F 封闭的 ``ARTIFACT_TYPE_CONTENT_RULES`` 进入验证策略，未知类型绝不静默
+  通过；binary/octet-stream 内容只能被显式允许的 artifact 类型/声明接受。
+- **optional artifact（blocker 3）**：optional 只豁免"不存在"；一旦存在，
+  path escape / symlink 逃逸 / oversize / unsupported MIME / non-regular /
+  声明矛盾任一发生都是 required FAIL，最终不得 VERIFIED。
+- **稳定快照（blocker 7）**：同一次 verify 内 size/hash/MIME 判据来自同一
+  句柄的有界本地快照，前后 fstat/stat 一致性证明——验证期间文件被替换、
+  截断、增长、inode 变化 → artifact_mutated_during_verification → FAIL。
 - backend completed / exit 0 / 成功文本 / backend 自报 verified **不是证明**：
   证据提交的 exact-schema 里根本没有这些字段（未知键 fail-closed）；本地
   观察与本地重跑才是真值。
-- 每次校验：exact-schema 解析（fail-closed）→ defensive-copy 冻结 → 本地
-  证据收集（realpath containment / 有界哈希 / 有界读取）→ 确定性检查
-  （契约判据一一对应，本地重跑）→ 聚合 → 报告 + 密封。
-- 报告与导出零共享可变引用；秘密不存储/不哈希/不导出（解释文本一律脱敏）。
+- 每次校验：exact-schema 解析（fail-closed，身份字段显式 lexical contract，
+  绝不 normalize 后重新绑定）→ defensive-copy 冻结 → 本地证据收集 →
+  确定性检查 → 聚合 → 报告 + 密封。
+- 报告与导出零共享可变引用；raw secret text 不进入报告、诊断与身份载荷
+  （解释文本/路径记录面一律脱敏；秘密形态身份/路径直接拒绝）。
 
 聚合规则：任一 required 检查 FAIL → FAILED；否则任一 required
-NOT_EVALUABLE → INCONCLUSIVE；全部 required PASS → VERIFIED。
-INCONCLUSIVE 绝不映射 VERIFIED。
+NOT_EVALUABLE（含 substantive gate 否定分支）→ INCONCLUSIVE；全部 required
+PASS → VERIFIED。INCONCLUSIVE 绝不映射 VERIFIED。
 
 本模块零 DB / 零 C1–C7 / 零事件总线 / 零持久化（C6/C7/C3 写入属 16G）。
 """
@@ -32,13 +50,14 @@ import secrets as _secrets
 import time
 import uuid
 from types import MappingProxyType
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from furina.agent.events.models import TERMINAL_KINDS, EventKind
 from furina.agent.work_contract import WorkContract, compute_content_hash
 
 from . import checks as _checks
 from .models import (
+    ARTIFACT_TYPE_CONTENT_RULES,
     MAX_ARTIFACT_BYTES,
     MAX_DECLARED_ARTIFACTS,
     MAX_DIAGNOSTICS,
@@ -61,7 +80,11 @@ from .models import (
     VerificationReport,
     VerificationVerdict,
     compute_report_digest,
+    declared_mime_consistent,
     mime_for_suffix,
+    scrub_secrets,
+    sniff_content_mime,
+    validate_identity,
 )
 
 _TERMINAL_KIND_VALUES = frozenset(k.value for k in TERMINAL_KINDS)
@@ -76,7 +99,6 @@ class IndependentVerifier:
     """
 
     def __init__(self, contract: WorkContract, *, now_fn=time.time,
-                 monotonic_fn=time.monotonic,
                  process_timeout_seconds: float = DEFAULT_PROCESS_TIMEOUT_SECONDS) -> None:
         if not isinstance(contract, WorkContract):
             raise VerificationError(
@@ -88,9 +110,16 @@ class IndependentVerifier:
             raise VerificationError(
                 f"process_timeout_seconds 必须在 (0, {MAX_PROCESS_TIMEOUT_SECONDS}] 内，"
                 f"得到 {pt!r}")
+        # 秘密边界（blocker 6）：契约侧身份/期望路径带秘密形态会造成脱敏歧义
+        # （两个不同秘密值清洗成同一身份）——构造期 fail-closed，零报告零 seal。
+        if scrub_secrets(contract.contract_id) != contract.contract_id:
+            raise VerificationError("contract_id 带秘密形态（fail-closed）")
+        for exp in contract.artifact_expectations:
+            if scrub_secrets(exp.expected_path) != exp.expected_path:
+                raise VerificationError(
+                    f"artifact expected_path 带秘密形态（fail-closed）: {exp.artifact_id}")
         self._contract = contract
         self._now_fn = now_fn
-        self._monotonic_fn = monotonic_fn
         self._process_timeout = float(pt)
         self._seal_key = _secrets.token_bytes(32)
 
@@ -120,7 +149,12 @@ class IndependentVerifier:
         started = float(self._now_fn())
         submission = self._parse_submission(evidence)
         bundle = self._collect_bundle(submission)
-        check_list = self._run_checks(bundle, submission)
+        check_list, substantive_ids = self._run_checks(bundle, submission)
+        # substantive gate（blocker 1）：没有至少一项真实 substantive
+        # deterministic check PASS → 强制 NOT_EVALUABLE → INCONCLUSIVE。
+        if not any(c.check_id in substantive_ids and c.result is CheckResult.PASS
+                   for c in check_list):
+            check_list.append(_checks.check_no_substantive())
         if len(check_list) > MAX_REPORT_CHECKS:
             raise VerificationError(
                 f"检查数量 {len(check_list)} 超过报告上限 {MAX_REPORT_CHECKS}")
@@ -190,19 +224,11 @@ class IndependentVerifier:
         if missing:
             raise VerificationInputError(f"输入缺失必需键: {missing}")
 
-        run_id = evidence["run_id"]
-        if not isinstance(run_id, str) or not run_id.strip() or len(run_id) > MAX_ID_CHARS:
-            raise VerificationInputError(f"run_id 必须是非空 str(<=128)，得到 {run_id!r}")
-        run_id = run_id.strip()
-        import re as _re
-        from .models import _RUN_ID_PATTERN
-        if not _RUN_ID_PATTERN.match(run_id):
-            raise VerificationInputError(f"run_id 词法非法: {run_id!r}")
-        backend_id = evidence["backend_id"]
-        if not isinstance(backend_id, str) or not backend_id.strip() \
-                or len(backend_id) > MAX_ID_CHARS:
-            raise VerificationInputError(
-                f"backend_id 必须是非空 str(<=128)，得到 {backend_id!r}")
+        # canonical identity（blocker 8）：显式 lexical contract——控制字符/
+        # 首尾空白/静默 trim/秘密形态全部拒绝，绝不 normalize 后重新绑定；
+        # 身份比较一律 exact。
+        run_id = validate_identity(evidence["run_id"], "run_id")
+        backend_id = validate_identity(evidence["backend_id"], "backend_id")
 
         events_raw = evidence["terminal_events"]
         if not isinstance(events_raw, (list, tuple)):
@@ -237,7 +263,7 @@ class IndependentVerifier:
             seen_artifact_ids.add(d["artifact_id"])
             declared.append(MappingProxyType(dict(d)))
 
-        return {"run_id": run_id, "backend_id": backend_id.strip(),
+        return {"run_id": run_id, "backend_id": backend_id,
                 "terminal": tuple(terminal), "declared": tuple(declared)}
 
     @staticmethod
@@ -256,9 +282,7 @@ class IndependentVerifier:
                 f"terminal claim 键集必须恰为 {sorted(TERMINAL_CLAIM_KEYS)}，"
                 f"未知 {sorted(keys - set(TERMINAL_CLAIM_KEYS))} / "
                 f"缺失 {sorted(set(TERMINAL_CLAIM_KEYS) - keys)}")
-        event_id = item["event_id"]
-        if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > MAX_ID_CHARS:
-            raise VerificationInputError(f"event_id 必须是非空 str(<=128)，得到 {event_id!r}")
+        event_id = validate_identity(item["event_id"], "event_id")
         kind = item["kind"]
         if not isinstance(kind, str) or kind not in _EVENT_KIND_VALUES:
             raise VerificationInputError(
@@ -270,11 +294,7 @@ class IndependentVerifier:
         out: Dict[str, Any] = {"event_id": event_id, "kind": kind,
                                "observed_at_epoch": float(ts)}
         for name in ("run_id", "contract_id", "backend_id"):
-            v = item[name]
-            if not isinstance(v, str) or not v.strip() or len(v) > MAX_ID_CHARS:
-                raise VerificationInputError(
-                    f"terminal claim {name} 必须是非空 str(<=128)，得到 {v!r}")
-            out[name] = v
+            out[name] = validate_identity(item[name], f"terminal claim {name}")
         return out
 
     @staticmethod
@@ -293,15 +313,16 @@ class IndependentVerifier:
                 f"artifact claim 键集必须恰为 {sorted(ARTIFACT_CLAIM_KEYS)}，"
                 f"未知 {sorted(keys - set(ARTIFACT_CLAIM_KEYS))} / "
                 f"缺失 {sorted(set(ARTIFACT_CLAIM_KEYS) - keys)}")
-        aid = item["artifact_id"]
-        if not isinstance(aid, str) or not aid.strip() or len(aid) > MAX_ID_CHARS:
-            raise VerificationInputError(f"artifact_id 必须是非空 str(<=128)，得到 {aid!r}")
+        aid = validate_identity(item["artifact_id"], "artifact_id")
         path = item["path"]
-        if not isinstance(path, str) or not path.strip() or len(path) > MAX_PATH_CHARS:
-            raise VerificationInputError(f"path 必须是非空 str(<=1024)，得到 {path!r}")
-        import os as _os
-        expanded = _os.path.expanduser(path.strip())
-        if not _os.path.isabs(expanded):
+        if not isinstance(path, str) or not path or path != path.strip() \
+                or len(path) > MAX_PATH_CHARS:
+            raise VerificationInputError(
+                f"path 必须是非空 str(<=1024) 且无首尾空白（不静默 trim）: {path!r}")
+        if scrub_secrets(path) != path:
+            raise VerificationInputError(f"artifact path 带秘密形态（fail-closed）: {path!r}")
+        expanded = os.path.expanduser(path)
+        if not os.path.isabs(expanded):
             raise VerificationInputError(f"artifact path 必须是绝对路径: {path!r}")
         d_sha = item["declared_sha256"]
         if d_sha is not None and (not isinstance(d_sha, str)
@@ -319,15 +340,14 @@ class IndependentVerifier:
                 raise VerificationInputError(
                     "declared_size_bytes 必须是 None 或正 int（bool/float/负数/0 拒绝），"
                     f"得到 {d_size!r}")
-        return {"artifact_id": aid.strip(), "path": path.strip(),
+        return {"artifact_id": aid, "path": path,
                 "declared_sha256": d_sha, "declared_mime": d_mime,
                 "declared_size_bytes": d_size}
 
-    # -- 本地证据收集（realpath containment + 有界哈希/观察） -----------------------
+    # -- 本地证据收集（realpath containment + 稳定快照观察） -----------------------
     def _collect_bundle(self, submission: Dict[str, Any]) -> EvidenceBundle:
         diagnostics: List[str] = []
         terminal_obs: List[TerminalObservation] = []
-        bound_kinds: List[str] = []
         for t in submission["terminal"]:
             kind = t["kind"]
             if kind not in _TERMINAL_KIND_VALUES:
@@ -337,9 +357,7 @@ class IndependentVerifier:
                 bound = (t["run_id"] == submission["run_id"]
                          and t["contract_id"] == self._contract.contract_id
                          and t["backend_id"] == submission["backend_id"])
-                if bound:
-                    bound_kinds.append(kind)
-                else:
+                if not bound:
                     diagnostics.append(f"terminal_claim_unbound:{t['event_id'][:64]}")
             terminal_obs.append(TerminalObservation(
                 event_id=t["event_id"], kind=kind,
@@ -381,26 +399,20 @@ class IndependentVerifier:
             return ArtifactObservation(source, artifact_id, claimed, real,
                                        True, False, True, None, "", "",
                                        "not_regular_file")
-        try:
-            size = os.path.getsize(real)
-        except OSError:
-            return ArtifactObservation(source, artifact_id, claimed, real,
-                                       True, True, True, None, "", "", "unreadable")
-        if size > MAX_ARTIFACT_BYTES:
-            return ArtifactObservation(source, artifact_id, claimed, real,
-                                       True, True, True, None, "", "", "oversize")
-        digest, rejection = _checks.sha256_file_bounded(real)
-        mime = mime_for_suffix(real)
-        if rejection:
-            return ArtifactObservation(source, artifact_id, claimed, real,
-                                       True, True, True, size, mime, "", rejection)
+        # 稳定快照（blocker 7）：size/hash/head 来自同一句柄，前后 fstat/stat
+        # 一致性证明；验证期间替换/截断/增长 → rejection="mutated"。
+        size, digest, head, rejection = _checks.observe_file(real)
+        observed_mime = sniff_content_mime(head)
+        name_mime = mime_for_suffix(real)
         return ArtifactObservation(source, artifact_id, claimed, real,
-                                   True, True, True, size, mime, digest, "")
+                                   True, True, True, size, observed_mime, digest,
+                                   rejection, name_mime)
 
     # -- 检查构建 ----------------------------------------------------------------
     def _run_checks(self, bundle: EvidenceBundle,
-                    submission: Dict[str, Any]) -> List[VerificationCheck]:
+                    submission: Dict[str, Any]) -> Tuple[List[VerificationCheck], Set[str]]:
         out: List[VerificationCheck] = []
+        substantive_ids: Set[str] = set()
 
         bound_kinds = tuple(t.kind for t in bundle.terminal if t.bound)
         unbound = sum(1 for t in bundle.terminal if not t.bound)
@@ -411,20 +423,26 @@ class IndependentVerifier:
             out.append(_checks.check_verifier_ref(ref))
 
         for c in self._contract.verification_standard.criteria:
+            substantive_ids.add(f"criterion:{c.criterion_id}")
             out.append(_checks.check_criterion(
                 criterion_id=c.criterion_id, kind=c.kind, params=c.params,
                 contains_path=self._contains_path,
                 workspace_root=self._workspace_root(),
-                process_timeout_seconds=self._process_timeout,
-                monotonic=self._monotonic_fn))
+                process_timeout_seconds=self._process_timeout))
 
         declared_by_id = {d["artifact_id"]: d for d in submission["declared"]}
         obs_exp = {o.artifact_id: o for o in bundle.artifacts if o.source == "expectation"}
         obs_dec = {o.artifact_id: o for o in bundle.artifacts if o.source == "declared"}
 
         for exp in self._contract.artifact_expectations:
-            out.extend(self._expectation_checks(
-                exp, obs_exp.get(exp.artifact_id), declared_by_id.get(exp.artifact_id)))
+            exp_checks = self._expectation_checks(
+                exp, obs_exp.get(exp.artifact_id), declared_by_id.get(exp.artifact_id))
+            out.extend(exp_checks)
+            if exp.required:
+                # required artifact 的真实本地检查是 substantive 成功证据的
+                # 两大来源之一（blocker 1）；optional artifact 的检查只是
+                # fail-closed 防线，绝不充当成功证据。
+                substantive_ids.update(c.check_id for c in exp_checks)
         for d in submission["declared"]:
             out.extend(self._declared_checks(d, obs_dec.get(d["artifact_id"])))
         expectations_by_id = {e.artifact_id: e for e in self._contract.artifact_expectations}
@@ -441,46 +459,60 @@ class IndependentVerifier:
                     result=CheckResult.FAIL,
                     explanation="declared_path_differs_from_expected",
                     inputs=(("expected", exp.expected_path), ("declared", d["path"]))))
-        return out
+        return out, substantive_ids
 
     def _expectation_checks(self, exp, obs: Optional[ArtifactObservation],
                             decl: Optional[Mapping[str, Any]]) -> List[VerificationCheck]:
         aid = exp.artifact_id
-        required = exp.required
         prefix = f"artifact_expectation:{aid}"
+        atype_allowed = ARTIFACT_TYPE_CONTENT_RULES.get(exp.artifact_type)
+        if atype_allowed is None:
+            # blocker 2：未知 artifact_type 绝不静默通过（16F 封闭类型表）。
+            return [VerificationCheck(
+                check_id=f"{prefix}:artifact_type", kind="artifact_type",
+                required=True, result=CheckResult.FAIL,
+                explanation=f"unknown_artifact_type:{exp.artifact_type[:64]}")]
         if obs is None:   # 结构上不可达（expectation 必产生观察）——防御性兜底
-            if required:
+            if exp.required:
                 return [VerificationCheck(
                     check_id=f"{prefix}:present", kind="artifact_present",
                     required=True, result=CheckResult.FAIL,
                     explanation="required_artifact_missing")]
             return []
-        if not obs.target_exists and not obs.within_workspace:
-            # 逃逸路径：containment FAIL 已足够响亮；不再产出现存性检查。
+        if not obs.within_workspace:
+            # 逃逸（blocker 3）：optional 也一样——path/symlink/junction 逃逸
+            # 一律 required FAIL（containment 先于存在性，绝不降级 missing）。
             return [VerificationCheck(
                 check_id=f"{prefix}:containment", kind="artifact_containment",
-                required=required, result=CheckResult.FAIL,
+                required=True, result=CheckResult.FAIL,
                 explanation="path_escape")]
         if not obs.target_exists:
-            if required:
+            if exp.required:
                 return [VerificationCheck(
                     check_id=f"{prefix}:present", kind="artifact_present",
                     required=True, result=CheckResult.FAIL,
                     explanation="required_artifact_missing")]
-            return []
+            return []          # optional 真正不存在 → 唯一豁免（允许通过）
+        # blocker 3：optional 一旦存在，任何问题都按 required 处理——
+        # escape/oversize/unsupported MIME/non-regular/声明矛盾任一 → FAIL。
+        req = True
         out = [
             VerificationCheck(
                 check_id=f"{prefix}:containment", kind="artifact_containment",
-                required=required,
-                result=CheckResult.PASS if obs.within_workspace else CheckResult.FAIL,
-                explanation="within_workspace_write_roots" if obs.within_workspace
-                else "path_escape"),
+                required=req, result=CheckResult.PASS,
+                explanation="within_workspace_write_roots"),
             VerificationCheck(
                 check_id=f"{prefix}:present", kind="artifact_present",
-                required=required,
+                required=req,
                 result=CheckResult.PASS if obs.is_regular_file else CheckResult.FAIL,
                 explanation="artifact_observed" if obs.is_regular_file else "not_regular_file"),
         ]
+        if obs.rejection == "mutated":
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:stability", kind="artifact_stability",
+                required=req, result=CheckResult.FAIL,
+                explanation="artifact_mutated_during_verification"))
+            return out
         if not (obs.is_regular_file and obs.within_workspace):
             return out
         d_sha = decl["declared_sha256"] if decl else None
@@ -489,48 +521,47 @@ class IndependentVerifier:
         if obs.rejection == "oversize" or d_size is not None:
             if obs.rejection == "oversize" or obs.size_bytes is None:
                 out.append(VerificationCheck(
-                    check_id=f"{prefix}:size", kind="artifact_size", required=required,
+                    check_id=f"{prefix}:size", kind="artifact_size", required=req,
                     result=CheckResult.FAIL, explanation="artifact_oversize"))
             elif d_size is not None and obs.size_bytes != d_size:
                 out.append(VerificationCheck(
-                    check_id=f"{prefix}:size", kind="artifact_size", required=required,
+                    check_id=f"{prefix}:size", kind="artifact_size", required=req,
                     result=CheckResult.FAIL, explanation="declared_size_mismatch",
                     inputs=(("declared", str(d_size)), ("observed", str(obs.size_bytes)))))
             else:
                 out.append(VerificationCheck(
-                    check_id=f"{prefix}:size", kind="artifact_size", required=required,
+                    check_id=f"{prefix}:size", kind="artifact_size", required=req,
                     result=CheckResult.PASS, explanation="size_observed",
                     inputs=(("observed", str(obs.size_bytes)),)))
-        if d_mime is not None:
+        if obs.rejection == "" and obs.observed_mime:
+            out.extend(self._content_channel_checks(
+                prefix, req, obs, artifact_type=exp.artifact_type, d_mime=d_mime))
+        elif d_mime is not None:
+            # 内容不可观察（oversize/unreadable）时的声明 MIME 无法被内容佐证
             if d_mime not in SUPPORTED_MIME_TYPES:
                 out.append(VerificationCheck(
-                    check_id=f"{prefix}:mime", kind="artifact_mime", required=required,
+                    check_id=f"{prefix}:mime", kind="artifact_mime", required=req,
                     result=CheckResult.FAIL, explanation="unsupported_mime",
                     inputs=(("declared", d_mime),)))
-            elif obs.observed_mime != d_mime:
-                out.append(VerificationCheck(
-                    check_id=f"{prefix}:mime", kind="artifact_mime", required=required,
-                    result=CheckResult.FAIL, explanation="declared_mime_mismatch",
-                    inputs=(("declared", d_mime), ("observed", obs.observed_mime))))
             else:
                 out.append(VerificationCheck(
-                    check_id=f"{prefix}:mime", kind="artifact_mime", required=required,
-                    result=CheckResult.PASS, explanation="mime_observed",
-                    inputs=(("observed", obs.observed_mime),)))
+                    check_id=f"{prefix}:mime", kind="artifact_mime", required=req,
+                    result=CheckResult.FAIL, explanation="mime_unobservable",
+                    inputs=(("declared", d_mime),)))
         if d_sha is not None:
             if not obs.observed_sha256:
                 out.append(VerificationCheck(
-                    check_id=f"{prefix}:hash", kind="artifact_hash", required=required,
+                    check_id=f"{prefix}:hash", kind="artifact_hash", required=req,
                     result=CheckResult.NOT_EVALUABLE,
                     explanation=f"hash_unavailable:{obs.rejection or 'unknown'}"))
             elif obs.observed_sha256 != d_sha:
                 out.append(VerificationCheck(
-                    check_id=f"{prefix}:hash", kind="artifact_hash", required=required,
+                    check_id=f"{prefix}:hash", kind="artifact_hash", required=req,
                     result=CheckResult.FAIL,
                     explanation="declared_hash_mismatch_artifact_tampered"))
             else:
                 out.append(VerificationCheck(
-                    check_id=f"{prefix}:hash", kind="artifact_hash", required=required,
+                    check_id=f"{prefix}:hash", kind="artifact_hash", required=req,
                     result=CheckResult.PASS, explanation="declared_hash_corroborated"))
         return out
 
@@ -542,7 +573,7 @@ class IndependentVerifier:
             return [VerificationCheck(
                 check_id=f"{prefix}:present", kind="declared_present", required=True,
                 result=CheckResult.FAIL, explanation="declared_artifact_missing")]
-        if not obs.target_exists and not obs.within_workspace:
+        if not obs.within_workspace:
             return [VerificationCheck(
                 check_id=f"{prefix}:containment", kind="artifact_containment",
                 required=True, result=CheckResult.FAIL,
@@ -554,16 +585,20 @@ class IndependentVerifier:
         out = [
             VerificationCheck(
                 check_id=f"{prefix}:containment", kind="artifact_containment",
-                required=True,
-                result=CheckResult.PASS if obs.within_workspace else CheckResult.FAIL,
-                explanation="within_workspace_write_roots" if obs.within_workspace
-                else "path_escape"),
+                required=True, result=CheckResult.PASS,
+                explanation="within_workspace_write_roots"),
             VerificationCheck(
                 check_id=f"{prefix}:present", kind="declared_present", required=True,
                 result=CheckResult.PASS if obs.is_regular_file else CheckResult.FAIL,
                 explanation="declared_artifact_observed" if obs.is_regular_file
                 else "not_regular_file"),
         ]
+        if obs.rejection == "mutated":
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:stability", kind="artifact_stability",
+                required=True, result=CheckResult.FAIL,
+                explanation="artifact_mutated_during_verification"))
+            return out
         if not (obs.is_regular_file and obs.within_workspace):
             return out
         d_sha = d["declared_sha256"]
@@ -584,22 +619,20 @@ class IndependentVerifier:
                     check_id=f"{prefix}:size", kind="artifact_size", required=True,
                     result=CheckResult.PASS, explanation="size_observed",
                     inputs=(("observed", str(obs.size_bytes)),)))
-        if d_mime is not None:
+        if obs.rejection == "" and obs.observed_mime:
+            out.extend(self._content_channel_checks(
+                prefix, True, obs, artifact_type=None, d_mime=d_mime))
+        elif d_mime is not None:
             if d_mime not in SUPPORTED_MIME_TYPES:
                 out.append(VerificationCheck(
                     check_id=f"{prefix}:mime", kind="artifact_mime", required=True,
                     result=CheckResult.FAIL, explanation="unsupported_mime",
                     inputs=(("declared", d_mime),)))
-            elif obs.observed_mime != d_mime:
-                out.append(VerificationCheck(
-                    check_id=f"{prefix}:mime", kind="artifact_mime", required=True,
-                    result=CheckResult.FAIL, explanation="declared_mime_mismatch",
-                    inputs=(("declared", d_mime), ("observed", obs.observed_mime))))
             else:
                 out.append(VerificationCheck(
                     check_id=f"{prefix}:mime", kind="artifact_mime", required=True,
-                    result=CheckResult.PASS, explanation="mime_observed",
-                    inputs=(("observed", obs.observed_mime),)))
+                    result=CheckResult.FAIL, explanation="mime_unobservable",
+                    inputs=(("declared", d_mime),)))
         if d_sha is not None:
             if not obs.observed_sha256:
                 out.append(VerificationCheck(
@@ -615,6 +648,79 @@ class IndependentVerifier:
                 out.append(VerificationCheck(
                     check_id=f"{prefix}:hash", kind="artifact_hash", required=True,
                     result=CheckResult.PASS, explanation="declared_hash_corroborated"))
+        return out
+
+    def _content_channel_checks(self, prefix: str, req: bool, obs: ArtifactObservation,
+                                *, artifact_type: Optional[str],
+                                d_mime: Optional[str]) -> List[VerificationCheck]:
+        """blocker 2 的内容通道检查（present 且内容可观察时执行）：
+
+        - 命名通道：后缀必须是已知后缀，且命名 MIME 与内容一致（后缀不是
+          真实 MIME，只是交叉核对——未知后缀/矛盾一律 FAIL）；
+        - artifact_type 通道（expectation 侧）：内容 MIME 必须命中封闭
+          ``ARTIFACT_TYPE_CONTENT_RULES`` 允许集（未知类型早已 fail-closed）；
+        - binary 通道（declared 侧）：binary/octet-stream 内容只能被显式
+          ``declared_mime=application/octet-stream`` 接受；
+        - 声明 MIME：白名单 + 与内容一致（exact + 文本族窄例外）。
+        """
+        out: List[VerificationCheck] = []
+        if not obs.name_mime:
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:mime", kind="artifact_mime", required=req,
+                result=CheckResult.FAIL, explanation="unknown_artifact_suffix",
+                inputs=(("observed", obs.observed_mime),)))
+        elif not declared_mime_consistent(obs.name_mime, obs.observed_mime):
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:mime", kind="artifact_mime", required=req,
+                result=CheckResult.FAIL, explanation="suffix_mime_mismatch",
+                inputs=(("name", obs.name_mime), ("observed", obs.observed_mime))))
+        else:
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:mime", kind="artifact_mime", required=req,
+                result=CheckResult.PASS, explanation="name_mime_consistent",
+                inputs=(("name", obs.name_mime), ("observed", obs.observed_mime))))
+        if artifact_type is not None:
+            atype_allowed = ARTIFACT_TYPE_CONTENT_RULES[artifact_type]
+            if obs.observed_mime not in atype_allowed:
+                out.append(VerificationCheck(
+                    check_id=f"{prefix}:artifact_type", kind="artifact_type",
+                    required=req, result=CheckResult.FAIL,
+                    explanation="artifact_type_mime_mismatch",
+                    inputs=(("artifact_type", artifact_type),
+                            ("observed", obs.observed_mime))))
+            else:
+                out.append(VerificationCheck(
+                    check_id=f"{prefix}:artifact_type", kind="artifact_type",
+                    required=req, result=CheckResult.PASS,
+                    explanation="artifact_type_consistent"))
+        else:
+            # declared 侧：binary 内容必须被显式 octet-stream 声明接受
+            if obs.observed_mime == "application/octet-stream" \
+                    and d_mime != "application/octet-stream":
+                out.append(VerificationCheck(
+                    check_id=f"{prefix}:mime", kind="artifact_mime", required=req,
+                    result=CheckResult.FAIL,
+                    explanation="binary_content_requires_explicit_type",
+                    inputs=(("observed", obs.observed_mime),)))
+        if d_mime is not None:
+            if d_mime not in SUPPORTED_MIME_TYPES:
+                out.append(VerificationCheck(
+                    check_id=f"{prefix}:declared_mime", kind="artifact_mime",
+                    required=req, result=CheckResult.FAIL,
+                    explanation="unsupported_mime",
+                    inputs=(("declared", d_mime),)))
+            elif not declared_mime_consistent(d_mime, obs.observed_mime):
+                out.append(VerificationCheck(
+                    check_id=f"{prefix}:declared_mime", kind="artifact_mime",
+                    required=req, result=CheckResult.FAIL,
+                    explanation="declared_mime_mismatch",
+                    inputs=(("declared", d_mime), ("observed", obs.observed_mime))))
+            else:
+                out.append(VerificationCheck(
+                    check_id=f"{prefix}:declared_mime", kind="artifact_mime",
+                    required=req, result=CheckResult.PASS,
+                    explanation="mime_observed",
+                    inputs=(("declared", d_mime), ("observed", obs.observed_mime))))
         return out
 
     # -- 聚合 / 诊断 --------------------------------------------------------------

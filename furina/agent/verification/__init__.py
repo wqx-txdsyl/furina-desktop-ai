@@ -18,11 +18,14 @@ completed/exit 0/成功文本/verified 一律不是证明（16E：completed →
 BACKEND_DONE_UNVERIFIED；本地独立验证才是真值）。
 """
 from .checks import (
+    observe_file,
     read_text_window,
+    run_process_bounded,
     sha256_file_bounded,
 )
 from .models import (
     ARTIFACT_CLAIM_KEYS,
+    ARTIFACT_TYPE_CONTENT_RULES,
     MAX_ARTIFACT_BYTES,
     MAX_DECLARED_ARTIFACTS,
     MAX_DIAGNOSTICS,
@@ -30,6 +33,7 @@ from .models import (
     MAX_EXPLANATION_CHARS,
     MAX_REPORT_CHECKS,
     MAX_REPORT_JSON_BYTES,
+    MIME_SNIFF_WINDOW,
     SUPPORTED_MIME_TYPES,
     TERMINAL_CLAIM_KEYS,
     VERIFICATION_INPUT_KEYS,
@@ -45,7 +49,10 @@ from .models import (
     VerificationReport,
     VerificationVerdict,
     compute_report_digest,
+    declared_mime_consistent,
+    sniff_content_mime,
     scrub_secrets,
+    validate_identity,
 )
 from .repair import (
     AttemptRecord,
@@ -58,6 +65,7 @@ from .verifier import IndependentVerifier
 
 __all__ = [
     "ARTIFACT_CLAIM_KEYS",
+    "ARTIFACT_TYPE_CONTENT_RULES",
     "AttemptRecord",
     "BoundedRepairLoop",
     "CheckResult",
@@ -71,6 +79,7 @@ __all__ = [
     "MAX_EXPLANATION_CHARS",
     "MAX_REPORT_CHECKS",
     "MAX_REPORT_JSON_BYTES",
+    "MIME_SNIFF_WINDOW",
     "RepairOutcome",
     "RepairStopReason",
     "SUPPORTED_MIME_TYPES",
@@ -85,7 +94,12 @@ __all__ = [
     "VerificationReport",
     "VerificationVerdict",
     "compute_report_digest",
+    "declared_mime_consistent",
+    "observe_file",
     "read_text_window",
+    "run_process_bounded",
+    "sniff_content_mime",
     "scrub_secrets",
     "sha256_file_bounded",
+    "validate_identity",
 ]
