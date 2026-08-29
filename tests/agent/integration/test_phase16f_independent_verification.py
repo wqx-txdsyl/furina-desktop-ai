@@ -21,13 +21,31 @@
 预算边界 / 重复失败 / cancellation·denial / 契约 hash 不变 / 零 C7·C6·C3 写入；
 exact-schema（未知键/缺键/NaN/Inf/bool 冒充数值/相对路径/重复 id/非 16E 词表 kind）；
 defensive-copy 冻结与报告/导出零共享引用；repair 新 attempt/run id 绑定同契约。
+
+Reviewer Patch 1 否证（8 组 blocker，每组 reviewer-locked）：
+B1 substantive gate：terminal claim/allowlist/verifier_ref 全 PASS 但零
+   substantive deterministic check → INCONCLUSIVE / seal=""；
+B2 MIME/content：内容识别真值（magic/JSON/text 有界规则）+ suffix 交叉核对 +
+   artifact_type 封闭规则 + binary 显式接受 + 合法正例；
+B3 optional artifact：存在即 required FAIL（escape/oversize/声明矛盾），
+   真正不存在才豁免；
+B4 repair 边界复核：attempt 中 cancellation / 完成后 cost 超限 / 完成时间
+   过 deadline 时 VERIFIED 报告不得成为成功结果（final_report=None）；
+   cost meter 严格类型/NaN/Inf/负数/异常 fail-closed、启动前 >= limit 零 collect；
+B5 process output：DEVNULL 零聚合 + 超时可靠终止整棵进程树；
+B6 秘密边界：HardBackendFailure/approval 诊断脱敏、秘密形态路径/身份拒绝；
+B7 稳定快照：验证期间文件变异 → artifact_mutated_during_verification；
+   criterion-only 文件受 MAX_ARTIFACT_BYTES 上限；
+B8 canonical identity：首尾空白/控制字符/秘密形态身份 → VerificationInputError。
 """
 
+import builtins
 import dataclasses
 import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1203,3 +1221,634 @@ def test_optional_artifact_absent_still_verifies(env):
                   ))
     rep = IndependentVerifier(c).verify(_submission(c, "run_opt_0001"))
     assert rep.verdict is VerificationVerdict.VERIFIED
+
+
+# ================================================================
+# Reviewer Patch 1 — B1: substantive verification gate
+# ================================================================
+
+
+def _content_contract(work_real: Path, cid: str, *, expectations=(), criteria=()):
+    return _contract(work_real, contract_id=cid,
+                     artifact_expectations=tuple(expectations),
+                     verification_standard=VerificationStandard(
+                         criteria=tuple(criteria), verifier_refs=(VERIFIER_ID,)))
+
+
+def test_ref_only_all_pass_without_substantive_is_inconclusive(env):
+    """B1 否证：criteria=() + artifact_expectations=() + verifier_refs=(VERIFIER_ID,)
+    + backend.completed —— terminal claim / allowlist / verifier_ref 全 PASS，
+    但零 substantive deterministic check → INCONCLUSIVE / seal=""。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _content_contract(work_real, "wc_16f_subst_0001")
+    v = IndependentVerifier(c)
+    rep = v.verify(_submission(c, "run_subst_0001"))
+    results = {ch.check_id: ch.result for ch in rep.checks}
+    assert results["evidence:terminal_claim"] is CheckResult.PASS
+    assert results["evidence:backend_authorized"] is CheckResult.PASS
+    assert results[f"evidence:verifier_ref:{VERIFIER_ID}"] is CheckResult.PASS
+    assert rep.verdict is VerificationVerdict.INCONCLUSIVE
+    assert rep.authority_seal == ""
+    assert v.seal_is_authentic(rep) is False
+    assert any("no_substantive_deterministic_check" in d for d in rep.diagnostics)
+
+
+def test_declared_artifact_alone_is_not_substantive(env):
+    """B1 否证补充：backend 声明 artifact 本地核对全 PASS 也不构成 substantive
+    成功证据（契约无判据、无 required 期望 → INCONCLUSIVE）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _content_contract(work_real, "wc_16f_subst_0002")
+    content = b"declared only, no contract anchor"
+    art = work_real / "only.md"
+    art.write_bytes(content)
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_subst_0002", declared=[_declared(art, sha_hex=_sha(content))]))
+    assert rep.verdict is VerificationVerdict.INCONCLUSIVE
+    assert rep.authority_seal == ""
+
+
+# ================================================================
+# Reviewer Patch 1 — B2: MIME / content / artifact_type
+# ================================================================
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"0" * 24
+JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"0" * 24 + b"\xff\xd9"
+PDF_BYTES = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n" + b"0" * 32
+
+
+def test_text_bytes_png_suffix_declared_image_png_fail(env):
+    """B2 否证：文本 bytes + .png 后缀 + 声明 image/png → FAIL（内容识别真值）。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "blob.png"
+    art.write_bytes(b"plain text bytes, definitely not an image")
+    c = _content_contract(work_real, "wc_16f_mime_png_0001")
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_mimepng_0001", declared=[_declared(art, mime="image/png")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    fails = " ".join(ch.explanation for ch in rep.checks if ch.result is CheckResult.FAIL)
+    assert "declared_mime_mismatch" in fails or "suffix_mime_mismatch" in fails
+
+
+def test_png_bytes_jpg_suffix_declared_image_jpeg_fail(env):
+    """B2 否证：PNG bytes + .jpg 后缀 + 声明 image/jpeg → FAIL（同族冒充被
+    精确相等拦截）。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "img.jpg"
+    art.write_bytes(PNG_BYTES)
+    c = _content_contract(work_real, "wc_16f_mime_jpg_0001")
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_mimejpg_0001", declared=[_declared(art, mime="image/jpeg")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    fails = " ".join(ch.explanation for ch in rep.checks if ch.result is CheckResult.FAIL)
+    assert "suffix_mime_mismatch" in fails and "declared_mime_mismatch" in fails
+
+
+def test_unknown_suffix_no_declared_mime_fail(env):
+    """B2 否证：未知后缀 + 无声明 MIME → FAIL（命名不可观察 fail-closed）。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "summary.xyz"
+    art.write_bytes(b"text content")
+    c = _content_contract(work_real, "wc_16f_mime_xyz_0001")
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_mimexyz_0001", declared=[_declared(art)]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert any("unknown_artifact_suffix" in ch.explanation
+               for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+def test_artifact_type_png_with_non_png_content_fail(env):
+    """B2 否证：artifact_type=png_image + 非 PNG 内容 → FAIL（封闭类型规则）。"""
+    tmp, work, work_real, outside, outside_real = env
+    exp = ArtifactExpectation(artifact_id="pic", artifact_type="png_image",
+                              expected_path=str(work_real / "pic.png"), required=True)
+    (work_real / "pic.png").write_bytes(b"not a png at all")
+    c = _content_contract(work_real, "wc_16f_atype_0001", expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_atype_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert any("artifact_type_mime_mismatch" in ch.explanation
+               for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+def test_unknown_artifact_type_fail_closed(env):
+    """B2 否证：未知 artifact_type 绝不静默通过（16F 封闭表之外 → required FAIL）。"""
+    tmp, work, work_real, outside, outside_real = env
+    exp = ArtifactExpectation(artifact_id="doc", artifact_type="spreadsheet_v2",
+                              expected_path=str(work_real / "doc.txt"), required=True)
+    (work_real / "doc.txt").write_bytes(b"hello")
+    c = _content_contract(work_real, "wc_16f_atype_unk_0001", expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_atypeunk_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert any("unknown_artifact_type" in ch.explanation
+               for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+def test_binary_content_requires_explicit_acceptance(env):
+    """B2 否证：binary 内容在 declared 侧无显式 octet-stream 声明 → FAIL。"""
+    tmp, work, work_real, outside, outside_real = env
+    content = b"\x00\x01binary\x00payload"
+    art = work_real / "blob.bin"
+    art.write_bytes(content)
+    c = _content_contract(work_real, "wc_16f_bin_0001")
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_bin_0001", declared=[_declared(art, sha_hex=_sha(content))]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert any("binary_content_requires_explicit_type" in ch.explanation
+               for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+def test_binary_content_accepted_with_explicit_octet_stream(env):
+    """B2 正例：binary 内容 + 显式 application/octet-stream 声明 + 契约判据
+    → 全部 PASS 且 VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    content = b"\x00\x01binary\x00payload"
+    art = work_real / "blob.bin"
+    art.write_bytes(content)
+    c = _content_contract(work_real, "wc_16f_bin_ok_0001", criteria=(
+        VerificationCriterion(criterion_id="bin_exists", kind="artifact_file_exists",
+                              params={"path": str(art)}),
+    ))
+    v = IndependentVerifier(c)
+    rep = v.verify(_submission(
+        c, "run_binok_0001",
+        declared=[_declared(art, sha_hex=_sha(content), mime="application/octet-stream")]))
+    assert rep.verdict is VerificationVerdict.VERIFIED
+    assert v.seal_is_authentic(rep) is True
+
+
+@pytest.mark.parametrize("name,content,mime,atype", [
+    ("note.txt", b"hello world", "text/plain", "plain_text"),
+    ("note.md", b"# title\ntext", "text/markdown", "markdown_document"),
+    ("data.json", b'{"k": 1}', "application/json", "json_data"),
+    ("doc.pdf", PDF_BYTES, "application/pdf", "pdf_document"),
+    ("pic.png", PNG_BYTES, "image/png", "png_image"),
+    ("pic.jpg", JPEG_BYTES, "image/jpeg", "jpeg_image"),
+])
+def test_valid_content_mime_positive_cases(env, name, content, mime, atype):
+    """B2 正例：合法 PNG/JPEG/PDF/JSON/text 内容 + 一致命名/声明/类型 → VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / name
+    art.write_bytes(content)
+    exp = ArtifactExpectation(artifact_id="prod", artifact_type=atype,
+                              expected_path=str(art), required=True)
+    c = _content_contract(work_real, f"wc_16f_pos_{atype}_0001", expectations=(exp,))
+    v = IndependentVerifier(c)
+    rep = v.verify(_submission(
+        c, f"run_pos_{atype}_0001",
+        declared=[_declared(art, sha_hex=_sha(content), mime=mime)]))
+    assert rep.verdict is VerificationVerdict.VERIFIED
+    assert rep.authority_seal and v.seal_is_authentic(rep) is True
+
+
+# ================================================================
+# Reviewer Patch 1 — B3: optional artifact 语义
+# ================================================================
+
+
+def test_optional_artifact_path_escape_is_required_fail(env):
+    """B3 否证：optional artifact 一旦存在但 symlink/junction 逃逸 →
+    required FAIL → FAILED（16A 契约层本身禁止期望路径逃逸，逃逸只可能
+    经运行期链接发生——realpath 真相先于存在性）。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    (outside_real / "f.txt").write_bytes(b"escaped optional artifact")
+    link = work / "opt_link"
+    if not _make_dir_link(link, outside):
+        pytest.skip("symlink/junction 在本机不可用")
+    exp = ArtifactExpectation(artifact_id="optional_extra", artifact_type="plain_text",
+                              expected_path=str(work_real / "opt_link"),
+                              required=False)
+    c = _contract(work_real, contract_id="wc_16f_optesc_0001",
+                  artifact_expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_optesc_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any(ch.required and ch.result is CheckResult.FAIL
+               and "path_escape" in ch.explanation for ch in rep.checks)
+
+
+def test_optional_artifact_oversize_is_required_fail(env):
+    """B3 否证：optional artifact 存在但 oversize → required FAIL → FAILED。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    (work_real / "extra.txt").write_bytes(b"word " * (MAX_ARTIFACT_BYTES // 4))
+    exp = ArtifactExpectation(artifact_id="optional_extra", artifact_type="plain_text",
+                              expected_path=str(work_real / "extra.txt"), required=False)
+    c = _contract(work_real, contract_id="wc_16f_optbig_0001",
+                  artifact_expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_optbig_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert any(ch.required and ch.result is CheckResult.FAIL
+               and "artifact_oversize" in ch.explanation for ch in rep.checks)
+
+
+def test_optional_artifact_declared_hash_contradiction_is_required_fail(env):
+    """B3 否证：optional artifact 存在且声明 hash 矛盾 → required FAIL → FAILED。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    extra = work_real / "extra.txt"
+    extra.write_bytes(b"real content on disk")
+    exp = ArtifactExpectation(artifact_id="optional_extra", artifact_type="plain_text",
+                              expected_path=str(extra), required=False)
+    c = _contract(work_real, contract_id="wc_16f_opthash_0001",
+                  artifact_expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_opthash_0001",
+        declared=[_declared(extra, sha_hex=_sha(b"claimed-but-false"),
+                            artifact_id="optional_extra")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert any("declared_hash_mismatch_artifact_tampered" in ch.explanation
+               for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+def test_optional_artifact_unsupported_mime_is_required_fail(env):
+    """B3 否证：optional artifact 存在且声明 MIME 不在白名单 → required FAIL。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    extra = work_real / "extra.txt"
+    extra.write_bytes(b"plain")
+    exp = ArtifactExpectation(artifact_id="optional_extra", artifact_type="plain_text",
+                              expected_path=str(extra), required=False)
+    c = _contract(work_real, contract_id="wc_16f_optmime_0001",
+                  artifact_expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_optmime_0001",
+        declared=[_declared(extra, mime="application/x-unknown-vendor",
+                            artifact_id="optional_extra")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert any("unsupported_mime" in ch.explanation
+               for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+# ================================================================
+# Reviewer Patch 1 — B4: repair 边界复核 / 严格 cost meter
+# ================================================================
+
+
+def _verified_run_contract(work_real: Path, cid: str):
+    (work_real / "summary.md").write_bytes(b"ok")
+    return _contract(work_real, contract_id=cid, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+
+
+def test_mid_attempt_cancellation_blocks_verified(env):
+    """B4 否证：attempt 中出现 cancellation → CANCELLED；越界后的 VERIFIED
+    report 不得成为成功结果（final_report=None）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_run_contract(work_real, "wc_16f_b4cancel_0001")
+    v = IndependentVerifier(c)
+    art = work_real / "summary.md"
+    flags = {"cancelled": False}
+
+    def collector(attempt_id, run_id):
+        flags["cancelled"] = True          # collect/verify 期间出现取消
+        return _submission(c, run_id, declared=[_declared(art, sha_hex=_sha(b"ok"))])
+
+    out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
+                            cancel_requested=lambda: flags["cancelled"]).run()
+    assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
+    assert out.stop_reason is RepairStopReason.CANCELLED
+    assert out.final_report is None                   # 绝不作为成功结果
+    assert len(out.attempts) == 1
+
+
+def test_post_attempt_cost_overrun_blocks_verified(env):
+    """B4 否证：attempt 完成后 used > limit → BUDGET_EXHAUSTED，VERIFIED
+    report 不成为成功结果。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_run_contract(work_real, "wc_16f_b4cost_0001")
+    v = IndependentVerifier(c)
+    art = work_real / "summary.md"
+    calls = {"n": 0}
+
+    def cost_used():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 6.0        # 完成后计量超 5.0 上限
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=v,
+        collect_evidence=lambda a, r: _submission(
+            c, r, declared=[_declared(art, sha_hex=_sha(b"ok"))]),
+        cost_used=cost_used).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert out.final_report is None
+    assert len(out.attempts) == 1
+
+
+def test_post_attempt_deadline_blocks_verified(env):
+    """B4 否证：完成时间 > deadline → TIMEOUT，VERIFIED report 不成为成功结果。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    c = _contract(work_real, contract_id="wc_16f_b4time_0001", budget=ExecutionBudget(
+        max_duration_seconds=500.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    clock = FakeClock(1000.0)
+    v = IndependentVerifier(c, now_fn=clock)
+    art = work_real / "summary.md"
+
+    def collector(attempt_id, run_id):
+        clock.advance(600.0)               # attempt 完成时刻 1600 > deadline 1500
+        return _submission(c, run_id, declared=[_declared(art, sha_hex=_sha(b"ok"))])
+
+    out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
+                            now_fn=clock).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.TIMEOUT
+    assert out.final_report is None
+
+
+@pytest.mark.parametrize("bad", [True, "6.0", float("nan"), float("inf"),
+                                 float("-inf"), -1.0])
+def test_cost_meter_invalid_values_fail_closed(env, bad):
+    """B4 否证：meter bool/str/NaN/Inf/负数 → fail-closed（BUDGET_EXHAUSTED，
+    零 collect 零 attempt，零误判）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_run_contract(work_real, "wc_16f_b4meter_0001")
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _submission(c, r),
+        cost_used=lambda: bad).run()
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert len(out.attempts) == 0
+    assert out.diagnostic.startswith("cost_meter")
+
+
+def test_cost_meter_exception_fail_closed(env):
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_run_contract(work_real, "wc_16f_b4meterx_0001")
+
+    def boom():
+        raise RuntimeError("meter exploded")
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=lambda a, r: _submission(c, r),
+                            cost_used=boom).run()
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert len(out.attempts) == 0
+    assert "cost_meter_error" in out.diagnostic
+
+
+def test_cost_meter_at_limit_pre_attempt_zero_collect(env):
+    """B4 否证：attempt 启动前 used >= limit → 零 collect（0 attempt）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_run_contract(work_real, "wc_16f_b4pre_0001")
+    ran = {"n": 0}
+
+    def collector(attempt_id, run_id):
+        ran["n"] += 1
+        return _submission(c, run_id)
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=collector,
+                            cost_used=lambda: 5.0).run()
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert len(out.attempts) == 0 and ran["n"] == 0
+
+
+# ================================================================
+# Reviewer Patch 1 — B5: process output 真正有界
+# ================================================================
+
+
+def test_process_output_devnull_not_aggregated(env, monkeypatch):
+    """B5 否证：stdout/stderr/stdin 一律 DEVNULL（源面锁定）；8MB+ 输出零聚合、
+    输出内容（含 marker）绝不进入 report/诊断。"""
+    import subprocess as sp
+    from furina.agent.verification import checks as vchecks
+    tmp, work, work_real, outside, outside_real = env
+    seen = {}
+    real_popen = sp.Popen
+
+    def spy_popen(*args, **kwargs):
+        seen["stdin"] = kwargs.get("stdin")
+        seen["stdout"] = kwargs.get("stdout")
+        seen["stderr"] = kwargs.get("stderr")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(vchecks.subprocess, "Popen", spy_popen)
+    py = sys.executable
+    out_marker = "OUTP16FMARK"     # 拼接构造——字面量不出现在命令里，只出现在输出里
+    command = (f'"{py}" -c "import sys; sys.stdout.write(\'x\'*(8*1024*1024)); '
+               f"sys.stderr.write('y'*(4*1024*1024)); "
+               f"sys.stdout.write('OUT'+'P16F'+'MARK')\"")
+    c = _contract(work_real, contract_id="wc_16f_b5devnull_0001",
+                  verification_standard=VerificationStandard(criteria=(
+                      VerificationCriterion(criterion_id="loud", kind="process_exit_zero",
+                                            params={"command": command}),
+                  )))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_b5_0001"))
+    assert seen["stdout"] is sp.DEVNULL and seen["stderr"] is sp.DEVNULL \
+        and seen["stdin"] is sp.DEVNULL
+    assert rep.verdict is VerificationVerdict.VERIFIED        # exit code 判定保持正确
+    blob = rep.to_json()
+    assert out_marker not in blob and "xxxx" not in blob and "yyyy" not in blob
+
+
+def test_process_timeout_terminates_process_tree(env):
+    """B5 否证：timeout 后进程树（cmd shell + python 子进程）被可靠终止。"""
+    import subprocess as sp
+    from furina.agent.verification import run_process_bounded
+    py = sys.executable
+    marker = "P16F_KILL_MARKER_16f"
+    command = f'"{py}" -c "import time; time.sleep(60)  #{marker}"'
+    t0 = time.monotonic()
+    rc, timed_out, rejection = run_process_bounded(command, None, 0.5)
+    elapsed = time.monotonic() - t0
+    assert timed_out is True and rc is None and rejection == ""
+    assert elapsed < 30                        # 有界返回（不等待 60s sleeper）
+
+    ps_script = (f'@(Get-CimInstance Win32_Process | '
+                 f'Where-Object {{ $_.CommandLine -like "*{marker}*" '
+                 f'-and $_.Name -ne "powershell.exe" }}).Count')
+
+    def marker_count():
+        try:
+            out = sp.run(["powershell", "-NoProfile", "-Command", ps_script],
+                         capture_output=True, text=True, timeout=60)
+        except (OSError, sp.TimeoutExpired):
+            return None
+        try:
+            return int(out.stdout.strip() or "0")
+        except ValueError:
+            return None
+
+    deadline = time.monotonic() + 30
+    count = marker_count()
+    while time.monotonic() < deadline and count:
+        time.sleep(0.5)
+        count = marker_count()
+    if count is None:
+        pytest.skip("PowerShell 进程枚举不可用")
+    assert count == 0
+
+
+# ================================================================
+# Reviewer Patch 1 — B6: secret boundary
+# ================================================================
+
+
+def test_hard_failure_message_scrubbed(env):
+    """B6 否证：HardBackendFailure 消息中的秘密形态在 AttemptRecord/Outcome
+    诊断面被 [REDACTED]。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+
+    def collector(attempt_id, run_id):
+        raise HardBackendFailure("runtime crashed with token=supersecret12345")
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=collector).run()
+    assert out.stop_reason is RepairStopReason.HARD_FAILURE
+    assert "supersecret12345" not in out.attempts[0].diagnostic
+    assert "supersecret12345" not in out.diagnostic
+    assert "[REDACTED]" in out.attempts[0].diagnostic
+
+
+def test_approval_denial_message_scrubbed(env):
+    """B6 否证：approval authority 返回值携带秘密形态 → 停止诊断脱敏。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _submission(c, r),
+        approval_authority=lambda a, r: "deny password=hunter2secret").run()
+    assert out.stop_reason is RepairStopReason.APPROVAL_DENIED
+    assert "hunter2secret" not in out.diagnostic
+
+
+def test_secret_shaped_artifact_path_rejected(env):
+    """B6 否证：秘密形态 artifact path → VerificationInputError（零报告零 seal）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    evil = str(work_real / "password=hunter2.md")
+    with pytest.raises(VerificationInputError):
+        IndependentVerifier(c).verify(_submission(
+            c, "run_secretpath_0001", declared=[_declared(evil)]))
+
+
+# ================================================================
+# Reviewer Patch 1 — B7: stable artifact snapshot
+# ================================================================
+
+
+def test_artifact_mutated_during_verification_fails(env, monkeypatch):
+    """B7 否证：验证期间文件增长（size 漂移）→ artifact_mutated_during_
+    verification → FAIL / seal=""，绝不 VERIFIED。"""
+    content = b"stable content before mutation"
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "summary.md"
+    art.write_bytes(content)
+    c = _contract(work_real)
+    real_open = builtins.open
+    target = str(art)
+
+    class _MutateOnFirstRead:
+        """在读路径上于前后 fstat 之间注入追加写（确定性变异注入器）。"""
+
+        def __init__(self, handle):
+            self._h = handle
+            self._done = False
+
+        def fileno(self):
+            return self._h.fileno()
+
+        def read(self, size=-1):
+            data = self._h.read(size)
+            if not self._done:
+                self._done = True
+                with real_open(target, "ab") as g:
+                    g.write(b"-MUTATED-DURING-VERIFY")
+            return data
+
+        def __enter__(self):
+            self._h.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._h.__exit__(*exc)
+
+    def mutating_open(file, mode="r", *args, **kwargs):
+        handle = real_open(file, mode, *args, **kwargs)
+        if "rb" in str(mode) and os.path.realpath(str(file)) == os.path.realpath(target):
+            return _MutateOnFirstRead(handle)
+        return handle
+
+    monkeypatch.setattr(builtins, "open", mutating_open)
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_mut_0001", declared=[_declared(art, sha_hex=_sha(content))]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any("artifact_mutated_during_verification" in ch.explanation
+               for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+def test_criterion_text_window_oversize_artifact_fails(env):
+    """B7 否证：criterion-only 文件也受 MAX_ARTIFACT_BYTES 上限——大文件不能
+    靠前 1MiB 窗口命中 needle 而 PASS。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "summary.md"
+    art.write_bytes(b"NEEDLE_16F" + b"\x00" * (MAX_ARTIFACT_BYTES + 1))
+    c = _contract(work_real, contract_id="wc_16f_bigwin_0001",
+                  verification_standard=VerificationStandard(criteria=(
+                      VerificationCriterion(criterion_id="win", kind="text_contains",
+                                            params={"path": str(art),
+                                                    "needle": "NEEDLE_16F"}),
+                  )))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_bigwin_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any("artifact_oversize" in ch.explanation
+               for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+# ================================================================
+# Reviewer Patch 1 — B8: canonical identity
+# ================================================================
+
+
+def test_identity_whitespace_and_control_chars_rejected(env):
+    """B8 否证：首尾空白（不静默 trim）/控制字符身份 → VerificationInputError
+    （零报告零 seal）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    bad = []
+    s1 = _submission(c, "run_ok_0001")
+    s1["run_id"] = " run_x "
+    bad.append(s1)
+    s2 = _submission(c, "run_ok_0002")
+    s2["backend_id"] = " backend "
+    bad.append(s2)
+    s3 = _submission(c, "run_ok_0003")
+    s3["run_id"] = "run_x\ttab"
+    bad.append(s3)
+    s4 = _submission(c, "run_ok_0004")
+    t4 = _bound_terminal(c, "run_ok_0004")
+    t4["event_id"] = "lev_1\nlinefeed"
+    s4["terminal_events"] = [t4]
+    bad.append(s4)
+    s5 = _submission(c, "run_ok_0005",
+                     declared=[_declared(work_real / "ghost.md")])
+    s5["declared_artifacts"][0]["artifact_id"] = " summary_doc"
+    bad.append(s5)
+    for s in bad:
+        with pytest.raises(VerificationInputError):
+            v.verify(s)
+
+
+def test_secret_shaped_identity_rejected(env):
+    """B8 否证：词法合法但带秘密形态的身份（KV/授权形态）→ fail-closed，
+    绝不用两个不同秘密值清洗成同一身份后继续 VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    s = _submission(c, "password:hunter2")          # 词法合法但秘密形态
+    with pytest.raises(VerificationInputError):
+        v.verify(s)
+    s2 = _submission(c, "run_ok_0009")
+    t2 = _bound_terminal(c, "run_ok_0009")
+    t2["backend_id"] = "api_key:sk-abc123"
+    s2["terminal_events"] = [t2]
+    with pytest.raises(VerificationInputError):
+        v.verify(s2)

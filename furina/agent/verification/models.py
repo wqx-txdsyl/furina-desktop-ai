@@ -32,8 +32,15 @@
   fail-closed；解析后立即 defensive-copy 并冻结（MappingProxyType 树）。
 - 报告与导出**零共享可变引用**：frozen dataclass + tuple + 每次导出全新
   plain dict；秘密值形态（password/token/api_key/authorization/bearer 等）
-  在任何进入报告/诊断的文本上一律脱敏；秘密从不被存储、从不被哈希
-  （哈希只作用于 workspace 产物文件内容）、从不导出。
+  的 **raw secret text 不进入报告、诊断与身份载荷**（evidence digest payload /
+  failure signature 前置载荷一律脱敏或拒绝）；身份字段走显式 lexical contract
+  （控制字符/首尾空白/静默 trim/秘密形态一律 :class:`VerificationInputError`
+  fail-closed，绝不 normalize 后重新绑定）。
+- 产物 MIME 是**内容识别**真值（PNG/JPEG/PDF 魔数 + JSON/text 有界规则），
+  扩展名只是命名层交叉核对；``ArtifactExpectation.artifact_type`` 经 16F
+  显式封闭的 :data:`ARTIFACT_TYPE_CONTENT_RULES` 进入验证策略——未知
+  artifact_type 绝不静默通过，binary/octet-stream 内容只能被显式允许的
+  artifact 类型接受。
 
 本模块零 DB / 零 C1–C7 / 零 schema / 零持久化；不写 C6/C7/C3（16G 拥有）。
 """
@@ -112,7 +119,7 @@ PROCESS_CHUNK_BYTES = 1024 * 1024
 DEFAULT_PROCESS_TIMEOUT_SECONDS = 60.0
 MAX_PROCESS_TIMEOUT_SECONDS = 600.0
 
-#: 产物 MIME 白名单（观察值来自扩展名映射表；声明值必须命中白名单）。
+#: 产物 MIME 白名单（声明值必须命中白名单；观察值来自**内容识别**而非扩展名）。
 SUPPORTED_MIME_TYPES = frozenset({
     "text/plain", "text/markdown", "text/csv", "text/html",
     "application/json", "application/octet-stream",
@@ -130,11 +137,91 @@ _MIME_BY_SUFFIX = {
 
 
 def mime_for_suffix(path: str) -> str:
-    """由扩展名推断观察 MIME；未知扩展名保守归入 application/octet-stream（白名单内）。"""
+    """命名层 MIME（仅由扩展名推断）；未知扩展名返回 ``""``——后缀不是真实
+    MIME，未知命名一律 fail-closed，绝不冒充 application/octet-stream。"""
     dot = path.rfind(".")
     if dot < 0:
-        return "application/octet-stream"
-    return _MIME_BY_SUFFIX.get(path[dot:].lower(), "application/octet-stream")
+        return ""
+    return _MIME_BY_SUFFIX.get(path[dot:].lower(), "")
+
+
+# ---------------------------------------------------------------------------
+# 有界内容识别（blocker 2）：MIME 观察真值来自内容，不来自扩展名
+# ---------------------------------------------------------------------------
+
+#: 内容识别窗口（字节）；所有规则只看该窗口，明确且有界。
+MIME_SNIFF_WINDOW = 1024
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_PDF_MAGIC = b"%PDF-"
+_JSON_LEAD_BYTES = b" \t\r\n"
+
+#: 16F 显式、封闭的 ``artifact_type → 允许的内容 MIME 集``（验证策略的一部分）。
+#: 未知 artifact_type 不在表内 → 一律 fail-closed，绝不静默通过；
+#: binary/application/octet-stream 内容只能被 binary_blob 显式接受。
+ARTIFACT_TYPE_CONTENT_RULES: Dict[str, Tuple[str, ...]] = {
+    "plain_text": ("text/plain", "text/markdown", "text/csv", "text/html"),
+    "markdown_document": ("text/markdown", "text/plain"),
+    "csv_data": ("text/csv", "text/plain"),
+    "html_document": ("text/html", "text/plain"),
+    "json_data": ("application/json",),
+    "pdf_document": ("application/pdf",),
+    "png_image": ("image/png",),
+    "jpeg_image": ("image/jpeg",),
+    "binary_blob": ("application/octet-stream",),
+}
+
+
+def _utf8_decodable(head: bytes) -> bool:
+    """UTF-8 严格可解码（容忍窗口边界截断的多字节尾字符——至多回退 3 字节）。"""
+    for cut in range(4):
+        blob = head[:len(head) - cut] if cut else head
+        try:
+            blob.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        return True
+    return False
+
+
+def sniff_content_mime(head: bytes) -> str:
+    """有界内容识别（明确规则，只看前 MIME_SNIFF_WINDOW 字节）：
+
+    - PNG/JPEG/PDF 按魔数；
+    - JSON：BOM/空白后首字符 ∈ ``{``/``[``（明确有界规则，不做完整解析）；
+    - text：窗口内无 NUL 且严格 UTF-8 可解码 → text/plain；
+    - 其余 → application/octet-stream（二进制——只能被显式允许的
+      artifact 类型接受）；空窗口 → ``""``（不可观察，fail-closed）。
+    """
+    if not isinstance(head, (bytes, bytearray)) or not head:
+        return ""
+    head = bytes(head)
+    if head[:8] == _PNG_MAGIC:
+        return "image/png"
+    if head[:3] == _JPEG_MAGIC:
+        return "image/jpeg"
+    if _PDF_MAGIC in head[:1024]:
+        return "application/pdf"
+    body = head[3:] if head.startswith(b"\xef\xbb\xbf") else head
+    if body.lstrip(_JSON_LEAD_BYTES)[:1] in (b"{", b"["):
+        return "application/json"
+    if b"\x00" not in head and _utf8_decodable(head):
+        return "text/plain"
+    return "application/octet-stream"
+
+
+def declared_mime_consistent(declared: str, observed: str) -> bool:
+    """声明/命名 MIME 与内容观察的一致性判定（exact + 文本族窄例外）。
+
+    内容级识别只能判到 text/plain——markdown/csv/html 是命名层语义，因此
+    ``observed=text/plain`` 时接受文本族声明；其余一律精确相等
+    （image/png 内容 + 声明 image/jpeg → False——精确相等拦截同族冒充）。
+    """
+    if declared == observed:
+        return True
+    return observed == "text/plain" and declared in (
+        "text/plain", "text/markdown", "text/csv", "text/html")
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +276,23 @@ def _bounded_text(text: str, cap: int) -> str:
     return s
 
 
+def validate_identity(value: Any, field_name: str) -> str:
+    """身份字段 lexical contract（canonical identity）：
+
+    - 显式词法：``^[A-Za-z0-9][A-Za-z0-9._:\\-]{0,127}$``——控制字符、首尾
+      空白、非法字符全部拒绝，**绝不静默 trim / normalize 后重新绑定**；
+    - 秘密形态（password:x / token=y / bearer …）即使词法合法也拒绝
+      （两个不同秘密值清洗成同一身份会造成歧义 → fail-closed，零报告零 seal）；
+    - 身份比较一律 exact，不做大小写折叠或空白归一。
+    """
+    if not isinstance(value, str) or not _RUN_ID_PATTERN.match(value):
+        raise VerificationInputError(
+            f"{field_name} 词法非法（控制字符/首尾空白/非法字符拒绝，不静默 trim）: {value!r}")
+    if scrub_secrets(value) != value:
+        raise VerificationInputError(f"{field_name} 带秘密形态（fail-closed）: {value!r}")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # 证据观察（verifier 本地构建；字段全部为本地真值或 claim 处置结果）
 # ---------------------------------------------------------------------------
@@ -208,7 +312,12 @@ class TerminalObservation:
 
 @dataclass(frozen=True)
 class ArtifactObservation:
-    """单个 artifact 路径的本地观察（realpath 归属 + 大小 + MIME + SHA-256）。"""
+    """单个 artifact 路径的本地观察（realpath 归属 + 大小 + MIME + SHA-256）。
+
+    ``observed_mime`` 是**内容识别**真值（:func:`sniff_content_mime`）；
+    ``name_mime`` 是命名层交叉核对值（:func:`mime_for_suffix`，未知后缀 ""）。
+    路径记录面在构造时统一脱敏（解析层已拒绝秘密形态路径——纵深防御）。
+    """
 
     source: str                      # "expectation" | "declared"
     artifact_id: str
@@ -218,9 +327,14 @@ class ArtifactObservation:
     is_regular_file: bool
     within_workspace: bool
     size_bytes: Optional[int]
-    observed_mime: str               # 不可观察时为 ""
+    observed_mime: str               # 内容识别；不可观察时为 ""
     observed_sha256: str             # 不可计算时为 ""
-    rejection: str                   # "" | missing | path_escape | not_regular_file | oversize | unreadable
+    rejection: str                   # "" | missing | path_escape | not_regular_file | oversize | unreadable | mutated
+    name_mime: str = ""              # 命名层 MIME；未知扩展名为 ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "claimed_path", scrub_secrets(self.claimed_path))
+        object.__setattr__(self, "resolved_path", scrub_secrets(self.resolved_path))
 
 
 @dataclass(frozen=True)
@@ -242,6 +356,9 @@ class EvidenceBundle:
             raise VerificationError("evidence artifact 观察数量超界")
         if len(self.diagnostics) > MAX_DIAGNOSTICS:
             raise VerificationError("evidence 诊断数量超界")
+        # 诊断字符串面统一脱敏（秘密形态不得进入 evidence digest payload / 导出）
+        object.__setattr__(self, "diagnostics", tuple(
+            scrub_secrets(d)[:MAX_DIAGNOSTIC_CHARS] for d in self.diagnostics))
 
     # -- digest ---------------------------------------------------------------
 
@@ -256,6 +373,7 @@ class EvidenceBundle:
                     "artifact_id": a.artifact_id[:MAX_ID_CHARS],
                     "claimed_path": a.claimed_path[:MAX_PATH_CHARS],
                     "is_regular_file": a.is_regular_file,
+                    "name_mime": a.name_mime[:128],
                     "observed_mime": a.observed_mime[:128],
                     "observed_sha256": a.observed_sha256,
                     "rejected": a.rejection[:64],
@@ -301,7 +419,8 @@ class EvidenceBundle:
                 "claimed_path": a.claimed_path, "resolved_path": a.resolved_path,
                 "target_exists": a.target_exists, "is_regular_file": a.is_regular_file,
                 "within_workspace": a.within_workspace, "size_bytes": a.size_bytes,
-                "observed_mime": a.observed_mime, "observed_sha256": a.observed_sha256,
+                "observed_mime": a.observed_mime, "name_mime": a.name_mime,
+                "observed_sha256": a.observed_sha256,
                 "rejection": a.rejection,
             } for a in self.artifacts],
             "diagnostics": list(self.diagnostics),
@@ -535,6 +654,7 @@ class VerificationReport:
 
 __all__ = [
     "ARTIFACT_CLAIM_KEYS",
+    "ARTIFACT_TYPE_CONTENT_RULES",
     "ArtifactObservation",
     "CheckResult",
     "DEFAULT_PROCESS_TIMEOUT_SECONDS",
@@ -547,6 +667,7 @@ __all__ = [
     "MAX_REPORT_CHECKS",
     "MAX_REPORT_JSON_BYTES",
     "MAX_TEXT_READ_BYTES",
+    "MIME_SNIFF_WINDOW",
     "SUPPORTED_MIME_TYPES",
     "TERMINAL_CLAIM_KEYS",
     "TerminalObservation",
@@ -559,6 +680,9 @@ __all__ = [
     "VerificationReport",
     "VerificationVerdict",
     "compute_report_digest",
+    "declared_mime_consistent",
     "mime_for_suffix",
+    "sniff_content_mime",
     "scrub_secrets",
+    "validate_identity",
 ]
