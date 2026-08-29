@@ -1,0 +1,19 @@
+{
+  "asset_id": "a19",
+  "semantic_state": "eating",
+  "model": "agnes-image-2.1-flash",
+  "seed": 20260846,
+  "size": "2K",
+  "ratio": "2:3",
+  "mode": "img2img",
+  "init_image": "data\\assets_v2\\_base\\furina-base.png",
+  "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+  "prompt_md5": "6f5817cb1d9a9d31d59faa747b5ca8cb",
+  "action_block": "Sitting and holding a small dessert cake with both hands, taking a small bite, cane set beside her.",
+  "expression_block": "Delighted small expression, happy raised brows, mouth occupied with a small bite, faint blush.",
+  "gaze_block": "Looking at the dessert.",
+  "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers",
+  "generated_at": "2026-08-27T02:22:07",
+  "raw_file": "a19_eating_seed20260846.png",
+  "revised_prompt": ""
+}

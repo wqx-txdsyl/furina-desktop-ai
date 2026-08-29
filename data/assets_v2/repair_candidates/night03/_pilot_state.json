@@ -1,0 +1,84 @@
+{
+ "a01": {
+  "file": "data\\assets_v2\\repair_candidates\\night03\\furina_v2_a01_repair.png",
+  "info": {
+   "tail_px": 21023,
+   "mirror_pos": [
+    617,
+    1090
+   ],
+   "debris_px": 766,
+   "island_px": 2
+  },
+  "metrics": {
+   "com_x": 0.5194,
+   "lowest_row": 1467,
+   "bbox": [
+    184,
+    60,
+    839,
+    1467
+   ],
+   "alpha_components": 1,
+   "largest_sizes": [
+    555605
+   ]
+  }
+ },
+ "a05": {
+  "file": "data\\assets_v2\\repair_candidates\\night03\\furina_v2_a05_repair.png",
+  "info": {
+   "wisp_island_px": 465,
+   "tail_px": 60404,
+   "mirror_pos": [
+    544,
+    873
+   ],
+   "debris_px": 896,
+   "island_px": 0
+  },
+  "metrics": {
+   "com_x": 0.5489,
+   "lowest_row": 1467,
+   "bbox": [
+    238,
+    60,
+    874,
+    1467
+   ],
+   "alpha_components": 1,
+   "largest_sizes": [
+    542237
+   ]
+  }
+ },
+ "a16": {
+  "file": "data\\assets_v2\\repair_candidates\\night03\\furina_v2_a16_repair.png",
+  "info": {
+   "chair_px": 25437,
+   "cane_px": 12454,
+   "infill_px": 12454,
+   "tail_px": 36532,
+   "mirror_pos": [
+    624,
+    1089
+   ],
+   "debris_px": 1,
+   "island_px": 202
+  },
+  "metrics": {
+   "com_x": 0.5312,
+   "lowest_row": 1467,
+   "bbox": [
+    240,
+    316,
+    837,
+    1467
+   ],
+   "alpha_components": 1,
+   "largest_sizes": [
+    391626
+   ]
+  }
+ }
+}

@@ -1,0 +1,310 @@
+{
+ "a01": {
+  "measured": {
+   "content_px": [
+    184,
+    60,
+    656,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5194,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 43728,
+   "head_zone_changed_px": 2,
+   "changed_pct": 2.78
+  },
+  "objective_pass": true
+ },
+ "a03": {
+  "measured": {
+   "content_px": [
+    183,
+    60,
+    658,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5289,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 61877,
+   "head_zone_changed_px": 0,
+   "changed_pct": 3.93
+  },
+  "objective_pass": true
+ },
+ "a04": {
+  "measured": {
+   "content_px": [
+    194,
+    60,
+    636,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.522,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 51232,
+   "head_zone_changed_px": 0,
+   "changed_pct": 3.26
+  },
+  "objective_pass": true
+ },
+ "a05": {
+  "measured": {
+   "content_px": [
+    238,
+    60,
+    637,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5489,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 92611,
+   "head_zone_changed_px": 0,
+   "changed_pct": 5.89
+  },
+  "objective_pass": true
+ },
+ "a06": {
+  "measured": {
+   "content_px": [
+    168,
+    60,
+    688,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5302,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 68189,
+   "head_zone_changed_px": 0,
+   "changed_pct": 4.34
+  },
+  "objective_pass": true
+ },
+ "a07": {
+  "measured": {
+   "content_px": [
+    181,
+    60,
+    662,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5363,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 65058,
+   "head_zone_changed_px": 0,
+   "changed_pct": 4.14
+  },
+  "objective_pass": true
+ },
+ "a08": {
+  "measured": {
+   "content_px": [
+    168,
+    60,
+    689,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5234,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 66796,
+   "head_zone_changed_px": 0,
+   "changed_pct": 4.25
+  },
+  "objective_pass": true
+ },
+ "a09": {
+  "measured": {
+   "content_px": [
+    210,
+    60,
+    636,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.53,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 81899,
+   "head_zone_changed_px": 0,
+   "changed_pct": 5.21
+  },
+  "objective_pass": true
+ },
+ "a10": {
+  "measured": {
+   "content_px": [
+    168,
+    60,
+    689,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5419,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 76298,
+   "head_zone_changed_px": 0,
+   "changed_pct": 4.85
+  },
+  "objective_pass": true
+ },
+ "a13": {
+  "measured": {
+   "content_px": [
+    212,
+    60,
+    647,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5413,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 65065,
+   "head_zone_changed_px": 0,
+   "changed_pct": 4.14
+  },
+  "objective_pass": true
+ },
+ "a14": {
+  "measured": {
+   "content_px": [
+    215,
+    60,
+    659,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5493,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 71259,
+   "head_zone_changed_px": 0,
+   "changed_pct": 4.53
+  },
+  "objective_pass": true
+ },
+ "a16": {
+  "measured": {
+   "content_px": [
+    240,
+    316,
+    598,
+    1152
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5312,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 95524,
+   "head_zone_changed_px": 0,
+   "changed_pct": 6.07
+  },
+  "objective_pass": true
+ },
+ "a18": {
+  "measured": {
+   "content_px": [
+    185,
+    60,
+    655,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5274,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 64129,
+   "head_zone_changed_px": 0,
+   "changed_pct": 4.08
+  },
+  "objective_pass": true
+ },
+ "a19": {
+  "measured": {
+   "content_px": [
+    250,
+    444,
+    560,
+    1024
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5272,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  },
+  "diff": {
+   "changed_px": 37172,
+   "head_zone_changed_px": 0,
+   "changed_pct": 2.36
+  },
+  "objective_pass": true
+ }
+}

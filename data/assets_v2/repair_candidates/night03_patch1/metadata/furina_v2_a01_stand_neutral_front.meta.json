@@ -1,0 +1,187 @@
+{
+ "asset_id": "furina_v2_a01_stand_neutral_front",
+ "alpha_id": "a01",
+ "category": "POSTURE",
+ "semantic_state": "stand_neutral_front",
+ "canvas_width": 1024,
+ "canvas_height": 1536,
+ "ground_baseline_y": 1468,
+ "geometry": {
+  "anchor_x": 0.5,
+  "anchor_y": 0.9557,
+  "content_px": [
+   229,
+   60,
+   611,
+   1408
+  ],
+  "scale_from_raw": 0.6236
+ },
+ "contact": "feet_ground",
+ "loop": false,
+ "interruptible": true,
+ "source_generation": {
+  "asset_id": "a01",
+  "semantic_state": "stand_neutral_front",
+  "model": "agnes-image-2.1-flash",
+  "seed": 20261828,
+  "size": "2K",
+  "ratio": "2:3",
+  "mode": "img2img",
+  "init_image": "data\\assets_v2\\_base\\furina-base.png",
+  "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+  "prompt_md5": "0b8f47f8dcba8eaaff90fc5c8ee4e53e",
+  "action_block": "Standing straight facing the viewer, relaxed shoulders, her right hand holding her cane at her side, her left hand resting open at her side.",
+  "expression_block": "Neutral calm expression, soft brows, small gentle closed-mouth smile.",
+  "gaze_block": "Looking at the viewer.",
+  "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers",
+  "generated_at": "2026-08-27T02:13:58",
+  "raw_file": "a01_stand_neutral_front_seed20261828.png",
+  "revised_prompt": ""
+ },
+ "base_identity_version": "furina-base-2026-08",
+ "style_version": "FURINA-STYLE-LOCK-V2",
+ "review_status": "PENDING",
+ "review_notes": "NIGHT-03 PATCH1 candidate (master untouched): semantic-layering repair - old wrong-side tail removed via geometric corridor + protections, whole tail mirrored about x=512 and composited BEHIND the master body (body pixels bit-identical outside allowed_edit_mask). Awaiting independent review.",
+ "candidate_file": "data\\assets_v2\\review\\candidates\\furina_v2_a01_stand_neutral_front.png",
+ "master_file": "data/assets_v2/masters/furina_v2_a01_stand_neutral_front.png",
+ "night03_patch1": {
+  "patch_id": "NIGHT03_RECOVERY_PATCH1",
+  "method": "semantic_layer_local_no_generation",
+  "generation_calls": 0,
+  "candidate_file": "data\\assets_v2\\repair_candidates\\night03_patch1\\furina_v2_a01_repair.png",
+  "candidate_sha256": "6be747c7d78687deb6e935204eb18eb1bc21fafba2e827991b2fe4e22d27a4c2",
+  "master_file": "data\\assets_v2\\masters\\furina_v2_a01_stand_neutral_front.png",
+  "master_sha256": "c3ed763c7eed3bfc620e4847e0028e5c6eae83a8170f41a1152915e7885172a6",
+  "input_from_master_only": true,
+  "failed_night03_candidates_used": false,
+  "measured": {
+   "content_px": [
+    229,
+    60,
+    611,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5255,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "largest_sizes": [
+    565389
+   ],
+   "magenta_px": 0,
+   "corners_transparent": true,
+   "opaque_px": 553711,
+   "semi_px": 13215,
+   "opaque_bbox": [
+    229,
+    60,
+    839,
+    1467
+   ],
+   "centroid_x_px": 538.1,
+   "margin_left": 229,
+   "margin_right": 184,
+   "ground_contact_row": 1467
+  },
+  "diff": {
+   "changed_px": 58425,
+   "deleted_px": 24377,
+   "added_px": 34048,
+   "recolored_px": 0,
+   "outside_allowed_px": 0,
+   "deleted_outside": 0,
+   "added_outside": 0,
+   "recolored_outside": 0,
+   "unauthorized_diff_pixels": 0
+  },
+  "mask_stats": {
+   "corridor": {
+    "px": 45624,
+    "bbox": [
+     184,
+     943,
+     386,
+     1362
+    ]
+   },
+   "tail_source": {
+    "px": 24375,
+    "bbox": [
+     184,
+     944,
+     383,
+     1362
+    ]
+   },
+   "removal": {
+    "px": 24375,
+    "bbox": [
+     184,
+     944,
+     383,
+     1362
+    ]
+   },
+   "protected_dark": {
+    "px": 187928,
+    "bbox": [
+     184,
+     60,
+     839,
+     1467
+    ]
+   },
+   "protected_cane": {
+    "px": 22835,
+    "bbox": [
+     259,
+     990,
+     353,
+     1473
+    ]
+   },
+   "protected_frills": {
+    "px": 38674,
+    "bbox": [
+     383,
+     1278,
+     699,
+     1399
+    ]
+   },
+   "allowed_edit": {
+    "px": 73562,
+    "bbox": [
+     184,
+     714,
+     839,
+     1362
+    ]
+   },
+   "patch_footprint": {
+    "px": 49185,
+    "bbox": [
+     640,
+     944,
+     839,
+     1362
+    ]
+   },
+   "explicit_debris": {
+    "px": 2,
+    "bbox": [
+     363,
+     714,
+     363,
+     715
+    ]
+   },
+   "weld": {
+    "px": 0,
+    "bbox": null
+   }
+  },
+  "objective_pass": true
+ }
+}

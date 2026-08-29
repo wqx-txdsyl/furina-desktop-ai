@@ -1,0 +1,219 @@
+{
+ "asset_id": "furina_v2_a16_work_focused",
+ "alpha_id": "a16",
+ "category": "WORK_ACTION",
+ "semantic_state": "work_focused",
+ "canvas_width": 1024,
+ "canvas_height": 1536,
+ "ground_baseline_y": 1468,
+ "geometry": {
+  "anchor_x": 0.5,
+  "anchor_y": 0.9557,
+  "content_px": [
+   240,
+   316,
+   598,
+   1152
+  ],
+  "scale_from_raw": 0.5533
+ },
+ "contact": "task_contact",
+ "loop": false,
+ "interruptible": true,
+ "source_generation": {
+  "asset_id": "a16",
+  "semantic_state": "work_focused",
+  "model": "agnes-image-2.1-flash",
+  "seed": 20261843,
+  "size": "2K",
+  "ratio": "2:3",
+  "mode": "img2img",
+  "init_image": "data\\assets_v2\\_base\\furina-base.png",
+  "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+  "prompt_md5": "7075219e5cafc2f003cdbd2c7058f805",
+  "action_block": "Seated at an unseen writing slope, leaning forward and writing on a paper with a feather quill, her cane leaning beside her, fully absorbed in the task.",
+  "expression_block": "Focused working expression, brows drawn in concentration, mouth a small firm line.",
+  "gaze_block": "Looking down at the paper.",
+  "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, dark background, purple background, vignette, indoor background, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers, hair tail on the wrong side, mirrored hair, long hair tail on her right side",
+  "generated_at": "2026-08-27T02:30:56",
+  "raw_file": "a16_work_focused_seed20261843.png",
+  "revised_prompt": ""
+ },
+ "base_identity_version": "furina-base-2026-08",
+ "style_version": "FURINA-STYLE-LOCK-V2",
+ "review_status": "PENDING",
+ "review_notes": "NIGHT-03 PATCH1 candidate (master untouched): semantic-layering repair - old wrong-side tail removed via geometric corridor + protections, whole tail mirrored about x=512 and composited BEHIND the master body (body pixels bit-identical outside allowed_edit_mask). Awaiting independent review.",
+ "candidate_file": "data\\assets_v2\\review\\candidates\\furina_v2_a16_work_focused.png",
+ "master_file": "data/assets_v2/masters/furina_v2_a16_work_focused.png",
+ "night03_patch1": {
+  "patch_id": "NIGHT03_RECOVERY_PATCH1",
+  "method": "semantic_layer_local_no_generation",
+  "generation_calls": 0,
+  "candidate_file": "data\\assets_v2\\repair_candidates\\night03_patch1\\furina_v2_a16_repair.png",
+  "candidate_sha256": "55aacb18c1846ebc1e6616c032e7a3baacc0bc5f808e79e0aa0e11dad9ff137a",
+  "master_file": "data\\assets_v2\\masters\\furina_v2_a16_work_focused.png",
+  "master_sha256": "f4997917453d6a541a08d021132ecad3bd8cffb63773833d31bdcde805d099ab",
+  "input_from_master_only": true,
+  "failed_night03_candidates_used": false,
+  "measured": {
+   "content_px": [
+    240,
+    316,
+    598,
+    1152
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5248,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "largest_sizes": [
+    404226
+   ],
+   "magenta_px": 0,
+   "corners_transparent": true,
+   "opaque_px": 394158,
+   "semi_px": 11515,
+   "opaque_bbox": [
+    242,
+    316,
+    837,
+    1467
+   ],
+   "centroid_x_px": 537.4,
+   "margin_left": 240,
+   "margin_right": 186,
+   "ground_contact_row": 1467
+  },
+  "diff": {
+   "changed_px": 72595,
+   "deleted_px": 57934,
+   "added_px": 9605,
+   "recolored_px": 5056,
+   "outside_allowed_px": 0,
+   "deleted_outside": 0,
+   "added_outside": 0,
+   "recolored_outside": 0,
+   "unauthorized_diff_pixels": 0
+  },
+  "mask_stats": {
+   "corridor": {
+    "px": 29821,
+    "bbox": [
+     186,
+     1147,
+     452,
+     1421
+    ]
+   },
+   "removal": {
+    "px": 62526,
+    "bbox": [
+     186,
+     915,
+     797,
+     1459
+    ]
+   },
+   "chair_del": {
+    "px": 14254,
+    "bbox": [
+     340,
+     1102,
+     747,
+     1418
+    ]
+   },
+   "cane_del": {
+    "px": 24260,
+    "bbox": [
+     587,
+     915,
+     797,
+     1459
+    ]
+   },
+   "specks": {
+    "px": 135,
+    "bbox": [
+     273,
+     953,
+     312,
+     1074
+    ]
+   },
+   "protected_skin": {
+    "px": 22386,
+    "bbox": [
+     351,
+     1036,
+     587,
+     1422
+    ]
+   },
+   "protected_navy": {
+    "px": 108527,
+    "bbox": [
+     186,
+     335,
+     832,
+     1458
+    ]
+   },
+   "quill_paper": {
+    "px": 26628,
+    "bbox": [
+     330,
+     983,
+     482,
+     1161
+    ]
+   },
+   "protected_hair": {
+    "px": 236160,
+    "bbox": [
+     180,
+     690,
+     899,
+     1017
+    ]
+   },
+   "allowed_edit": {
+    "px": 87093,
+    "bbox": [
+     186,
+     915,
+     837,
+     1459
+    ]
+   },
+   "patch_footprint": {
+    "px": 28776,
+    "bbox": [
+     571,
+     1147,
+     837,
+     1421
+    ]
+   },
+   "explicit_debris": {
+    "px": 458,
+    "bbox": [
+     216,
+     925,
+     792,
+     1450
+    ]
+   },
+   "weld": {
+    "px": 130,
+    "bbox": [
+     745,
+     1010,
+     765,
+     1023
+    ]
+   }
+  },
+  "objective_pass": true
+ }
+}

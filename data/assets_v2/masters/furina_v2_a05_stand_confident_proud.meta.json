@@ -1,0 +1,48 @@
+{
+  "asset_id": "furina_v2_a05_stand_confident_proud",
+  "alpha_id": "a05",
+  "category": "POSTURE",
+  "semantic_state": "stand_confident_proud",
+  "canvas_width": 1024,
+  "canvas_height": 1536,
+  "ground_baseline_y": 1468,
+  "geometry": {
+    "anchor_x": 0.5,
+    "anchor_y": 0.9557,
+    "content_px": [
+      149,
+      60,
+      726,
+      1408
+    ],
+    "scale_from_raw": 0.6233
+  },
+  "contact": "feet_ground",
+  "loop": false,
+  "interruptible": true,
+  "source_generation": {
+    "asset_id": "a05",
+    "semantic_state": "stand_confident_proud",
+    "model": "agnes-image-2.1-flash",
+    "seed": 20261832,
+    "size": "2K",
+    "ratio": "2:3",
+    "mode": "img2img",
+    "init_image": "data\\assets_v2\\_base\\furina-base.png",
+    "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+    "prompt_md5": "e70517bb62e7c5a6e47555fdcf96ca06",
+    "action_block": "Standing tall with her chin slightly lifted, one hand on her hip, the other holding the cane like a scepter, theatrical proud stance.",
+    "expression_block": "Confident proud expression, one brow slightly raised, small knowing smirk.",
+    "gaze_block": "Looking at the viewer.",
+    "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, dark background, purple background, vignette, indoor background, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers, hair tail on the wrong side, mirrored hair, long hair tail on her right side",
+    "generated_at": "2026-08-27T02:25:53",
+    "raw_file": "a05_stand_confident_proud_seed20261832.png",
+    "revised_prompt": ""
+  },
+  "base_identity_version": "furina-base-2026-08",
+  "style_version": "FURINA-STYLE-LOCK-V2",
+  "review_status": "ACCEPT",
+  "review_notes": "Minor: tail side flipped; brooch+cane-scepter correct.",
+  "candidate_file": "data\\assets_v2\\review\\candidates\\furina_v2_a05_stand_confident_proud.png",
+  "master_file": "data/assets_v2/masters/furina_v2_a05_stand_confident_proud.png"
+}

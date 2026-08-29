@@ -1,0 +1,544 @@
+{
+ "manifest_id": "NIGHT03_REPAIR_MANIFEST",
+ "date": "2026-08-28",
+ "method": "local surgical repair (segment -> row-span fill -> mirror -> composite-behind; colour/strip masks for prop/matte removal). Zero image-generation calls.",
+ "generation_calls": 0,
+ "production_files_changed": 0,
+ "masters_overwritten": false,
+ "accept_masters_touched": [],
+ "inputs": {
+  "base_sha256": "2f8e10bb17cdc325cf29954bd960e55c90208e84835dddf5b62001a5b922682a",
+  "ratification": "data/assets_v2/metadata/ratification_v1.json",
+  "ratification_md": "data/assets_v2/ART_ALPHA_INDEPENDENT_RATIFICATION.md"
+ },
+ "gate": {
+  "part_a_required": ">=2/3 pilots pass",
+  "part_a_result": "3/3 PASS",
+  "part_b_executed": true
+ },
+ "assets": {
+  "a01": {
+   "semantic_state": "stand_neutral_front",
+   "night": "pilot",
+   "master_file": "data/assets_v2/masters/furina_v2_a01_stand_neutral_front.png",
+   "master_sha256": "c3ed763c7eed3bfc620e4847e0028e5c6eae83a8170f41a1152915e7885172a6",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a01_repair.png",
+   "candidate_sha256": "36d67efde1520f2da0fe12b0850bfa5a14f0c99809844dfa5bc0de6b24b21b5a",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a01.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a01_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a01_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a01_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a01_stand_neutral_front.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     184,
+     60,
+     656,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5194,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 43728,
+   "head_zone_changed_px": 2,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a03": {
+   "semantic_state": "stand_neutral_slight_right",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a03_stand_neutral_slight_right.png",
+   "master_sha256": "ef1dc9079ba0e607a78f8a4c8f610231e2eaf449c3961b052469264b341aa1f2",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a03_repair.png",
+   "candidate_sha256": "af3313f24181545e6a6b57cf4d63dc537f7f78828d8a04d9254fd9e94e7949cc",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a03.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a03_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a03_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a03_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a03_stand_neutral_slight_right.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     183,
+     60,
+     658,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5289,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 61877,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a04": {
+   "semantic_state": "stand_relaxed_idle",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a04_stand_relaxed_idle.png",
+   "master_sha256": "866f8ebf1f3571f1d80f1e0e6001fcf09e5a7da99529b0533a5a652dbbd1fe36",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a04_repair.png",
+   "candidate_sha256": "87972541426edf55b2fe210c2e47b1a233d03cbc066ce81b0dcaed77ee5a926a",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a04.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a04_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a04_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a04_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a04_stand_relaxed_idle.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     194,
+     60,
+     636,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.522,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 51232,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a05": {
+   "semantic_state": "stand_confident_proud",
+   "night": "pilot",
+   "master_file": "data/assets_v2/masters/furina_v2_a05_stand_confident_proud.png",
+   "master_sha256": "8ddcfde186fb352ce32381543273902295ceeb3fd3f3db6b064141fcf5199a77",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a05_repair.png",
+   "candidate_sha256": "0161495a4b3f5595dcc75489bc27e7013f7983bfce210e444682cbb2cfd32168",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a05.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a05_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a05_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a05_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a05_stand_confident_proud.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)",
+    "removed detached tail wisp island (465 px)"
+   ],
+   "measured": {
+    "content_px": [
+     238,
+     60,
+     637,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5489,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 92611,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a06": {
+   "semantic_state": "stand_gentle_happy",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a06_stand_gentle_happy.png",
+   "master_sha256": "77a2aacc8e2a0bcfa40fc8ad88da2f5ed09b92f9c631aed5600b3ba5dec03d73",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a06_repair.png",
+   "candidate_sha256": "88fcba4b5894e8ccd46cdd889f5f6611335ee58d6087046ef51d31f02a8e8b8f",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a06.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a06_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a06_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a06_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a06_stand_gentle_happy.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     168,
+     60,
+     688,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5302,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 68189,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a07": {
+   "semantic_state": "stand_annoyed",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a07_stand_annoyed.png",
+   "master_sha256": "388ffebe81738701cd73c7aca75d15b006ee20b54ca2baa7c4637c97631544a9",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a07_repair.png",
+   "candidate_sha256": "2c76eed3cc7925cf3c773ea9bd213652383d89767e45f57fb6888a0ec8f2801a",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a07.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a07_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a07_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a07_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a07_stand_annoyed.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)",
+    "6 px speck investigated at (579,600): no detached component exists at that location; region byte-identical, nothing removed"
+   ],
+   "measured": {
+    "content_px": [
+     181,
+     60,
+     662,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5363,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 65058,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a08": {
+   "semantic_state": "stand_embarrassed",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a08_stand_embarrassed.png",
+   "master_sha256": "81613e0565b4dac1899187f27ede25a68bab0ed8002ac1563bdb8ae464b3d7f6",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a08_repair.png",
+   "candidate_sha256": "a4d8d71d8da9962fc0e7356469b082883c2234037b0cd2a9e79bb63b619b0364",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a08.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a08_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a08_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a08_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a08_stand_embarrassed.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     168,
+     60,
+     689,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5234,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 66796,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a09": {
+   "semantic_state": "stand_curious_leaning",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a09_stand_curious_leaning.png",
+   "master_sha256": "4c74ce9394cceed7918799b1f76b642457b54fd04aa139631bca0a18dee26f9c",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a09_repair.png",
+   "candidate_sha256": "5a2d5a586293ccd7cf233f2071f252dc23be7daa4dd4fddd4f47bcafb99899d5",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a09.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a09_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a09_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a09_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a09_stand_curious_leaning.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     210,
+     60,
+     636,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.53,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 81899,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a10": {
+   "semantic_state": "stand_sleepy",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a10_stand_sleepy.png",
+   "master_sha256": "8b204cdb58bc8ba24b5270d61a8b580f8129538546636a6fe3ce1f13579ba39a",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a10_repair.png",
+   "candidate_sha256": "a62f5d71b4988c290f63bb5e0864ac935ab6be0e8b1758af4f010f23f38099ea",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a10.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a10_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a10_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a10_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a10_stand_sleepy.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     168,
+     60,
+     689,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5419,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 76298,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a13": {
+   "semantic_state": "pet_response",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a13_pet_response.png",
+   "master_sha256": "b564befc3c8b8e9f6a83275f727303a26a638ba5db87d60d8a1b786f90b899d6",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a13_repair.png",
+   "candidate_sha256": "1d79e1a68a9b2c37cf81658ac6984adfc8f6a2a6f1a1cdf670c182b697d70887",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a13.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a13_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a13_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a13_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a13_pet_response.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)",
+    "removed 2 detached droplet islands (138 px)"
+   ],
+   "measured": {
+    "content_px": [
+     212,
+     60,
+     647,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5413,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 65065,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a14": {
+   "semantic_state": "poke_response",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a14_poke_response.png",
+   "master_sha256": "20ef568d57ce300f79c1dd2bb3b0c77a83e79f688a0a668881091773f5e8acc8",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a14_repair.png",
+   "candidate_sha256": "f71bab020828d412bdcaa9f6ad3a36ac9fc57da691f640b1d81e516790dd74df",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a14.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a14_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a14_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a14_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a14_poke_response.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     215,
+     60,
+     659,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5493,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 71259,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a16": {
+   "semantic_state": "work_focused",
+   "night": "pilot",
+   "master_file": "data/assets_v2/masters/furina_v2_a16_work_focused.png",
+   "master_sha256": "f4997917453d6a541a08d021132ecad3bd8cffb63773833d31bdcde805d099ab",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a16_repair.png",
+   "candidate_sha256": "7e7fb52076cf1a5da64a5b9634db901e603ab7f610146756fa265a7b33627fe9",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a16.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a16_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a16_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a16_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a16_work_focused.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)",
+    "removed baked wooden chair (25,437 px mask)",
+    "removed held cane + rebuilt closed fist (12,454 px mask, column-lerp infill)",
+    "removed stray specks",
+    "metadata content_px refreshed (bbox change from chair/cane removal)"
+   ],
+   "measured": {
+    "content_px": [
+     240,
+     316,
+     598,
+     1152
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5312,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 95524,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a18": {
+   "semantic_state": "stand_quiet_reflective",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a18_stand_quiet_reflective.png",
+   "master_sha256": "94ec810c020395075bf6244a13e3d117dc0fb34dcea0da61ff29e9393ae7f1a9",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a18_repair.png",
+   "candidate_sha256": "cf8734b984ccaadf93900eac115cdb482384a3d8b36362aadcf7772ec674461b",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a18.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a18_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a18_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a18_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a18_stand_quiet_reflective.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)"
+   ],
+   "measured": {
+    "content_px": [
+     185,
+     60,
+     655,
+     1408
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5274,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 64129,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a19": {
+   "semantic_state": "eating",
+   "night": "batch",
+   "master_file": "data/assets_v2/masters/furina_v2_a19_eating.png",
+   "master_sha256": "a38befab679ed9456713f574d3f177f734edca99e69c888f58f7708975c04fa1",
+   "candidate_file": "data/assets_v2/repair_candidates/night03/furina_v2_a19_repair.png",
+   "candidate_sha256": "77c8a77b1d55abe99b9cdd7544cde63a9a86605feb291d6f0491fb458a35846a",
+   "triptych": "data/assets_v2/repair_candidates/night03/night03_triptych_a19.png",
+   "previews": [
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a19_pet_512.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a19_pet_256.png",
+    "data/assets_v2/repair_candidates/night03/runtime_previews/a19_pet_128.png"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a19_eating.meta.json",
+   "repairs": [
+    "tail MIRRORED_ERROR -> viewer-right (extract/span-fill/mirror/composite-behind, no generation)",
+    "removed baked crescent moon + sparkle + dots (651 px detached FX)"
+   ],
+   "measured": {
+    "content_px": [
+     250,
+     444,
+     560,
+     1024
+    ],
+    "lowest_row": 1467,
+    "com_x": 0.5272,
+    "alpha_components": 1,
+    "islands_gt40": 0,
+    "magenta_px": 0,
+    "corners_transparent": true
+   },
+   "changed_px": 37172,
+   "head_zone_changed_px": 0,
+   "objective_pass": true,
+   "human_review": "PENDING"
+  },
+  "a02": {
+   "semantic_state": "stand_neutral_slight_left",
+   "night": "metadata_only",
+   "master_file": "data/assets_v2/masters/furina_v2_a02_stand_neutral_slight_left.png",
+   "master_sha256": "409f6dd00b6e5cab9561faa3b552f674f5aa9f5d8ab69a506748e167242b6015",
+   "repairs": [
+    "metadata-only re-measurement: recorded content_px equals measured under alpha>8 convention; no change; pixels untouched (ACCEPT)"
+   ],
+   "refreshed_meta": "data/assets_v2/repair_candidates/night03/metadata/furina_v2_a02_stand_neutral_slight_left.meta.json",
+   "human_review": "ACCEPT (unchanged)"
+  }
+ }
+}

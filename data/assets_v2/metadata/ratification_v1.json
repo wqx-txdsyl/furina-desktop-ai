@@ -1,0 +1,253 @@
+{
+ "ratification": "ART_ALPHA_INDEPENDENT_RATIFICATION_V1",
+ "date": "2026-08-28",
+ "reviewer_model": "GLM-5.3-Flash (visual review, fresh session)",
+ "independent_of": "NIGHT-01 (no NIGHT-01 verdicts trusted; all 19 re-reviewed from BASE)",
+ "base_sha256": "2f8e10bb17cdc325cf29954bd960e55c90208e84835dddf5b62001a5b922682a",
+ "base_file": "data/assets_v2/_base/furina-base.png",
+ "generation_calls": 0,
+ "production_files_changed": 0,
+ "masters_modified": 0,
+ "totals": {
+  "REVIEWED_COUNT": 19,
+  "ACCEPT": 5,
+  "HOLD": 14,
+  "REJECT": 0,
+  "TAIL_BASE_CONSISTENT": 4,
+  "TAIL_VIEWPOINT_JUSTIFIED": 1,
+  "TAIL_MIRRORED_ERROR": 14,
+  "ALPHA_CLEAN": 15,
+  "ALPHA_HOLD": 4,
+  "PROVENANCE_COMPLETE": 19
+ },
+ "verdicts": {
+  "a01": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Showpiece tail on viewer-LEFT (BASE: viewer-RIGHT); thigh band drawn only on viewer-right thigh (BASE band crosses both, gem at viewer-right end); face/hat/ahoge/costume pass; cane present (image_left); contact 2-foot + cane tip on G."
+  },
+  "a02": {
+   "verdict": "ACCEPT",
+   "tail": "BASE_CONSISTENT",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-RIGHT with curled tip (matches BASE); strap band both thighs + gem viewer-right (BASE-like); face/hat/ahoge pass; cane image_left; content_px +1px vs measured (threshold noise); slight-left yaw within limits."
+  },
+  "a03": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT while pose is slight-right (inverted); face/hat/ahoge pass; cane image_left."
+  },
+  "a04": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); face/hat/ahoge pass; content_px +1px (noise)."
+  },
+  "a05": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "HOLD",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); detached 410px tail wisp at (625,1284)-(662,1313) — matte artifact; cane held image_right as scepter (allowed, optional prop); right hand on hip per action block."
+  },
+  "a06": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); cane held center both hands; content_px +1px (noise)."
+  },
+  "a07": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); 6px stray speck at (579,600) recorded (negligible); crossed-arms pose clean."
+  },
+  "a08": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); face/hat/ahoge pass."
+  },
+  "a09": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); curious-lean pose OK otherwise."
+  },
+  "a10": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); sleepy pose OK otherwise."
+  },
+  "a11": {
+   "verdict": "ACCEPT",
+   "tail": "BASE_CONSISTENT",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Sitting: showpiece tail curl on viewer-RIGHT (correct); seat contact at G; height frac 0.667 (spec 0.62-0.72); face/hat/ahoge pass; cane across lap (image_left)."
+  },
+  "a12": {
+   "verdict": "ACCEPT",
+   "tail": "VIEWPOINT_JUSTIFIED",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Walking key pose: right showpiece tail longer than left (order preserved); left tail inflated vs BASE short tail but motion-justified; monitor in later frames; right hand holds cane per action block; face pass."
+  },
+  "a13": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "HOLD",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); two detached blue droplets (112px total) below tail at (325,1256); cane behind raised arm (image_right) — mark for later layering; face/hat/ahoge pass."
+  },
+  "a14": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); cane in other hand per action block (image_right); face pass."
+  },
+  "a16": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "HOLD",
+   "geometry": "CHAIR_EXCEPTION",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); WOODEN CHAIR baked into master while action block says \"unseen writing slope\" (environment art, STYLE_LOCK §11.10); cane drawn in hand while action block says \"leaning beside her\" — removal/layering needed; 3 stray specks near hip (20-54px); height frac 0.75 with chair."
+  },
+  "a17": {
+   "verdict": "ACCEPT",
+   "tail": "BASE_CONSISTENT",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Speaking/presenting: right showpiece tail dominant (left tail inflated vs BASE but order preserved — note); cane held like orator (image_right); face/hat/ahoge pass; mouth open speaking."
+  },
+  "a18": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); quiet reflective face pass; hands clasped on cane (image_left); narrowest ground contact 8px (cane tip); feet within tolerance."
+  },
+  "a19": {
+   "verdict": "HOLD",
+   "tail": "MIRRORED_ERROR",
+   "alpha": "HOLD",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Tail on viewer-LEFT (mirrored); BAKED decorative FX: detached crescent moon 200px at (304,1062), 4-point sparkle 191px at (778,1199), plus 3 small dots (STYLE_LOCK §11.9); cane absent per action block (task_prop: cake); sitting height 0.667."
+  },
+  "a20": {
+   "verdict": "ACCEPT",
+   "tail": "BASE_CONSISTENT",
+   "alpha": "CLEAN",
+   "geometry": "OK",
+   "provenance": "COMPLETE",
+   "identity": "OK",
+   "notes": "Playing twirl: huge showpiece tail swirl on viewer-RIGHT (correct); 23k enclosed hole = legit gap inside tail swirl loop; cane absent per action block (prop_mode none); single-foot contact plausible for twirl; face/hat/ahoge pass."
+  }
+ },
+ "a15": {
+  "status": "REJECT (unchanged)",
+  "recommendation": "REGEN_CANDIDATE",
+  "rationale": "Identity itself passed; lift/dangle semantics not realized in 3 attempts (character remains standing on ground). A standing sprite cannot procedurally produce a believable mid-air dangle (RUNTIME_PROCEDURAL would only give ground-drag translation); needs keyframe/video tooling per NIGHT-01 note (SPECIAL_ONLY class). Ground-drag response can be served procedurally from any standing master. No regeneration performed tonight."
+ },
+ "alpha_diagnostics": {
+  "method": "4-background composites (white/black/gray50/checkerboard) + magenta-fringe count + enclosed-hole labelling + detached-island connected components",
+  "magenta_like_px": 0,
+  "corner_residue": "none (all 24px corners transparent for all 19)",
+  "enclosed_holes": "all labeled; all are legitimate pose gaps (arm/body, tail/leg, tail-swirl loop, chair-leg gaps) — no matting loss through hair/hat/clothing",
+  "edge_alpha": "soft AA edges typical of hair/outline; no hard fringing bands",
+  "detached_islands": "a05 410px tail wisp; a07 6px speck; a13 112px droplets; a16 3 specks 20-54px; a19 crescent 200px + sparkle 191px + 3 dots"
+ },
+ "geometry_diagnostics": {
+  "canvas": "RGBA 1024x1536 for all 19",
+  "baseline": "lowest opaque row y=1467 for all (G=1468; within 1px)",
+  "standing_height_frac": "0.9167 (spec 0.88-0.94)",
+  "sit_height_frac": "a11/a19 0.6667 (spec 0.62-0.72); a16 0.75 (chair exception)",
+  "com_x_frac": "0.49-0.518 for all (spec 0.50 +/-0.03)",
+  "contact": "a01 two-foot+cane-tip; a02..a20 single or dual segments on G; a18 narrowest (8px cane-tip, feet within tolerance); a20 single-foot twirl contact",
+  "content_px": "matches measured [x,y,w,h] for 15/19; a02/a04/a06/a16 differ by 1px (alpha-threshold noise)"
+ },
+ "runtime_scale": {
+  "previews": "512/256/128 px generated read-only under review/runtime_previews/",
+  "pet_size_128px": "face, hat, ahoge, hands, shoes and silhouette readable for all 19; no silhouette collapse",
+  "overview": "review/runtime_scale_overview.png (all 19 + BASE at true 128px pet size)"
+ },
+ "tail_review": {
+  "method": "full-res + lower-body crop sheets vs BASE (4x inspection)",
+  "ground_truth": "BASE: long showpiece tail on her LEFT side = viewer-RIGHT, curled tip at knee level; short tail behind arm/cane on viewer-LEFT",
+  "mirrored_assets": [
+   "a01",
+   "a03",
+   "a04",
+   "a05",
+   "a06",
+   "a07",
+   "a08",
+   "a09",
+   "a10",
+   "a13",
+   "a14",
+   "a16",
+   "a18",
+   "a19"
+  ],
+  "note": "MIRRORED_ERROR assets are HOLD — no automatic horizontal flip of any master; repair is targeted regeneration with anti-mirror lock wording"
+ },
+ "prop_review": {
+  "policy": "cane = optional prop (NIGHT-02 correction). prop_mode/cane_hand/prop_required added to manifest_v2.json entries; spec docs amended (FURINA_IDENTITY_LOCK §6/§10.7, ASSET_GEOMETRY_AND_ANCHOR_SPEC §4/§6).",
+  "layering_candidates": [
+   "a13 (cane behind raised petting arm)",
+   "a16 (cane should lean beside her, not be held; chair removal)"
+  ],
+  "no_regen_for_cane": true
+ },
+ "final_state": "NOT_READY_FOR_HUMAN_ALPHA_RATIFICATION: 14/19 masters carry MIRRORED_ERROR showpiece tail (viewer-LEFT instead of BASE viewer-RIGHT); 4 masters carry detached-island/FX alpha defects (a05, a13, a16, a19); a16 additionally bakes a chair and a held cane contradicting its action block. 5 masters (a02, a11, a12, a17, a20) pass all gates and are ready for human alpha review."
+}

@@ -1,0 +1,19 @@
+{
+  "asset_id": "a13",
+  "semantic_state": "pet_response",
+  "model": "agnes-image-2.1-flash",
+  "seed": 20260840,
+  "size": "2K",
+  "ratio": "2:3",
+  "mode": "img2img",
+  "init_image": "data\\assets_v2\\_base\\furina-base.png",
+  "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+  "prompt_md5": "b161a31006be66dea225cad762ad9adc",
+  "action_block": "Standing while leaning her head slightly into an unseen hand petting her hair, eyes softened, one hand raised near the hand.",
+  "expression_block": "Pleased melting expression, eyes soft and half-closed, small happy smile, faint blush.",
+  "gaze_block": "Looking slightly upward.",
+  "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers",
+  "generated_at": "2026-08-27T02:19:55",
+  "raw_file": "a13_pet_response_seed20260840.png",
+  "revised_prompt": ""
+}

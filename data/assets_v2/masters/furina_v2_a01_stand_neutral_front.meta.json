@@ -1,0 +1,48 @@
+{
+  "asset_id": "furina_v2_a01_stand_neutral_front",
+  "alpha_id": "a01",
+  "category": "POSTURE",
+  "semantic_state": "stand_neutral_front",
+  "canvas_width": 1024,
+  "canvas_height": 1536,
+  "ground_baseline_y": 1468,
+  "geometry": {
+    "anchor_x": 0.5,
+    "anchor_y": 0.9557,
+    "content_px": [
+      184,
+      60,
+      656,
+      1408
+    ],
+    "scale_from_raw": 0.6236
+  },
+  "contact": "feet_ground",
+  "loop": false,
+  "interruptible": true,
+  "source_generation": {
+    "asset_id": "a01",
+    "semantic_state": "stand_neutral_front",
+    "model": "agnes-image-2.1-flash",
+    "seed": 20261828,
+    "size": "2K",
+    "ratio": "2:3",
+    "mode": "img2img",
+    "init_image": "data\\assets_v2\\_base\\furina-base.png",
+    "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+    "prompt_md5": "0b8f47f8dcba8eaaff90fc5c8ee4e53e",
+    "action_block": "Standing straight facing the viewer, relaxed shoulders, her right hand holding her cane at her side, her left hand resting open at her side.",
+    "expression_block": "Neutral calm expression, soft brows, small gentle closed-mouth smile.",
+    "gaze_block": "Looking at the viewer.",
+    "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers",
+    "generated_at": "2026-08-27T02:13:58",
+    "raw_file": "a01_stand_neutral_front_seed20261828.png",
+    "revised_prompt": ""
+  },
+  "base_identity_version": "furina-base-2026-08",
+  "style_version": "FURINA-STYLE-LOCK-V2",
+  "review_status": "ACCEPT",
+  "review_notes": "Anchor-neutral master. Tail side correct.",
+  "candidate_file": "data\\assets_v2\\review\\candidates\\furina_v2_a01_stand_neutral_front.png",
+  "master_file": "data/assets_v2/masters/furina_v2_a01_stand_neutral_front.png"
+}

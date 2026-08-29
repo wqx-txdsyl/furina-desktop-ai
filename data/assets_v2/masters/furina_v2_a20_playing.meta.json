@@ -1,0 +1,48 @@
+{
+  "asset_id": "furina_v2_a20_playing",
+  "alpha_id": "a20",
+  "category": "SPECIAL",
+  "semantic_state": "playing",
+  "canvas_width": 1024,
+  "canvas_height": 1536,
+  "ground_baseline_y": 1468,
+  "geometry": {
+    "anchor_x": 0.5005,
+    "anchor_y": 0.9557,
+    "content_px": [
+      132,
+      60,
+      761,
+      1408
+    ],
+    "scale_from_raw": 0.6214
+  },
+  "contact": "task_contact",
+  "loop": false,
+  "interruptible": true,
+  "source_generation": {
+    "asset_id": "a20",
+    "semantic_state": "playing",
+    "model": "agnes-image-2.1-flash",
+    "seed": 20260847,
+    "size": "2K",
+    "ratio": "2:3",
+    "mode": "img2img",
+    "init_image": "data\\assets_v2\\_base\\furina-base.png",
+    "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+    "prompt_md5": "500e8d261430f2e68717653dd43eb1df",
+    "action_block": "Standing mid-playful twirl on one foot, skirt-like coattails flaring, one hand holding her hat, the other out for balance, cane left aside out of frame.",
+    "expression_block": "Playful joyful expression, bright eyes, open happy smile.",
+    "gaze_block": "Looking at the viewer.",
+    "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers",
+    "generated_at": "2026-08-27T02:23:01",
+    "raw_file": "a20_playing_seed20260847.png",
+    "revised_prompt": ""
+  },
+  "base_identity_version": "furina-base-2026-08",
+  "style_version": "FURINA-STYLE-LOCK-V2",
+  "review_status": "ACCEPT",
+  "review_notes": "Tail side correct; hat-hand release pose per action block.",
+  "candidate_file": "data\\assets_v2\\review\\candidates\\furina_v2_a20_playing.png",
+  "master_file": "data/assets_v2/masters/furina_v2_a20_playing.png"
+}

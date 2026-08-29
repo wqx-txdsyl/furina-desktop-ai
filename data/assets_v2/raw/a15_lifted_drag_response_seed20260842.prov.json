@@ -1,0 +1,19 @@
+{
+  "asset_id": "a15",
+  "semantic_state": "lifted_drag_response",
+  "model": "agnes-image-2.1-flash",
+  "seed": 20260842,
+  "size": "2K",
+  "ratio": "2:3",
+  "mode": "img2img",
+  "init_image": "data\\assets_v2\\_base\\furina-base.png",
+  "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+  "prompt_md5": "2a359607bb9844b43c3d8ed1777cefef",
+  "action_block": "Lifted into the air under the arms by an unseen grip, legs dangling, toes pointed, cane slipping from her hand still attached by a ribbon to her wrist.",
+  "expression_block": "Startled protest expression, wide eyes, small open mouth, faint blush.",
+  "gaze_block": "Looking at the viewer.",
+  "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers",
+  "generated_at": "2026-08-27T02:20:39",
+  "raw_file": "a15_lifted_drag_response_seed20260842.png",
+  "revised_prompt": ""
+}

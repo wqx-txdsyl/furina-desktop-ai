@@ -1,0 +1,70 @@
+{
+ "asset_id": "furina_v2_a07_stand_annoyed",
+ "alpha_id": "a07",
+ "category": "POSTURE",
+ "semantic_state": "stand_annoyed",
+ "canvas_width": 1024,
+ "canvas_height": 1536,
+ "ground_baseline_y": 1468,
+ "geometry": {
+  "anchor_x": 0.5,
+  "anchor_y": 0.9557,
+  "content_px": [
+   181,
+   60,
+   662,
+   1408
+  ],
+  "scale_from_raw": 0.6208
+ },
+ "contact": "feet_ground",
+ "loop": false,
+ "interruptible": true,
+ "source_generation": {
+  "asset_id": "a07",
+  "semantic_state": "stand_annoyed",
+  "model": "agnes-image-2.1-flash",
+  "seed": 20261834,
+  "size": "2K",
+  "ratio": "2:3",
+  "mode": "img2img",
+  "init_image": "data\\assets_v2\\_base\\furina-base.png",
+  "init_image_md5": "02ee5ed5cf7735f16e89595e6305f01e",
+  "prompt_md5": "847e1efa690475b6251a6c4f7a9f12e3",
+  "action_block": "Standing with her arms folded, cane hooked in the crook of her elbow, chin slightly turned away.",
+  "expression_block": "Mildly offended expression, brows tilted inward, small pout, cheeks slightly puffed.",
+  "gaze_block": "Looking away slightly, toward her right.",
+  "negative_prompt": "realistic proportions, tall body, long legs, small head, normal proportions, non-chibi, oversized head beyond chibi, toddler, photorealistic, 3D render, Nendoroid figure, painterly brush strokes, watercolor, sketch lines, thick outline western cartoon, extra ahoge, missing ahoge, straight untilted hat, missing hat, alt costume, dress replacing jacket, missing brooch, missing thigh strap, simplified costume, different hair color, saturated all-blue hair, huge eyes, gradient background, colored environment, dark background, purple background, vignette, indoor background, bloom, glow, rim light, text, watermark, cropped feet, cropped hat, multiple characters, extra characters, hands with five detailed fingers, hair tail on the wrong side, mirrored hair, long hair tail on her right side",
+  "generated_at": "2026-08-27T02:26:40",
+  "raw_file": "a07_stand_annoyed_seed20261834.png",
+  "revised_prompt": ""
+ },
+ "base_identity_version": "furina-base-2026-08",
+ "style_version": "FURINA-STYLE-LOCK-V2",
+ "review_status": "PENDING",
+ "review_notes": "NIGHT-03 local repair candidate (master untouched): tail MIRRORED_ERROR corrected to BASE-consistent viewer-right by extract->span-fill->mirror->composite-behind; measured com_x 0.5363, deviation from 0.50±0.03 recorded per GEOMETRY spec §5.2 (pose right-leaning / tail mass relocation; semantic reason: tail-side correction). Awaiting human review.",
+ "candidate_file": "data\\assets_v2\\review\\candidates\\furina_v2_a07_stand_annoyed.png",
+ "master_file": "data/assets_v2/masters/furina_v2_a07_stand_annoyed.png",
+ "night03_repair": {
+  "method": "local_surgical_no_generation",
+  "generation_calls": 0,
+  "candidate_file": "data\\assets_v2\\repair_candidates\\night03\\furina_v2_a07_repair.png",
+  "candidate_sha256": "2c76eed3cc7925cf3c773ea9bd213652383d89767e45f57fb6888a0ec8f2801a",
+  "master_file": "data\\assets_v2\\masters\\furina_v2_a07_stand_annoyed.png",
+  "master_sha256": "388ffebe81738701cd73c7aca75d15b006ee20b54ca2baa7c4637c97631544a9",
+  "measured": {
+   "content_px": [
+    181,
+    60,
+    662,
+    1408
+   ],
+   "lowest_row": 1467,
+   "com_x": 0.5363,
+   "alpha_components": 1,
+   "islands_gt40": 0,
+   "magenta_px": 0,
+   "corners_transparent": true
+  }
+ }
+}
