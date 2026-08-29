@@ -87,6 +87,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pytest
 
+from furina.agent.agent_runtime import AgentRuntime
 from furina.agent.approval import (
     ApprovalBroker,
     ApprovalDecisionKind,
@@ -4281,15 +4282,33 @@ def test_74_reviewer_positive_paths_consume_exactly_once(server):
     assert _onces_for(server, h1.run_id) == [{"choice": "once"}]
 
     # (2) approve_session：resolve 边界消费 → 恰好一个 once（决议仍只收窄 once）
+    frame_sess = {"event": "approval.request", "tool": "terminal",
+                  "command": "echo p6-session", "preview": "echo p6-session"}
     h2 = backend.submit(contract_sess.to_backend_projection())
     a2, r2 = backend._handle_approval_request(
-        h2.run_id, backend._runs[h2.run_id],
-        {"event": "approval.request", "tool": "terminal",
-         "command": "echo p6-session", "preview": "echo p6-session"})
+        h2.run_id, backend._runs[h2.run_id], dict(frame_sess))
     assert a2 and r2 is None, f"approve_session 前置建立失败: {(a2, r2)}"
     # APPROVE_SESSION 决议必须携带 canonical USER 证据（16D 决议面真实链路）：
-    # 审批请求对象经白盒取回（operation_digest 为 broker 密钥 HMAC，不经审计导出）
-    request2 = broker._requests[a2].request   # white-box：仅测试构造决议证据
+    # 审批请求经 16D 公开查询面取回（零 _private 触碰）：原始 args 与 backend
+    # 冻结规则同源（frame 减传输层字段），operation_digest 经公开 API 以 broker
+    # 密钥现场重算，matching_request 全身份查询（镜像 _prove_approval_binding：
+    # scope 独立重算、risk=max(PM,L2)、policy 取契约公开面）命中必须非 None
+    # 且 approval_id 精确等于 a2
+    op_args_sess = {k: v for k, v in frame_sess.items()
+                    if k not in hermes_module._NON_OPERATION_FRAME_FIELDS}
+    scope_sess = tuple(
+        str(p).strip()
+        for p in AgentRuntime._step_paths("terminal", dict(op_args_sess))
+        if str(p).strip())
+    request2 = broker.matching_request(
+        contract_id=contract_sess.contract_id,
+        contract_hash=contract_sess.content_hash,
+        run_id=h2.run_id, tool="terminal", capability="cap.filesystem",
+        requested_scope=scope_sess, risk_level=Permission.L2_HIGH_RISK,
+        policy_kind=contract_sess.approval_policy.policy_kind,
+        operation_digest=broker.operation_digest(op_args_sess))
+    assert request2 is not None and request2.approval_id == a2, \
+        f"公开查询面必须命中 a2 的 ApprovalRequest: {request2}"
     assert _approve_session_with_evidence(broker, request2).ok
     res2 = backend.resolve_approval(a2)
     assert res2["choice"] == "once" and res2["resolved"] == 1, \

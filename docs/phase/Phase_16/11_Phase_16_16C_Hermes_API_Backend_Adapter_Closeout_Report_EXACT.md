@@ -15,9 +15,15 @@ STATUS                         = EXECUTED — Reviewer Patch 6（permit 最终�
                                  有效授权，也因 permit 不在主 broker 台账被拒绝
                                  零 once；主 broker 撤销/超时/消费状态在唯一消费锁
                                  内重查 + 4 项 reviewer 专项否证新增，全量测试通过，
-                                 等待外部验收；不声明 16C_PASS）
-BASE_SHA                       = 0684753e7e0e3a6c1abbb29011577588b4d77664
-                                 （16C Reviewer Patch 5 提交；本 patch 唯一父提交）
+                                 等待外部验收；Final Documentation/Test Hygiene
+                                 Micro-Patch（测试私有字段访问收归 16D 公开 API +
+                                 cognition 精确计数，零生产代码改动）后状态不变；
+                                 不声明 16C_PASS）
+BASE_SHA                       = fad0a0723e515a2f893465d7a3fa32de9fec40a9
+                                 （16C Reviewer Patch 6 提交；本 Final
+                                 Documentation/Test Hygiene Micro-Patch 唯一父
+                                 提交；Patch 6 自身 base = 0684753e7e0e…，
+                                 见下方 Patch 6 摘要节）
 FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，
                                  沿用 16A/16B/16D/16E 惯例）
 BRANCH                         = feature/phase16-16c-hermes-api-adapter
@@ -322,8 +328,17 @@ TEST_FILES_CHANGED             = tests/agent/integration/test_phase16c_hermes_ap
                                  = 75 项；Patch 3 既有用例按新构造面
                                  （approval_gates/permission_decider 注入取代
                                  permit_issuers）与 Gate 流程准确升级——approval 专项
-                                 全部走 16D Gate 四层判定）
-TARGETED_TESTS                 = 16C 专项 75 passed（Patch 1–5 全量 71 项保持通过 +
+                                 全部走 16D Gate 四层判定）+ Final Test Hygiene
+                                 Micro-Patch（2026-08-29）：test_74 approve_session
+                                 决议证据的审批请求取回由白盒 ``broker._requests``
+                                 改为 16D 公开 API（公开 ``operation_digest`` 现场
+                                 重算 broker 密钥 HMAC + ``matching_request`` 全身份
+                                 查询，断言返回非 None 且 approval_id 精确等于 a2）；
+                                 全文件零 ``_requests``/``_grants``/``_known_gate_ids``
+                                 或其他私有字段触碰；测试总数不变（75 项）
+TARGETED_TESTS                 = 16C 专项 75 passed（本 micro-patch 复跑
+                                 75 passed / 0 failed，测试总数不变；Patch 1–5
+                                 全量 71 项保持通过 +
                                  Patch 6 新增 4 项：foreign permit 主 broker
                                  permit registry 拒绝（主/foreign broker 完全相同
                                  契约/tool/capability/workspace + UUID 桩同名
@@ -349,14 +364,24 @@ BACKEND_PERMISSION_REGRESSION  = 16A/16B/16D/16E 四套件 251 passed + tests/ag
                                  （matching_request / covering_grant 公开查询面）
                                  与主 broker 最终消费（consume_permit 公开 producer
                                  API）——未触发 BLOCKED_BY_16D_GATE_BROKER_BINDING_GAP）
-COGNITION_SUITE                = 285 passed
-FULL_SUITE                     = 1689 passed（0 failed；两次完整运行：首跑 1688
-                                 passed + 1 failed——tests/test_gui_integration.py::
+COGNITION_SUITE                = 279 passed（0 failed；本 micro-patch 在 BASE
+                                 fad0a07 精确一次运行 ``pytest tests/cognition -q``
+                                 的真实数量；运行前 ``git status --short
+                                 tests/cognition`` 零输出——零未提交修改、零
+                                 untracked 测试，数量为 canonical 值；取代本
+                                 closeout 早前 patch 基线记录的 285 passed——
+                                 tests/cognition 自 Phase 15 D3（b42ed4a）后零
+                                 改动，285 为更早基线的过时记录）
+FULL_SUITE                     = 1689 passed（0 failed；**该数字来自 Reviewer
+                                 Patch 6 生产代码最终全量运行**——本 micro-patch
+                                 零生产代码改动，未重跑 full suite，按指令复用
+                                 该数字；Patch 6 运行历史：首跑 1688 passed +
+                                 1 failed——tests/test_gui_integration.py::
                                  test_gui_timer_advances_runtime 计时型偶发，该
                                  测试与 furina.agent.backend 零导入耦合、隔离运行
-                                 通过、复跑全量 0 failed，与本 patch 无关；15 条
+                                 通过、复跑全量 0 failed，与 Patch 6 无关；15 条
                                  warning 全部来自既有 tests/test_agent_tools.py
-                                 子进程 reader 编码问题，与本 patch 无关）
+                                 子进程 reader 编码问题，与 Patch 6 无关）
 GIT_DIFF_CHECK                 = clean（git diff --check 零输出）
 OPTIONAL_LIVE_SMOKE            = NOT_RUN/NOT_REQUIRED（Recon 阶段已对本机
                                  0.20.6 做只读 loopback 实测；本 patch 全部行为由
@@ -379,6 +404,29 @@ REMAINING_GAPS                 = (1) 实机 approval.request SSE 帧未 live 触
                                  审批一律 fail-closed deny（如实登记的部署边界）。
 READY_FOR_REVIEW               = YES（不声明 16C_PASS）
 ```
+
+## 16C Final Documentation/Test Hygiene Micro-Patch 摘要（BASE fad0a07，2026-08-29）
+
+1. **测试私有字段访问收归 16D 公开 API（唯一代码改动）**：`test_74…positive_paths_
+   consume_exactly_once` 中 approve_session 决议证据所需的审批请求对象，由白盒
+   `broker._requests[a2].request` 改为 16D 公开查询面取得——帧同源原始 args
+   （frame 减 `_NON_OPERATION_FRAME_FIELDS`，与 backend 冻结规则一致）经公开
+   `broker.operation_digest(...)` 现场重算 broker 密钥 HMAC，`broker.matching_
+   request(...)` 全身份查询（contract_id / contract_hash / run_id / tool /
+   capability / requested_scope 经 `AgentRuntime._step_paths` 独立重算 /
+   risk_level = max(PM, L2) / policy_kind 取契约公开面），断言返回**非 None** 且
+   **approval_id 精确等于 a2**；全测试文件零 `_requests` / `_grants` /
+   `_known_gate_ids` 或其他私有字段触碰（grep 断言）。生产代码（hermes.py）零
+   改动；测试总数不变（75 项）。
+2. **cognition 精确计数入 closeout**：`git status --short tests/cognition` 零输出
+   （零未提交修改、零 untracked 测试——状态门通过）；`pytest tests/cognition -q`
+   精确一次运行 = **279 passed / 0 failed**（154.66s），写入 COGNITION_SUITE 取代
+   早前 patch 基线的 285 记录（tests/cognition 自 Phase 15 D3 后零改动）。
+3. **full suite 复用**：未重跑；FULL_SUITE 保留 Patch 6 生产代码最终全量运行
+   1689 passed / 0 failed 并注明来源。
+4. **范围与边界**：仅改动 tests/agent/integration/test_phase16c_hermes_api_
+   adapter.py 与本 closeout 两个文件；`git diff --check` 零输出；不开始 16F、
+   不合并 integration、不声明 16C_PASS。
 
 ## Reviewer Patch 6 修复摘要（BASE 0684753，2026-08-29）
 
