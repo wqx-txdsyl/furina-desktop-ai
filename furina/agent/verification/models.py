@@ -37,8 +37,10 @@
   （控制字符/首尾空白/静默 trim/秘密形态一律 :class:`VerificationInputError`
   fail-closed，绝不 normalize 后重新绑定）。
 - 产物 MIME 是**完整内容**识别真值（:func:`full_content_verdict`：PNG/JPEG
-  魔数 + Pillow 结构验证、PDF 偏移 0 + 封闭结构、JSON/text 完整有界解析、
-  二进制显式接受；空/畸形/截断一律 fail-closed），扩展名只是命名层交叉核对；
+  魔数 + Pillow 结构验证、PDF 偏移 0 + **封闭结构验证**（header/对象/xref/
+  startxref/trailer/EOF 与偏移关系，Patch 3 B1——伪 PDF/截断 xref/错误
+  startxref 一律 fail-closed）、JSON/text 完整有界解析、二进制显式接受；
+  空/畸形/截断一律 fail-closed），扩展名只是命名层交叉核对；
   ``ArtifactExpectation.artifact_type`` 经 16F 显式封闭且 **API 层不可变**
   （blocker B2）的 :data:`ARTIFACT_TYPE_CONTENT_RULES` 进入验证策略——未知
   artifact_type 绝不静默通过，binary/octet-stream 内容只能被显式允许的
@@ -222,14 +224,122 @@ def sniff_content_mime(head: bytes) -> str:
 # 完整内容验证（blocker B1）：MIME 识别与有效性判定基于同一完整、有界快照
 # ---------------------------------------------------------------------------
 
-_PDF_HEADER_RE = re.compile(rb"%PDF-\d+\.\d+")
+_PDF_HEADER_RE = re.compile(rb"%PDF-[0-9]+\.[0-9]+(?!\d)")
+_PDF_XREF_ENTRY_RE = re.compile(rb"\d{10} \d{5} [nf][ \r][\n]")
+_PDF_TRAILER_ROOT_RE = re.compile(rb"/Root\s+(\d+)\s+0\s+R")
+_PDF_TRAILER_SIZE_RE = re.compile(rb"/Size\s+(\d+)")
+_PDF_OBJ_DEFINED_RE = re.compile(rb"(?m)^(\d+)\s+0\s+obj\b")
+
+#: 受支持 PDF 封闭子集的确定性验证界限（任何超界即 fail-closed）。
+_MAX_PDF_XREF_ENTRIES = 8192
+
+
+def _skip_pdf_ws(full: bytes, pos: int) -> int:
+    n = len(full)
+    while pos < n and full[pos:pos + 1] in b" \t\r\n":
+        pos += 1
+    return pos
+
+
+def _parse_pdf_int(full: bytes, pos: int) -> Tuple[Optional[int], Optional[int]]:
+    """解析非负整数；返回 ``(value, next_pos)``；失败返回 ``(None, None)``。"""
+    n = len(full)
+    start = pos
+    while pos < n and full[pos:pos + 1].isdigit():
+        pos += 1
+    if pos == start:
+        return None, None
+    return int(full[start:pos]), pos
 
 
 def _validate_pdf_structure(full: bytes) -> str:
-    """封闭、确定性的受支持 PDF 结构：``%PDF-`` 位于偏移 0 + 版本号 +
-    尾部 1 KiB 内存在 ``%%EOF``。截断/缺 EOF/前导垃圾一律 fail-closed。"""
-    if not _PDF_HEADER_RE.match(full[:32]) or b"%%EOF" not in full[-1024:]:
-        return "malformed_content:pdf_structure"
+    """封闭、确定性的受支持 PDF 结构验证（Patch 3 B1）——**绝不只检查**
+    ``%PDF-`` 与 ``%%EOF`` 两个 marker，而是验证 header / 对象 / xref /
+    startxref / trailer / EOF 及其偏移关系：
+
+    - header：``%PDF-<major>.<minor>`` 必须位于偏移 0（版本号后不得紧跟数字）；
+    - EOF：``%%EOF`` 必须位于尾部 1 KiB 内且为其后唯一内容（仅允许空白）；
+    - startxref：必须存在且携带指向 xref 表的十进制字节偏移；
+    - xref：该偏移处必须是经典 ``xref`` 表——子段（start/count）+ 定长 20 字节
+      条目（``nnnnnnnnnn ggggg n|f``），``n`` 条目记录的字节偏移必须精确指向
+      文件中对应 ``<num> 0 obj`` 的位置（偏移关系，非仅对象存在）；
+    - trailer：``/Size`` + ``/Root`` 必须存在，Root 对象号必须落在 xref 覆盖
+      范围内且必须真实定义于文件中；
+    - 截断 xref / 错误 startxref / 随机内容 / 伪 PDF 一律 fail-closed；
+      交叉引用流（/XRef stream）与本封闭子集不支持 → 同样 fail-closed。
+    """
+    if not _PDF_HEADER_RE.match(full[:32]):
+        return "malformed_content:pdf_header"
+    eof = full.rfind(b"%%EOF")
+    if eof < 0 or len(full) - eof > 1024:
+        return "malformed_content:pdf_eof_missing"
+    if full[eof + 5:].strip(b" \t\r\n"):
+        return "malformed_content:pdf_eof_trailing"
+    sx = full.rfind(b"startxref", 0, eof)
+    if sx < 0:
+        return "malformed_content:pdf_startxref_missing"
+    value, pos = _parse_pdf_int(full, _skip_pdf_ws(full, sx + len(b"startxref")))
+    if value is None or pos is None or value < 0 or value >= eof:
+        return "malformed_content:pdf_startxref_invalid"
+    # xref 表（经典格式；/XRef stream 不支持 → fail-closed）
+    if full[value:value + 4] != b"xref":
+        return "malformed_content:pdf_xref_missing"
+    pos = _skip_pdf_ws(full, value + 4)
+    covered: set = set()
+    total_entries = 0
+    while True:
+        start_num, pos = _parse_pdf_int(full, pos)
+        if start_num is None:
+            return "malformed_content:pdf_xref_subsection"
+        pos = _skip_pdf_ws(full, pos)
+        count, pos = _parse_pdf_int(full, pos)
+        if count is None or start_num < 0 or count < 1 \
+                or start_num + count > _MAX_PDF_XREF_ENTRIES:
+            return "malformed_content:pdf_xref_subsection"
+        pos = _skip_pdf_ws(full, pos)
+        for i in range(count):
+            entry = full[pos:pos + 20]
+            if len(entry) < 20 or not _PDF_XREF_ENTRY_RE.match(entry):
+                return "malformed_content:pdf_xref_entry"
+            obj_num = start_num + i
+            covered.add(obj_num)
+            if entry[17:18] == b"n":
+                total_entries += 1
+                if total_entries > _MAX_PDF_XREF_ENTRIES:
+                    return "malformed_content:pdf_xref_too_large"
+                offset10 = int(entry[:10])
+                marker = b"%d 0 obj" % obj_num
+                if offset10 >= eof \
+                        or full[offset10:offset10 + len(marker)] != marker:
+                    return "malformed_content:pdf_xref_offset"
+            pos += 20
+        pos = _skip_pdf_ws(full, pos)
+        if pos < len(full) and full[pos:pos + 1].isdigit():
+            continue              # 下一个子段
+        break
+    # trailer（/Size + /Root 及对象覆盖关系）
+    if full[pos:pos + 7] != b"trailer":
+        return "malformed_content:pdf_trailer_missing"
+    pos = _skip_pdf_ws(full, pos + 7)
+    if full[pos:pos + 2] != b"<<":
+        return "malformed_content:pdf_trailer_dict"
+    end = full.find(b">>", pos + 2)
+    if end < 0:
+        return "malformed_content:pdf_trailer_dict"
+    dict_body = full[pos + 2:end]
+    m_root = _PDF_TRAILER_ROOT_RE.search(dict_body)
+    m_size = _PDF_TRAILER_SIZE_RE.search(dict_body)
+    if not m_root or not m_size:
+        return "malformed_content:pdf_trailer_dict"
+    root_num = int(m_root.group(1))
+    size = int(m_size.group(1))
+    if size < 1 or root_num <= 0 or root_num >= size:
+        return "malformed_content:pdf_trailer_dict"
+    if root_num not in covered:
+        return "malformed_content:pdf_trailer_dict"
+    if not any(int(m.group(1)) == root_num
+               for m in _PDF_OBJ_DEFINED_RE.finditer(full)):
+        return "malformed_content:pdf_root_missing"
     return ""
 
 
@@ -275,7 +385,9 @@ def full_content_verdict(full: bytes) -> Tuple[str, str]:
     - 空内容 → ``("", "empty_artifact")``——空文件绝不是有效 artifact；
     - PNG/JPEG：魔数必须在偏移 0 + Pillow 结构验证（截断/畸形失败）；
     - PDF：``%PDF-`` 必须位于偏移 0 的合法起始位置（任意窗口中出现 marker
-      不构成 PDF）+ 封闭受支持结构（版本 + 尾部 ``%%EOF``）；
+      不构成 PDF）+ **封闭结构验证**（header/对象/xref/startxref/trailer/
+      EOF 与偏移关系，见 :func:`_validate_pdf_structure`——伪 PDF、截断
+      xref、错误 startxref 一律 fail-closed）；
     - JSON：BOM 容忍 + 严格 UTF-8 + **完整** json.loads（尾随垃圾/截断失败）；
     - text：**完整**内容无 NUL 且严格 UTF-8 可解码——后半段 NUL/非法
       UTF-8/二进制不得被前 1 KiB 掩盖；
@@ -414,6 +526,12 @@ class TerminalObservation:
     #: 属 16E TERMINAL_KINDS）——未绑定的 claim 不参与裁定。
     bound: bool
 
+    def __post_init__(self) -> None:
+        # Patch 3 B5：公开模型身份字段同样走 canonical validate_identity——
+        # 秘密形态/词法非法直接拒绝，绝不清洗后继续作为身份。
+        object.__setattr__(self, "event_id",
+                           validate_identity(self.event_id, "event_id"))
+
 
 @dataclass(frozen=True)
 class ArtifactObservation:
@@ -442,6 +560,11 @@ class ArtifactObservation:
     content_rejection: str = ""      # 完整内容结构验证拒绝（""=通过）
 
     def __post_init__(self) -> None:
+        # Patch 3 B5：artifact_id 也是公开身份字段——canonical 拒绝秘密形态，
+        # 绝不清洗后继续作为身份；路径记录面统一脱敏（解析层已拒绝秘密形态
+        # 路径——纵深防御）。
+        object.__setattr__(self, "artifact_id",
+                           validate_identity(self.artifact_id, "artifact_id"))
         object.__setattr__(self, "claimed_path", scrub_secrets(self.claimed_path))
         object.__setattr__(self, "resolved_path", scrub_secrets(self.resolved_path))
 
@@ -465,6 +588,14 @@ class EvidenceBundle:
             raise VerificationError("evidence artifact 观察数量超界")
         if len(self.diagnostics) > MAX_DIAGNOSTICS:
             raise VerificationError("evidence 诊断数量超界")
+        # Patch 3 B5：公开模型身份字段走 canonical validate_identity——秘密
+        # 形态/词法非法直接拒绝（绝不清洗后继续作为身份），raw secret 不可能
+        # 进入 evidence digest payload / 报告导出。
+        object.__setattr__(self, "contract_id",
+                           validate_identity(self.contract_id, "contract_id"))
+        object.__setattr__(self, "run_id", validate_identity(self.run_id, "run_id"))
+        object.__setattr__(self, "backend_id",
+                           validate_identity(self.backend_id, "backend_id"))
         # 诊断字符串面统一脱敏（秘密形态不得进入 evidence digest payload / 导出）
         object.__setattr__(self, "diagnostics", tuple(
             scrub_secrets(d)[:MAX_DIAGNOSTIC_CHARS] for d in self.diagnostics))
@@ -662,17 +793,16 @@ class VerificationReport:
         if not isinstance(self.verifier_id, str) or not self.verifier_id.strip() \
                 or len(self.verifier_id) > MAX_ID_CHARS:
             raise VerificationError("verifier_id 必须是非空 str")
-        if not isinstance(self.contract_id, str) or not self.contract_id.strip():
-            raise VerificationError("contract_id 必须是非空 str")
+        # Patch 3 B5：公开身份字段（contract_id/run_id/backend_id）走 canonical
+        # validate_identity——秘密形态直接拒绝，to_dict()/to_json() 因此不可能
+        # 导出 raw secret 身份；绝不清洗秘密后继续作为身份。
+        validate_identity(self.contract_id, "contract_id")
+        validate_identity(self.run_id, "run_id")
+        validate_identity(self.backend_id, "backend_id")
         for name in ("contract_hash", "standard_hash"):
             v = getattr(self, name)
             if not isinstance(v, str) or not _SHA256_PATTERN.match(v):
                 raise VerificationError(f"{name} 必须是 64 位小写 hex")
-        if not isinstance(self.run_id, str) or not _RUN_ID_PATTERN.match(self.run_id):
-            raise VerificationError(f"run_id 词法非法: {self.run_id!r}")
-        if not isinstance(self.backend_id, str) or not self.backend_id.strip() \
-                or len(self.backend_id) > MAX_ID_CHARS:
-            raise VerificationError("backend_id 必须是非空 str")
         verdict = self.verdict
         if isinstance(verdict, str):
             verdict = VerificationVerdict(verdict)

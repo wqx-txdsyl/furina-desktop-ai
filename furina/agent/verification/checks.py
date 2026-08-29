@@ -1,7 +1,19 @@
 """Phase 16F — 确定性检查器（deterministic checkers，全部本地真相）。
 
 16F 任务书 §3/§4 + 关键锁定 1/7 + Reviewer Patch 1（blocker 1/5/7）
-+ Reviewer Patch 2（blocker B1/B3/B7）：
++ Reviewer Patch 2（blocker B1/B3/B7）+ Reviewer Patch 3（blocker B2/B4）：
+
+- **单路径单快照（Patch 3 B2）**：:func:`capture_file_contained` 是唯一
+  读取入口——一次 open → 同一句柄完整有界读取 → SHA-256 +
+  :func:`full_content_verdict` + 全文文本合法性 + 1 MiB 解码窗口；同一
+  canonical 路径在单次 verify 内只捕获一次（:class:`FileSnapshot`），
+  expectation/declared/exists/sha/text/regex 全部复用，任何检查不得重新
+  按路径打开已缓存文件；criterion-only 文件同样完整读取（≤ 8 MiB）且先
+  证明整体为合法文本（NUL/UTF-8）——empty/unreadable/oversize/mutated/
+  path escape 一律 required FAIL，绝不跳过检查后放行。
+- **POSIX regex worker 独立 session（Patch 3 B4）**：worker 以
+  ``start_new_session=True`` 自建进程组/会话；timeout 终止仅当其 pgid 归属
+  worker 自身才 ``killpg``，绝不触碰宿主进程组（worker 必死、宿主必活）。
 
 - 所有判据由本模块**在本地独立执行**：文件存在性 / 归属 / 大小 / MIME /
   SHA-256 全部本地观察；``process_exit_zero`` **本地重跑**契约判据命令
@@ -47,6 +59,7 @@ import os
 import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from typing import Any, BinaryIO, Callable, Optional, Tuple
 
 from .models import (
@@ -61,10 +74,12 @@ from .models import (
 )
 
 __all__ = [
+    "FileSnapshot",
     "observe_file",
     "sha256_file_bounded",
     "read_text_window",
     "open_contained",
+    "capture_file_contained",
     "snapshot_file_contained",
     "read_text_window_contained",
     "regex_match_bounded",
@@ -216,40 +231,96 @@ def _post_close_consistent(st_last: os.stat_result, path: str) -> bool:
     return _stat_id(st_last) == _stat_id(st2)
 
 
-def snapshot_file_contained(path: str, contains_path: Callable[[str, bool], bool],
-                            writable: bool
-                            ) -> Tuple[Optional[int], str, str, str, str, str]:
-    """句柄锚定的完整 artifact 快照：open_contained 证明 → 同一句柄读取
-    完整有界内容 → SHA-256 + :func:`full_content_verdict` → close 前后
-    一致性证明。返回 ``(size_bytes, sha256_hex, content_mime,
-    content_rejection, final_path, rejection)``；rejection ∈ {"", "missing",
-    "path_escape", "not_regular_file", "handle_target_unprovable",
-    "unreadable", "oversize", "mutated"}。
+@dataclass(frozen=True)
+class FileSnapshot:
+    """单次句柄锚定捕获的**完整不可变快照**（Patch 3 B2）。
+
+    一次 open → 同一句柄完整有界读取 → SHA-256 + :func:`full_content_verdict`
+    + 全文文本合法性（NUL / 严格 UTF-8）+ 1 MiB 文本窗口。同一 canonical
+    路径在单次 verify 内只捕获一次，expectation / declared / exists / sha /
+    text / regex 全部复用同一快照；任何检查都不得重新按路径打开已缓存文件。
+    ``rejection`` ∈ {"", "missing", "path_escape", "not_regular_file",
+    "handle_target_unprovable", "unreadable", "oversize", "mutated"}。
     """
-    f, final_path, rej = open_contained(path, contains_path, writable)
-    if rej:
-        return None, "", "", "", final_path, rej
+
+    claimed_path: str
+    final_path: str                 # 句柄真实目标；prefilter 逃逸/missing 时为 realpath 预筛值
+    target_exists: bool
+    is_regular_file: bool
+    within_workspace: bool
+    size_bytes: Optional[int]
+    sha256_hex: str
+    content_mime: str               # full_content_verdict 识别真值（不可观察 ""）
+    content_rejection: str          # 完整内容结构验证拒绝（""=通过）
+    full_text_valid: bool           # 完整内容为合法文本（无 NUL + 严格 UTF-8）
+    text_window: str                # 前 MAX_TEXT_READ_BYTES 解码文本（full_text_valid 时）
+    rejection: str
+
+
+def capture_file_contained(path: str, contains_path: Callable[[str, bool], bool],
+                           writable: bool) -> FileSnapshot:
+    """句柄锚定的完整快照捕获（Patch 3 B2 唯一读取入口）。
+
+    先以 realpath 预筛分类 missing/逃逸（不读取任何内容；非安全判断依据，
+    真实 containment 证明在句柄层），再 open_contained 证明 → 同一句柄完整
+    有界读取 → SHA-256 + :func:`full_content_verdict` + 全文文本合法性 +
+    1 MiB 解码窗口 → close 前后一致性证明。空 / 不可读 / 超界 / 变异 / 逃逸 /
+    句柄目标不可证明一律在 rejection 中 fail-closed，绝不降级 PASS。
+    """
+    claimed = os.path.normpath(os.path.expanduser(path))
+    real_prefilter = os.path.realpath(claimed)
+    if not contains_path(real_prefilter, writable):
+        exists = os.path.exists(real_prefilter)
+        is_file = bool(exists) and os.path.isfile(real_prefilter)
+        return FileSnapshot(claimed, real_prefilter, exists, is_file, False,
+                            None, "", "", "", False, "", "path_escape")
+    f, final_path, rej = open_contained(claimed, contains_path, writable)
+    if rej == "missing":
+        return FileSnapshot(claimed, real_prefilter, False, False, True,
+                            None, "", "", "", False, "", "missing")
+    if rej == "not_regular_file":
+        return FileSnapshot(claimed, final_path, True, False, True,
+                            None, "", "", "", False, "", "not_regular_file")
+    if rej == "path_escape":
+        return FileSnapshot(claimed, final_path, True, True, False,
+                            None, "", "", "", False, "", "path_escape")
+    if rej:     # unreadable / handle_target_unprovable
+        return FileSnapshot(claimed, final_path, True, True, True,
+                            None, "", "", "", False, "", rej)
     try:
         data, size, st_last, rj = _read_full_bounded(f)
         if rj == "" and not _post_close_consistent(st_last, final_path):
             rj = "mutated"
     finally:
         f.close()
-    if rj:
-        return size, "", "", "", final_path, rj
+    if rj:      # oversize / mutated / unreadable（读取期 IO 失败）
+        return FileSnapshot(claimed, final_path, True, True, True,
+                            size, "", "", "", False, "", rj)
     digest = hashlib.sha256(data).hexdigest()
     content_mime, content_rejection = full_content_verdict(data)
-    return size, digest, content_mime, content_rejection, final_path, ""
+    full_text_valid = _is_full_text(data)
+    window = ""
+    if full_text_valid:
+        window = _decode_text_window(data[:MAX_TEXT_READ_BYTES]) or ""
+    return FileSnapshot(claimed, final_path, True, True, True, size, digest,
+                        content_mime, content_rejection, full_text_valid,
+                        window, "")
 
 
-def _sha256_from_handle(f: BinaryIO, postcheck_path: str) -> Tuple[str, str]:
-    """从已证明句柄计算流式快照哈希（有界；读取期间变异 → mutated）。"""
-    data, _size, st_last, rj = _read_full_bounded(f)
-    if rj:
-        return "", rj
-    if not _post_close_consistent(st_last, postcheck_path):
-        return "", "mutated"
-    return hashlib.sha256(data).hexdigest(), ""
+def snapshot_file_contained(path: str, contains_path: Callable[[str, bool], bool],
+                            writable: bool
+                            ) -> Tuple[Optional[int], str, str, str, str, str]:
+    """句柄锚定的完整 artifact 快照（兼容 API，底层即
+    :func:`capture_file_contained`）：open_contained 证明 → 同一句柄读取
+    完整有界内容 → SHA-256 + :func:`full_content_verdict` → close 前后
+    一致性证明。返回 ``(size_bytes, sha256_hex, content_mime,
+    content_rejection, final_path, rejection)``；rejection ∈ {"", "missing",
+    "path_escape", "not_regular_file", "handle_target_unprovable",
+    "unreadable", "oversize", "mutated"}。
+    """
+    snap = capture_file_contained(path, contains_path, writable)
+    return (snap.size_bytes, snap.sha256_hex, snap.content_mime,
+            snap.content_rejection, snap.final_path, snap.rejection)
 
 
 def _decode_text_window(window: bytes) -> Optional[str]:
@@ -264,6 +335,18 @@ def _decode_text_window(window: bytes) -> Optional[str]:
         except UnicodeDecodeError:
             continue
     return None
+
+
+def _is_full_text(data: bytes) -> bool:
+    """完整内容是否为合法文本：无 NUL 且严格 UTF-8 可解码（Patch 3 B2——
+    criterion-only 文件必须整体先证明是合法文本，搜索才限 1 MiB 窗口）。"""
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
 
 
 def _text_window_from_handle(f: BinaryIO,
@@ -444,11 +527,17 @@ def check_no_substantive() -> VerificationCheck:
 def check_criterion(*, criterion_id: str, kind: str, params: Tuple[Tuple[str, str], ...],
                     contains_path: Callable[[str, bool], bool],
                     workspace_root: Optional[str],
-                    process_timeout_seconds: float) -> VerificationCheck:
+                    process_timeout_seconds: float,
+                    snapshot_cache: Optional[Any] = None) -> VerificationCheck:
     """按判据 kind 分派到确定性本地检查；check_id = ``criterion:<criterion_id>``。
 
     文件类判据全部句柄锚定（blocker B3）：受约束打开 + 句柄真实目标
-    containment 证明，读取只来自已证明句柄/同一不可变快照。
+    containment 证明，读取只来自已证明句柄/同一不可变快照。**Patch 3 B2**：
+    传入 ``snapshot_cache``（:class:`~verifier._PathSnapshotCache`，提供
+    ``get(path) -> FileSnapshot``）时，同一 canonical 路径复用同一完整快照，
+    绝不重新按路径打开；criterion-only 文件同样完整读取（≤ 8 MiB）并先证明
+    整体为合法文本（NUL/UTF-8），empty/unreadable/oversize/mutated/path
+    escape 一律 required FAIL（绝不跳过检查后放行）。
     """
     check = VerificationCheck(
         check_id=f"criterion:{criterion_id}", kind=kind, required=True,
@@ -464,80 +553,82 @@ def check_criterion(*, criterion_id: str, kind: str, params: Tuple[Tuple[str, st
     if kind in ("artifact_file_exists", "artifact_sha256", "text_contains", "regex_matches"):
         path = p.get("path", "")
         inputs = (("path", path),)
-        f, final_path, rej = open_contained(os.path.expanduser(path),
-                                            contains_path, False)
-        try:
-            if rej == "missing" or rej == "not_regular_file":
-                return _with(check, CheckResult.FAIL, "file_missing", inputs)
-            if rej == "path_escape":
-                return _with(check, CheckResult.FAIL,
-                             f"path_escape:{final_path[:256]}", inputs)
-            if rej == "handle_target_unprovable":
-                return _with(check, CheckResult.NOT_EVALUABLE,
-                             "handle_target_unprovable", inputs)
-            if rej == "unreadable":
-                return _with(check, CheckResult.NOT_EVALUABLE, "unreadable", inputs)
-            # rej == "" —— 已证明句柄，读取只来自该句柄
-            if kind == "artifact_file_exists":
-                try:
-                    st = os.fstat(f.fileno())
-                except OSError:
-                    return _with(check, CheckResult.NOT_EVALUABLE, "unreadable", inputs)
-                if stat.S_ISREG(st.st_mode):
-                    return _with(check, CheckResult.PASS, "file_exists", inputs)
-                return _with(check, CheckResult.FAIL, "not_regular_file", inputs)
+        if snapshot_cache is not None:
+            snap = snapshot_cache.get(path)
+        else:
+            # 无缓存（直接调用）：每次判据独立捕获一次（仍单句柄单快照）。
+            snap = capture_file_contained(os.path.expanduser(path),
+                                          contains_path, False)
+        rej = snap.rejection
+        if rej in ("missing", "not_regular_file"):
+            return _with(check, CheckResult.FAIL, "file_missing", inputs)
+        if rej == "path_escape":
+            return _with(check, CheckResult.FAIL,
+                         f"path_escape:{snap.final_path[:256]}", inputs)
+        if rej == "handle_target_unprovable":
+            return _with(check, CheckResult.NOT_EVALUABLE,
+                         "handle_target_unprovable", inputs)
+        if rej == "unreadable":
+            # Patch 3 B2：criterion-only 文件 unreadable 必须失败（绝不跳过）。
+            return _with(check, CheckResult.FAIL, "unreadable", inputs)
 
-            if kind == "artifact_sha256":
-                expected = p.get("sha256_hex", "")
-                inputs = inputs + (("sha256_hex", expected),)
-                digest, rj = _sha256_from_handle(f, final_path)
-                if rj == "oversize":
-                    return _with(check, CheckResult.FAIL, "artifact_oversize", inputs)
-                if rj == "mutated":
-                    return _with(check, CheckResult.FAIL,
-                                 "artifact_mutated_during_verification", inputs)
-                if rj:
-                    return _with(check, CheckResult.NOT_EVALUABLE, rj, inputs)
-                if digest == expected:
-                    return _with(check, CheckResult.PASS, "sha256_match", inputs)
-                return _with(check, CheckResult.FAIL, "sha256_mismatch", inputs)
-
-            text, truncated, rj = _text_window_from_handle(f, final_path)
-            if rj == "oversize":
+        if kind == "artifact_file_exists":
+            if rej == "oversize":
                 return _with(check, CheckResult.FAIL, "artifact_oversize", inputs)
-            if rj == "mutated":
+            if rej == "mutated":
                 return _with(check, CheckResult.FAIL,
                              "artifact_mutated_during_verification", inputs)
-            if rj == "content_not_text":
+            if snap.size_bytes == 0:
+                # Patch 3 B2：空文件 artifact_file_exists 必须 FAIL（绝非存在）。
+                return _with(check, CheckResult.FAIL, "artifact_empty", inputs)
+            return _with(check, CheckResult.PASS, "file_exists", inputs)
+
+        if kind == "artifact_sha256":
+            expected = p.get("sha256_hex", "")
+            inputs = inputs + (("sha256_hex", expected),)
+            if rej == "oversize":
+                return _with(check, CheckResult.FAIL, "artifact_oversize", inputs)
+            if rej == "mutated":
                 return _with(check, CheckResult.FAIL,
-                             "content_not_text", inputs)
-            if rj:
-                return _with(check, CheckResult.NOT_EVALUABLE, rj, inputs)
-            if kind == "text_contains":
-                needle = p.get("needle", "")
-                inputs = inputs + (("needle", needle),)
-                if needle in text:
-                    return _with(check, CheckResult.PASS,
-                                 f"needle_found offsets>0 window_truncated={truncated}", inputs)
-                return _with(check, CheckResult.FAIL,
-                             f"needle_not_found window_truncated={truncated}", inputs)
-            # regex_matches（blocker B7 §9.1：隔离 worker 有界执行）
-            pattern = p.get("pattern", "")
-            inputs = inputs + (("pattern", pattern),)
-            if len(pattern) > 2048:
-                return _with(check, CheckResult.NOT_EVALUABLE,
-                             "pattern_oversize", inputs)
-            matched, rj = regex_match_bounded(pattern, text, process_timeout_seconds)
-            if rj:
-                return _with(check, CheckResult.NOT_EVALUABLE, rj, inputs)
-            if matched:
-                return _with(check, CheckResult.PASS,
-                             f"regex_matched window_truncated={truncated}", inputs)
+                             "artifact_mutated_during_verification", inputs)
+            if snap.sha256_hex == expected:
+                return _with(check, CheckResult.PASS, "sha256_match", inputs)
+            return _with(check, CheckResult.FAIL, "sha256_mismatch", inputs)
+
+        # text_contains / regex_matches
+        if rej == "oversize":
+            return _with(check, CheckResult.FAIL, "artifact_oversize", inputs)
+        if rej == "mutated":
             return _with(check, CheckResult.FAIL,
-                         f"regex_not_matched window_truncated={truncated}", inputs)
-        finally:
-            if f is not None:
-                f.close()
+                         "artifact_mutated_during_verification", inputs)
+        if not snap.full_text_valid:
+            # Patch 3 B2：文件整体必须先证明是合法文本（无 NUL + 严格 UTF-8），
+            # 搜索才限 1 MiB 窗口——NUL/二进制尾不得被前 1 MiB 掩盖。
+            return _with(check, CheckResult.FAIL, "content_not_text", inputs)
+        text = snap.text_window
+        truncated = (snap.size_bytes or 0) > MAX_TEXT_READ_BYTES
+        if kind == "text_contains":
+            needle = p.get("needle", "")
+            inputs = inputs + (("needle", needle),)
+            if needle in text:
+                return _with(check, CheckResult.PASS,
+                             f"needle_found window_truncated={truncated}", inputs)
+            return _with(check, CheckResult.FAIL,
+                         f"needle_not_found window_truncated={truncated}", inputs)
+        # regex_matches（blocker B7 §9.1：隔离 worker 有界执行）
+        pattern = p.get("pattern", "")
+        inputs = inputs + (("pattern", pattern),)
+        if len(pattern) > 2048:
+            return _with(check, CheckResult.NOT_EVALUABLE,
+                         "pattern_oversize", inputs)
+        matched, rj = regex_match_bounded(pattern, text, process_timeout_seconds)
+        if rj:
+            return _with(check, CheckResult.NOT_EVALUABLE, rj, inputs)
+        if matched:
+            return _with(check, CheckResult.PASS,
+                         f"regex_matched window_truncated={truncated}", inputs)
+        return _with(check, CheckResult.FAIL,
+                     f"regex_not_matched window_truncated={truncated}", inputs)
 
     raise VerificationError(f"未知判据 kind（契约层应已拒绝）: {kind}")
 
@@ -577,21 +668,26 @@ _REGEX_EXIT_INVALID = 2
 
 def regex_match_bounded(pattern: str, text: str,
                         timeout_seconds: float) -> Tuple[Optional[bool], str]:
-    """任意调用方 pattern 的**隔离有界执行**（blocker B7 §9.1）。
+    """任意调用方 pattern 的**隔离有界执行**（blocker B7 §9.1 + Patch 3 B4）。
 
     pattern 绝不在主验证线程执行回溯：在可强制终止的独立 worker 子进程中
     编译+匹配，硬超时（超时即终止进程树）、输入上限（上游 ≤ 1 MiB 窗口）、
     零输出聚合（stdout/stderr 一律 DEVNULL，唯一通道是 exit code：
     0=match / 1=no-match / 2=invalid pattern / 3=worker error）。
+    **Patch 3 B4**：POSIX worker 以 ``start_new_session=True`` 自建独立
+    session/进程组——timeout 终止时仅当其 pgid 归属 worker 自身才 ``killpg``，
+    绝不触碰宿主进程组（worker 必死、宿主必活）；Windows 保持有界终止。
     返回 ``(matched|None, rejection)``；rejection ∈ {"", "regex_timeout",
     "regex_worker_spawn_error:<Exc>", "regex_worker_error", "invalid_pattern"}。
     timeout / invalid / worker error 一律 NOT_EVALUABLE（最终绝不 VERIFIED）。
     """
+    popen_kwargs = dict(shell=False, stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-c", _REGEX_WORKER_CODE, pattern],
-            shell=False, stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            [sys.executable, "-c", _REGEX_WORKER_CODE, pattern], **popen_kwargs)
     except (OSError, ValueError) as exc:
         return None, f"regex_worker_spawn_error:{type(exc).__name__}"
     try:
@@ -777,9 +873,11 @@ def _terminate_process_tree(proc: subprocess.Popen) -> None:
     """终止目标进程及其后代（低层兜底工具）。
 
     Windows ``taskkill /F /T`` 递归终止（先 kill 会断根致孙进程存活——
-    顺序修正）；POSIX 终止进程组。随后 kill + 有界 wait 收尾。此工具是
-    **低层兜底**，树级硬约束声明只属于 Windows Job Object 路径（见
-    :func:`process_containment_guaranteed`）。
+    顺序修正）；POSIX **仅当目标进程的 pgid 归属其自身（自建 session/进程组
+    的 leader）时才 ``killpg``**——绝不触碰宿主进程组（Patch 3 B4：regex
+    worker 若被误杀宿主进程组，测试宿主会被连带终止）。随后 kill + 有界
+    wait 收尾。此工具是**低层兜底**，树级硬约束声明只属于 Windows Job
+    Object 路径（见 :func:`process_containment_guaranteed`）。
     """
     if sys.platform == "win32":
         try:
@@ -791,9 +889,22 @@ def _terminate_process_tree(proc: subprocess.Popen) -> None:
     else:
         try:
             import signal
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:   # pragma: no cover
-            pass
+            pgid = os.getpgid(proc.pid)
+        except (OSError, ProcessLookupError):   # pragma: no cover
+            pgid = None
+        if pgid is not None and pgid == proc.pid:
+            # 目标自建进程组/会话：该组完全属于我们 → 整组终止。
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):   # pragma: no cover
+                pass
+        else:
+            # 无法证明 pgid 归属 → 绝不 killpg（可能命中宿主进程组），只终止
+            # worker 本身（Patch 3 B4 fail-closed）。
+            try:
+                proc.kill()
+            except OSError:   # pragma: no cover
+                pass
     try:
         proc.kill()
     except OSError:

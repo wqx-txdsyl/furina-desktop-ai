@@ -1,5 +1,5 @@
 # Phase 16 — 16F Independent Verification & Bounded Repair
-# Closeout Report — EXACT TEMPLATE（Reviewer Patch 2 后状态）
+# Closeout Report — EXACT TEMPLATE（Reviewer Patch 3 后状态）
 
 ```text
 STATUS                         = EXECUTED — 16F 独立验证 + 有界修复已实现并全量
@@ -39,7 +39,39 @@ STATUS                         = EXECUTED — 16F 独立验证 + 有界修复已
                                  CLOSE + CREATE_SUSPENDED 挂起态收编 + 拒绝
                                  breakaway，正常退出/超时/异常路径全部终止仍
                                  受管辖后代），POSIX 无等价保证 → process
-                                 判据 fail-closed 拒绝评估；backend completed/
+                                 判据 fail-closed 拒绝评估；Reviewer Patch 3
+                                 在同一洁净分支上修复 6 组 blocker：(B1) PDF
+                                 真实封闭结构——不再只查 `%PDF-`/`%%EOF`，验证
+                                 header/对象/xref/startxref/trailer/EOF 及偏移
+                                 关系，伪 PDF/截断 xref/错误 startxref/条目偏移
+                                 造假一律 fail-closed，合法最小 PDF（真实 xref
+                                 表 + startxref 偏移）PASS；(B2) 单路径单快照
+                                 ——每次 verify() 建立 canonical-path snapshot
+                                 cache，expectation/declared/exists/sha/text/
+                                 regex 复用同一不可变完整快照（只打开一次），
+                                 criterion-only 文件完整读取（≤8MiB）且先证明
+                                 整体为合法文本，空/超界 artifact_file_exists
+                                 与 NUL 尾/JSON 快照拼接攻击全部 FAIL；(B3)
+                                 接受 VERIFIED 前的最终稳定边界复核——
+                                 _accept_verified_report 完成后 ≥2 轮完整安全
+                                 扫描（hash→cost→cancel→新鲜时间，硬上限 3
+                                 轮），cancellation 改 cost/cost 推时钟/seal
+                                 认证翻取消/standard_hash 推 deadline/回调
+                                 异常 → final_report=None（BUDGET_EXHAUSTED/
+                                 TIMEOUT/CANCELLED/UNSTABLE_BOUNDARY）；(B4)
+                                 POSIX regex worker 以 start_new_session 自建
+                                 进程组，timeout 终止仅当 pgid 归属 worker
+                                 自身才 killpg——绝不触碰宿主进程组（worker
+                                 必死、宿主必活）；(B5) 公开模型身份验证——
+                                 TerminalObservation/ArtifactObservation/
+                                 EvidenceBundle/VerificationReport 的
+                                 artifact_id/event_id/run_id/backend_id/
+                                 contract_id 在 __post_init__ 统一经
+                                 validate_identity，秘密形态直接拒绝，秘密
+                                 路径异常回显脱敏（禁止 {path!r} 原文）；
+                                 (B6) 安全测试禁止 skip——PowerShell 枚举不可
+                                 用 → FAIL（P2-T/进程树终止测试），P3 新增
+                                 安全否证零 skip/xfail；backend completed/
                                  exit 0/成功文本/自报 verified 一律不是证明；
                                  不写 C7/C6/C3、不实现 16G/16H、不修改
                                  C1–C7/schema/migration、16A/16B/16C/16D/16E
@@ -148,20 +180,126 @@ UNSUPPORTED_PROCESS_MODE_FAILS_CLOSED = true（POSIX 无 unprivileged 树级
                                  → INCONCLUSIVE，绝不 best-effort 后 PASS；
                                  run_process_bounded 保留有界低层执行供直接
                                  调用，但 checker 拒绝评估）
-TARGETED                        = 136 passed（16F 专项：原 109 + Patch 2
-                                 新增 27 项 reviewer-locked）
-RELATED_TESTS_AGENT             = 543 passed（tests/agent 全目录一次）
+TARGETED                        = 148 passed / 0 failed / 0 skipped（16F 专项：
+                                 原 136 全保留 + Patch 3 新增 P3-A..P3-L 共
+                                 12 项 reviewer-locked 否证/正例——P3 安全
+                                 否证零 skip/xfail）
+TESTS_AGENT                     = 555 passed（tests/agent 全目录一次；
+                                 = Patch 2 基线 543 + Patch 3 新增 12）
 COGNITION                       = 279 passed（tests/cognition 全目录一次）
-FULL_SUITE                      = 1825 passed / 0 failed / 15 warnings（仅
-                                 一次；= Patch 1 基线 1798 + Patch 2 新增
-                                 27；15 warnings 全部来自非 16F 既有套件——
+FULL_SUITE                      = 1837 passed / 0 failed / 15 warnings（仅
+                                 一次；= Patch 2 基线 1825 + Patch 3 新增
+                                 12；15 warnings 全部来自非 16F 既有套件——
                                  16F 包零外部导入方，16F targeted 运行零
-                                 warnings）
+                                 warnings 零 skipped）
 C1_C7_UNCHANGED                 = true（零写入/零 schema 依赖/零持久化；
                                  git diff 仅 16F 自有文件）
 GIT_DIFF_CHECK                  = clean（git diff --check 零输出）
 LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
+```
+
+## 0.0 Patch 3 回执（Reviewer Patch 3 专用）
+
+```text
+BASE_SHA                         = 841936c（PATCH2_FINAL_SHA；Patch 3 唯一 BASE_SHA）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit SHA，
+                                    沿用 16A–16E 与 Patch 1/2 惯例）
+CHANGED_FILES                    = furina/agent/verification/__init__.py, models.py,
+                                   checks.py, verifier.py, repair.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（Patch 3 无新增私有辅助文件——
+                                   P3 全部测试内联于既有测试文件）
+PDF_STRUCTURAL_VALIDATION        = true（full_content_verdict 的 PDF 分支不再只查
+                                   %PDF-/%%EOF：验证 header（偏移 0 + 版本号）、
+                                   对象（n 条目偏移精确指向 <num> 0 obj）、
+                                   xref 表（经典子段 + 定长 20 字节条目）、
+                                   startxref（十进制偏移 + 指向真实 xref）、
+                                   trailer（/Size+/Root + 覆盖关系）、EOF（尾部
+                                   1KiB 且其后仅空白）及全部偏移关系；伪 PDF/
+                                   截断 xref/错误 startxref/条目偏移造假/缺 Root
+                                   一律 malformed_content:* fail-closed；合法
+                                   最小 PDF（真实 xref 表）PASS；P3-A/P3-B 否证
+                                   + P2-G/P2-F 正反例全保留）
+SINGLE_PATH_SINGLE_SNAPSHOT      = true（每次 verify() 建立 _PathSnapshotCache
+                                   （canonical normcase+normpath+expanduser 键）
+                                   ——expectation/declared/exists/sha/text/regex
+                                   对同一路径复用同一不可变 FileSnapshot（一次
+                                   open、同一句柄、完整有界内容 + SHA-256 +
+                                   full_content_verdict + 全文文本合法性 + 1 MiB
+                                   解码窗口），任何检查不得重新按路径打开已缓存
+                                   文件；P3-E 断言 expectation+declared+exists+
+                                   text 四路同路径只打开 1 次）
+CRITERION_FULL_CONTENT_CHECKED   = true（criterion-only 文件同样完整读取且 ≤
+                                   MAX_ARTIFACT_BYTES：empty/unreadable/oversize/
+                                   mutated/path escape 一律 required FAIL（unreadable
+                                   不再 NOT_EVALUABLE），全文先证明合法文本
+                                   （无 NUL + 严格 UTF-8）后搜索才限 1 MiB 窗口；
+                                   P3-C/P3-D 否证锁定）
+EMPTY_OVERSIZE_EXISTS_BLOCKED    = true（artifact_file_exists 对空文件 → FAIL
+                                   artifact_empty、>8MiB → FAIL artifact_oversize
+                                   ——存在本身不是有效证据；P3-C 否证）
+FINAL_STABLE_BOUNDARY            = true（接受 VERIFIED 前、_accept_verified_report
+                                   完成后执行最终稳定边界复核：≥2 轮完整安全扫描
+                                   （contract hash → cost → cancellation → 新鲜
+                                   当前时间），扫描次数硬上限 3 轮，回调异常 →
+                                   UNSTABLE_BOUNDARY fail-closed；任一轮越界即
+                                   final_report=None/VERIFIED=false；P3-G 三种
+                                   变体 + P3-H 两种变体否证）
+POST_AUTH_BUDGET_RECHECK         = true（seal 认证回调翻转 cancellation →
+                                   CANCELLED；standard_hash 属性回调推进时钟越过
+                                   deadline → TIMEOUT；cancellation 回调把 cost
+                                   0→6（limit=5）→ 第二轮扫描 BUDGET_EXHAUSTED；
+                                   cost 回调在最终复核内推进时钟 → TIMEOUT——
+                                   全部 final_report=None，绝不接受越界 VERIFIED）
+POSIX_REGEX_PARENT_SAFE          = true（POSIX regex worker start_new_session=True
+                                   自建 session/进程组；_terminate_process_tree
+                                   仅当 worker_pgid == worker_pid 才 killpg，否则
+                                   只终止 worker 本身——绝不触碰宿主进程组；
+                                   timeout 后 worker 必死、测试进程必活；Windows
+                                   保持有界终止（taskkill /F /T）；stdout/stderr
+                                   继续 DEVNULL、输入继续有界（P3-I 断言））
+PUBLIC_MODEL_IDENTITY_VALIDATED  = true（TerminalObservation.event_id /
+                                   ArtifactObservation.artifact_id /
+                                   EvidenceBundle.contract_id·run_id·backend_id /
+                                   VerificationReport.contract_id·run_id·backend_id
+                                   在 __post_init__ 统一经 validate_identity——
+                                   秘密形态直接拒绝（绝不清洗后继续作为身份），
+                                   to_dict()/to_json() 因此不可能导出 raw secret
+                                   身份；P3-J 直接构造否证）
+SECRET_PATH_EXCEPTION_REDACTED   = true（verifier.py 秘密路径异常回显一律先
+                                   scrub_secrets 并限长——禁止 {path!r} 原文；
+                                   秘密形态路径/相对路径异常均不回显 raw secret
+                                   （P3-K 断言 [REDACTED] 且 secret 不在消息））
+SECURITY_TEST_SKIP               = false（P2-T 与进程树终止测试的 PowerShell 枚举
+                                   skip 已移除——枚举/证明能力不可用时必须 FAIL
+                                   不得 SKIP；P3 新增安全否证零 skip/xfail；16F
+                                   targeted 运行 148 passed / 0 skipped）
+TARGETED                         = 148 passed / 0 failed / 0 skipped（原 136 全保留
+                                   + Patch 3 新增 12：P3-A fake PDF rejected /
+                                   P3-B broken xref·startxref rejected /
+                                   P3-C oversize·empty exists rejected /
+                                   P3-D binary tail after text window rejected /
+                                   P3-E one canonical snapshot per path /
+                                   P3-F cross-snapshot JSON/text attack rejected /
+                                   P3-G cancellation mutates cost before accept /
+                                   P3-H authentication mutates deadline·cancel /
+                                   P3-I POSIX regex timeout preserves parent group /
+                                   P3-J public model secret identities rejected /
+                                   P3-K secret path exception redacted /
+                                   P3-L process proof cannot skip）
+TESTS_AGENT                      = 555 passed（tests/agent 全目录一次）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1837 passed / 0 failed / 15 warnings（仅一次；
+                                   15 warnings 全部来自非 16F 既有套件——16F 包
+                                   零外部导入方，16F targeted 零 warnings 零
+                                   skipped）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 16F 自有五源文件 + 1 测试文件
+                                   + 本 closeout）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+READY_FOR_REVIEW                 = YES
 ```
 
 ## 0. Reviewer Patch 2 — 洁净重放与 7 组 blocker 修复摘要
@@ -308,6 +446,104 @@ READY_FOR_REVIEW                = YES
   `process_containment_unavailable` → INCONCLUSIVE，绝不 best-effort 后
   PASS）；`run_process_bounded` 保留为有界低层执行工具（进程组 best-effort
   终止），但 checker 层不据此报告 PASS。P2-T POSIX 分支断言 fail-closed。
+
+## 0.9 Reviewer Patch 3 — 6 组 blocker 修复摘要
+
+### B1 — PDF 必须真实有效（封闭结构 + 偏移关系）
+
+- `_validate_pdf_structure` 不再只检查 `%PDF-` 与 `%%EOF` 两个 marker，改为
+  验证**封闭受支持的 PDF 子集**：① header（`%PDF-<major>.<minor>` 位于偏移 0，
+  版本号后不得紧跟数字）；② EOF（`%%EOF` 位于尾部 1 KiB 内且其后仅允许空白）；
+  ③ startxref（必须存在且携带十进制字节偏移，指向 xref 表）；④ xref 表
+  （经典格式：子段 start/count + 定长 20 字节条目 `nnnnnnnnnn ggggg n|f`，
+  每条 `n` 条目记录的字节偏移必须**精确指向**文件中对应 `<num> 0 obj` 的
+  位置——偏移关系，非仅对象存在）；⑤ trailer（`/Size` + `/Root` 必须存在，
+  Root 对象号必须落在 xref 覆盖范围内且真实定义于文件中）。伪 PDF（marker+
+  EOF 无结构）、随机内容、截断 xref、错误 startxref、条目偏移造假、缺 Root
+  全部 `malformed_content:*` fail-closed；交叉引用流（/XRef stream）不在
+  封闭子集 → 同样 fail-closed。条目总数硬上限（8192）防超界。任务书复现用例
+  `b"%PDF-1.7\nnot a PDF\n%%EOF"` → `malformed_content:pdf_startxref_missing`。
+- 测试夹具升级：`PDF_BYTES` 改为含**真实 xref 表 + startxref 偏移**的
+  程序化自洽最小 PDF（偏移关系由 `_minimal_pdf()` 计算，杜绝手算漂移）；
+  P3-A（伪 PDF）/P3-B（错误 startxref/截断 xref/缺 Root/条目偏移造假/count
+  不符五种变体）否证 + 正对照（合法最小 PDF 必须 PASS），P2-F（截断缺
+  `%%EOF`）/P2-G（六类合法内容正例）全保留。
+
+### B2 — 同一路径只能使用一个完整快照
+
+- 新增 `capture_file_contained(path, contains_path, writable) -> FileSnapshot`
+  ——**唯一读取入口**：prefilter（realpath，仅 missing/逃逸分类，不读取内容）
+  → `open_contained` 句柄级 containment 证明 → 同一句柄**完整有界读取**
+  （≤ 8 MiB，前后 fstat + close 前 stat 一致性）→ SHA-256 +
+  `full_content_verdict` + **全文文本合法性**（无 NUL + 严格 UTF-8）+ 1 MiB
+  解码窗口。`snapshot_file_contained` 变为其兼容包装。
+- `IndependentVerifier.verify()` 每次建立 `_PathSnapshotCache`
+  （canonical normcase+normpath+expanduser 键）——expectation/declared/
+  exists/sha/text/regex 对同一路径复用同一不可变快照（**只打开一次**）；
+  `check_criterion` 接受 `snapshot_cache`，文件判据一律经快照判定，任何
+  检查不得重新按路径打开已缓存文件。
+- criterion-only 文件与 artifact 同规则：完整读取且 ≤ 8 MiB；
+  empty/unreadable/oversize/mutated/path escape 一律 required FAIL
+  （unreadable 由 NOT_EVALUABLE 改为 FAIL——"criterion 文件不可读必须失败"）；
+  NUL/二进制尾（1 MiB 窗口之后）→ `content_not_text` FAIL——文件整体先证明
+  是合法文本，搜索才限 1 MiB 窗口；`artifact_file_exists` 对空文件 →
+  `artifact_empty`、>8 MiB → `artifact_oversize`（存在本身不是有效证据）。
+- P3-E（expectation+declared+exists+text 同路径只打开 1 次）/P3-C（空/超界
+  exists FAIL）/P3-D（文本窗口后 NUL 尾 FAIL）/P3-F（JSON 快照后换纯文本
+  拼接攻击——第二次打开被缓存阻断，只打开 1 次、criterion 用同一 JSON
+  快照、needle 未命中 FAIL）否证；P2-M/P2-N（句柄锚定交换逃逸）全保留。
+
+### B3 — VERIFIED 前必须有最终稳定边界
+
+- `run()` 在 `_accept_verified_report`（seal 认证 + standard/hash 属性访问，
+  都可能携带调用方回调副作用）**完成后**新增最终边界复核
+  `_final_stable_boundary(attempt_finished)`：至多 `_FINAL_BOUNDARY_SCAN_LIMIT`
+  （=3，至少 2 轮 + 1 次余量）轮**完整安全扫描**（contract hash → cost →
+  cancellation → **新鲜当前时间**）；任一轮出现超限/取消/超时/异常/契约漂移
+  → 立即停止且 `final_report=None`（VERIFIED 绝不成为成功结果）；仅当全部
+  扫描安全才接受。回调异常（无法取得稳定安全结果）→ 新停止原因
+  `UNSTABLE_BOUNDARY` fail-closed。
+- 任务书复现用例（最终 cancellation 回调把 cost 从 0 改成 6、limit=5）→
+  第一轮 cost 先读（0）后 cancel 改写，**第二轮 cost 读到 6 → BUDGET_
+  EXHAUSTED**；P3-G 三种变体（cancel 改 cost / cost 推时钟越过 deadline /
+  cancel 回调抛异常）+ P3-H 两种变体（seal_is_authentic 翻转取消 →
+  CANCELLED；standard_hash 属性推进时钟越过 deadline → TIMEOUT）全部
+  final_report=None。既有 P2-Q/P2-R 与 B4 边界测试全保留（post-attempt
+  单轮扫描在先、最终稳定复核在后，语义不冲突）。
+
+### B4 — POSIX regex worker 不得杀宿主
+
+- `regex_match_bounded` 的 POSIX worker 改以 `start_new_session=True` 创建
+  （自建 session/进程组，不再与宿主共享进程组）；`_terminate_process_tree`
+  的 POSIX 分支加 **pgid 归属守卫**：仅当 `os.getpgid(worker.pid) ==
+  worker.pid`（目标自建组 leader）才 `killpg`，否则只 `proc.kill()` 终止
+  worker 本身——**绝不触碰宿主进程组**（旧实现直接对共享 pgid killpg 会把
+  测试宿主一并杀死）。Windows 保持有界终止（taskkill /F /T）；stdout/stderr
+  继续 DEVNULL、输入继续有界（上游 ≤1 MiB 窗口）。P3-I 否证：spy 断言
+  POSIX `start_new_session is True`、宿主 pgid 不变、worker 已死、输入 PIPE/
+  输出 DEVNULL。
+
+### B5 — 公开模型也必须守秘密边界
+
+- `TerminalObservation.event_id`、`ArtifactObservation.artifact_id`、
+  `EvidenceBundle.contract_id/run_id/backend_id`、
+  `VerificationReport.contract_id/run_id/backend_id` 在 `__post_init__` 统一
+  经公开 canonical `validate_identity`——秘密形态（`password:`/`token:`/
+  `run_password:` 等）直接拒绝，**绝不清洗秘密后继续作为身份**；
+  `VerificationReport.to_dict()/to_json()` 因构造面身份验证而**不可能导出
+  raw secret**。P3-J 直接构造四类模型 + 报告三身份字段全部拒绝。
+- `verifier.py` 秘密路径异常回显一律先 `scrub_secrets` 并限长——禁止
+  `{path!r}` 原文（秘密形态路径、相对路径、mime、未知键等未验证调用方
+  字符串面同样脱敏）；P3-K 断言异常消息含 `[REDACTED]` 且不含 raw secret。
+
+### B6 — 安全测试禁止 skip
+
+- 移除 P2-T 与进程树终止测试中的 `pytest.skip("PowerShell 进程枚举不可用")`
+  ——枚举/证明能力不可用时测试必须 **FAIL**（断言 `count is not None`），
+  不得 SKIP；P3 新增安全否证（P3-A..P3-L）全部无 skip/xfail。P3-L 否证
+  process 证明能力被剥除（模拟 POSIX 无树级硬约束）→ `process_exit_zero`
+  判据 fail-closed NOT_EVALUABLE → INCONCLUSIVE/零 seal，绝不 best-effort
+  PASS、绝不 skip；证明可用（win32 Job Object）时真实评估 exit 0 → VERIFIED。
 
 ## 1. 权威模型（关键锁定 1/2/3）
 

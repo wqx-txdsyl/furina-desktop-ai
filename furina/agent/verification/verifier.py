@@ -1,6 +1,20 @@
 """Phase 16F — IndependentVerifier：任务级独立校验器（VERIFIED 唯一授权入口）。
 
-权威模型（16F 任务书 §1/§3 + 关键锁定 1–3 + Reviewer Patch 1 + Reviewer Patch 2）：
+权威模型（16F 任务书 §1/§3 + 关键锁定 1–3 + Reviewer Patch 1 + Reviewer Patch 2
++ Reviewer Patch 3（blocker B2/B5））：
+
+- **单路径单快照（Patch 3 B2）**：每次 ``verify()`` 建立 canonical-path
+  snapshot cache（:class:`_PathSnapshotCache`）——expectation / declared /
+  exists / sha / text / regex 对同一路径复用同一不可变完整快照（一次打开、
+  同一句柄、完整有界内容 + 全文文本合法性 + 1 MiB 解码窗口），任何检查
+  不得重新按路径打开已缓存文件；criterion-only 文件同样完整读取并先证明
+  整体为合法文本，empty/unreadable/oversize/mutated/path escape 一律
+  required FAIL。
+- **公开模型身份验证（Patch 3 B5）**：``artifact_id`` / ``event_id`` /
+  ``run_id`` / ``backend_id`` / ``contract_id`` 在 public 模型
+  ``__post_init__`` 统一经 canonical ``validate_identity``——秘密形态直接
+  拒绝，绝不清洗后继续作为身份；秘密路径异常回显一律脱敏（禁止
+  ``{path!r}`` 原文），raw secret 不进入异常/诊断/报告导出。
 
 - **VERIFIED 只能由本类在真实执行全部确定性检查且全部通过后产生**。任何其它
   代码路径构造 verdict=VERIFIED 的报告要么被 :class:`VerificationAuthorityError`
@@ -101,6 +115,30 @@ _TERMINAL_KIND_VALUES = frozenset(k.value for k in TERMINAL_KINDS)
 _EVENT_KIND_VALUES = frozenset(k.value for k in EventKind)
 
 
+class _PathSnapshotCache:
+    """单次 verify 内的 canonical-path → 不可变快照（Patch 3 B2）。
+
+    同一 canonical 路径（normcase + normpath + expanduser）在单次 verify
+    中只捕获一次 :class:`~checks.FileSnapshot`——expectation / declared /
+    exists / sha / text / regex 全部复用同一完整快照，任何检查都不得重新
+    按路径打开已缓存文件（"同路径只打开一次"）。捕获一律经句柄锚定
+    containment 证明（writable=True 观察语义）。
+    """
+
+    def __init__(self, contains_path: Callable[[str, bool], bool]) -> None:
+        self._contains_path = contains_path
+        self._entries: Dict[str, Any] = {}
+
+    def get(self, claimed_path: str) -> Any:
+        key = os.path.normcase(os.path.normpath(os.path.expanduser(claimed_path)))
+        snap = self._entries.get(key)
+        if snap is None:
+            snap = _checks.capture_file_contained(claimed_path,
+                                                  self._contains_path, True)
+            self._entries[key] = snap
+        return snap
+
+
 class IndependentVerifier:
     """绑定单个不可变 WorkContract 的任务级独立校验器。
 
@@ -126,8 +164,10 @@ class IndependentVerifier:
             raise VerificationError("contract_id 带秘密形态（fail-closed）")
         for exp in contract.artifact_expectations:
             if scrub_secrets(exp.expected_path) != exp.expected_path:
+                # Patch 3 B5：身份回显先脱敏（raw secret 绝不进入异常）。
                 raise VerificationError(
-                    f"artifact expected_path 带秘密形态（fail-closed）: {exp.artifact_id}")
+                    f"artifact expected_path 带秘密形态（fail-closed）: "
+                    f"{scrub_secrets(exp.artifact_id)[:MAX_ID_CHARS]}")
         self._contract = contract
         self._now_fn = now_fn
         self._process_timeout = float(pt)
@@ -158,8 +198,12 @@ class IndependentVerifier:
     def verify(self, evidence: Mapping[str, Any]) -> VerificationReport:
         started = float(self._now_fn())
         submission = self._parse_submission(evidence)
-        bundle = self._collect_bundle(submission)
-        check_list, substantive_ids = self._run_checks(bundle, submission)
+        # Patch 3 B2：每次 verify() 建立 canonical-path snapshot cache——
+        # 同一路径的 expectation/declared/exists/sha/text/regex 复用同一
+        # 不可变快照，任何检查不得重新按路径打开已缓存文件。
+        snapshots = _PathSnapshotCache(self._contains_path)
+        bundle = self._collect_bundle(submission, snapshots)
+        check_list, substantive_ids = self._run_checks(bundle, submission, snapshots)
         # substantive gate（blocker 1）：没有至少一项真实 substantive
         # deterministic check PASS → 强制 NOT_EVALUABLE → INCONCLUSIVE。
         if not any(c.check_id in substantive_ids and c.result is CheckResult.PASS
@@ -230,7 +274,8 @@ class IndependentVerifier:
         unknown = sorted(keys - set(VERIFICATION_INPUT_KEYS))
         missing = sorted(set(VERIFICATION_INPUT_KEYS) - keys)
         if unknown:
-            raise VerificationInputError(f"输入拒绝未知键: {unknown}")
+            raise VerificationInputError(
+                f"输入拒绝未知键: {[scrub_secrets(k)[:64] for k in unknown]}")
         if missing:
             raise VerificationInputError(f"输入缺失必需键: {missing}")
 
@@ -290,7 +335,7 @@ class IndependentVerifier:
         if keys != set(TERMINAL_CLAIM_KEYS):
             raise VerificationInputError(
                 f"terminal claim 键集必须恰为 {sorted(TERMINAL_CLAIM_KEYS)}，"
-                f"未知 {sorted(keys - set(TERMINAL_CLAIM_KEYS))} / "
+                f"未知 {[scrub_secrets(k)[:64] for k in sorted(keys - set(TERMINAL_CLAIM_KEYS))]} / "
                 f"缺失 {sorted(set(TERMINAL_CLAIM_KEYS) - keys)}")
         event_id = validate_identity(item["event_id"], "event_id")
         kind = item["kind"]
@@ -321,19 +366,25 @@ class IndependentVerifier:
         if keys != set(ARTIFACT_CLAIM_KEYS):
             raise VerificationInputError(
                 f"artifact claim 键集必须恰为 {sorted(ARTIFACT_CLAIM_KEYS)}，"
-                f"未知 {sorted(keys - set(ARTIFACT_CLAIM_KEYS))} / "
+                f"未知 {[scrub_secrets(k)[:64] for k in sorted(keys - set(ARTIFACT_CLAIM_KEYS))]} / "
                 f"缺失 {sorted(set(ARTIFACT_CLAIM_KEYS) - keys)}")
         aid = validate_identity(item["artifact_id"], "artifact_id")
         path = item["path"]
         if not isinstance(path, str) or not path or path != path.strip() \
                 or len(path) > MAX_PATH_CHARS:
+            # Patch 3 B5：异常回显一律先脱敏——raw secret 绝不进入异常消息。
             raise VerificationInputError(
-                f"path 必须是非空 str(<=1024) 且无首尾空白（不静默 trim）: {path!r}")
+                f"path 必须是非空 str(<=1024) 且无首尾空白（不静默 trim）: "
+                f"{scrub_secrets(path)[:MAX_PATH_CHARS]!r}")
         if scrub_secrets(path) != path:
-            raise VerificationInputError(f"artifact path 带秘密形态（fail-closed）: {path!r}")
+            raise VerificationInputError(
+                f"artifact path 带秘密形态（fail-closed）: "
+                f"{scrub_secrets(path)[:MAX_PATH_CHARS]!r}")
         expanded = os.path.expanduser(path)
         if not os.path.isabs(expanded):
-            raise VerificationInputError(f"artifact path 必须是绝对路径: {path!r}")
+            raise VerificationInputError(
+                f"artifact path 必须是绝对路径: "
+                f"{scrub_secrets(path)[:MAX_PATH_CHARS]!r}")
         d_sha = item["declared_sha256"]
         if d_sha is not None and (not isinstance(d_sha, str)
                                   or not _SHA256_PATTERN.match(d_sha)):
@@ -343,7 +394,8 @@ class IndependentVerifier:
         if d_mime is not None and (not isinstance(d_mime, str) or not d_mime.strip()
                                    or len(d_mime) > MAX_ID_CHARS):
             raise VerificationInputError(
-                f"declared_mime 必须是 None 或非空 str(<=128)，得到 {d_mime!r}")
+                f"declared_mime 必须是 None 或非空 str(<=128)，得到 "
+                f"{scrub_secrets(str(d_mime))[:MAX_ID_CHARS]!r}")
         d_size = item["declared_size_bytes"]
         if d_size is not None:
             if isinstance(d_size, bool) or not isinstance(d_size, int) or d_size <= 0:
@@ -355,7 +407,8 @@ class IndependentVerifier:
                 "declared_size_bytes": d_size}
 
     # -- 本地证据收集（realpath containment + 稳定快照观察） -----------------------
-    def _collect_bundle(self, submission: Dict[str, Any]) -> EvidenceBundle:
+    def _collect_bundle(self, submission: Dict[str, Any],
+                        snapshots: _PathSnapshotCache) -> EvidenceBundle:
         diagnostics: List[str] = []
         terminal_obs: List[TerminalObservation] = []
         for t in submission["terminal"]:
@@ -375,10 +428,11 @@ class IndependentVerifier:
 
         artifacts_obs: List[ArtifactObservation] = []
         for exp in self._contract.artifact_expectations:
-            artifacts_obs.append(
-                self._observe("expectation", exp.artifact_id, exp.expected_path))
+            artifacts_obs.append(self._observe(
+                "expectation", exp.artifact_id, exp.expected_path, snapshots))
         for d in submission["declared"]:
-            artifacts_obs.append(self._observe("declared", d["artifact_id"], d["path"]))
+            artifacts_obs.append(self._observe(
+                "declared", d["artifact_id"], d["path"], snapshots))
 
         return EvidenceBundle(
             contract_id=self._contract.contract_id,
@@ -387,48 +441,50 @@ class IndependentVerifier:
             terminal=tuple(terminal_obs), artifacts=tuple(artifacts_obs),
             diagnostics=tuple(diagnostics))
 
-    def _observe(self, source: str, artifact_id: str, path: str) -> ArtifactObservation:
+    def _observe(self, source: str, artifact_id: str, path: str,
+                 snapshots: _PathSnapshotCache) -> ArtifactObservation:
         claimed = os.path.normpath(os.path.expanduser(path))
-        # 预筛（未读取任何内容）：missing-最近现存祖先逃逸——目标不存在时句柄
-        # 无法打开，链接逃逸只能由路径解析发现；该预筛不是安全判断依据（真实
-        # containment 证明在句柄层，blocker B3），仅用于 missing/逃逸分类。
-        real_prefilter = os.path.realpath(claimed)
-        if not self._contract.workspace_scope.contains_path(real_prefilter, writable=True):
-            exists = os.path.exists(real_prefilter)
-            is_file = bool(exists) and os.path.isfile(real_prefilter)
-            return ArtifactObservation(source, artifact_id, claimed, real_prefilter,
-                                       exists, is_file, False, None, "", "",
-                                       "path_escape", mime_for_suffix(real_prefilter))
-        # 句柄锚定（blocker B3）：受约束打开 + 句柄 OS 级真实目标 containment
-        # 证明；hash/size/完整内容 MIME 全部来自同一已证明句柄的不可变快照。
-        size, digest, content_mime, content_rej, final_path, rej = \
-            _checks.snapshot_file_contained(claimed, self._contains_path, True)
-        name_mime = mime_for_suffix(final_path or real_prefilter)
-        if rej == "missing":
-            return ArtifactObservation(source, artifact_id, claimed, real_prefilter,
-                                       False, False, True, None, "", "",
-                                       "missing", name_mime)
-        if rej == "path_escape":
+        # Patch 3 B2：observation 与 criterion 共用同一 canonical-path 快照
+        # 缓存——同一路径只捕获（打开）一次；快照内已含预筛（missing-最近
+        # 现存祖先逃逸分类，不读取内容）与句柄级 containment 证明（blocker
+        # B3：真实安全判断在句柄层）。hash/size/完整内容 MIME/文本全部来自
+        # 同一不可变快照。
+        snap = snapshots.get(claimed)
+        name_mime = mime_for_suffix(snap.final_path or claimed)
+        if snap.rejection == "path_escape":
+            if not snap.within_workspace:
+                # prefilter 逃逸（final_path 是 realpath 预筛值，非句柄目标）
+                return ArtifactObservation(source, artifact_id, claimed,
+                                           snap.final_path, snap.target_exists,
+                                           snap.is_regular_file, False, None, "", "",
+                                           "path_escape", name_mime)
             # open 之后句柄目标逃逸（TOCTOU 竞态被句柄证明拦截）——高声拒绝
-            return ArtifactObservation(source, artifact_id, claimed, final_path,
+            return ArtifactObservation(source, artifact_id, claimed, snap.final_path,
                                        True, True, False, None, "", "",
                                        "path_escape", name_mime)
-        if rej == "not_regular_file":
-            return ArtifactObservation(source, artifact_id, claimed, final_path,
+        if snap.rejection == "missing":
+            return ArtifactObservation(source, artifact_id, claimed, snap.final_path,
+                                       False, False, True, None, "", "",
+                                       "missing", name_mime)
+        if snap.rejection == "not_regular_file":
+            return ArtifactObservation(source, artifact_id, claimed, snap.final_path,
                                        True, False, True, None, "", "",
                                        "not_regular_file", name_mime)
-        if rej:   # unreadable / handle_target_unprovable / oversize / mutated
-            return ArtifactObservation(source, artifact_id, claimed, final_path,
-                                       True, True, True, size, "", "", rej, name_mime)
-        # rej == "" —— 完整内容快照在手（blocker B1：observed_mime 是完整内容
-        # 识别真值；content_rejection 是结构验证拒绝原因）
-        return ArtifactObservation(source, artifact_id, claimed, final_path,
-                                   True, True, True, size, content_mime, digest,
-                                   "", name_mime, content_rej)
+        if snap.rejection:   # unreadable / handle_target_unprovable / oversize / mutated
+            return ArtifactObservation(source, artifact_id, claimed, snap.final_path,
+                                       True, True, True, snap.size_bytes, "", "",
+                                       snap.rejection, name_mime)
+        # rejection == "" —— 完整内容快照在手（blocker B1：observed_mime 是
+        # 完整内容识别真值；content_rejection 是结构验证拒绝原因）
+        return ArtifactObservation(source, artifact_id, claimed, snap.final_path,
+                                   True, True, True, snap.size_bytes,
+                                   snap.content_mime, snap.sha256_hex, "",
+                                   name_mime, snap.content_rejection)
 
     # -- 检查构建 ----------------------------------------------------------------
     def _run_checks(self, bundle: EvidenceBundle,
-                    submission: Dict[str, Any]) -> Tuple[List[VerificationCheck], Set[str]]:
+                    submission: Dict[str, Any],
+                    snapshots: _PathSnapshotCache) -> Tuple[List[VerificationCheck], Set[str]]:
         out: List[VerificationCheck] = []
         substantive_ids: Set[str] = set()
 
@@ -446,7 +502,8 @@ class IndependentVerifier:
                 criterion_id=c.criterion_id, kind=c.kind, params=c.params,
                 contains_path=self._contains_path,
                 workspace_root=self._workspace_root(),
-                process_timeout_seconds=self._process_timeout))
+                process_timeout_seconds=self._process_timeout,
+                snapshot_cache=snapshots))
 
         declared_by_id = {d["artifact_id"]: d for d in submission["declared"]}
         obs_exp = {o.artifact_id: o for o in bundle.artifacts if o.source == "expectation"}

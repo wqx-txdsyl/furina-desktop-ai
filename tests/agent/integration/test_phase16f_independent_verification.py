@@ -52,6 +52,25 @@ B5 全部外部回调后新鲜状态复核：factory 期间取消/超时/成本�
 B6 canonical identity 统一：嵌入下划线秘密身份拒绝；秘密 run_id_factory
    输出绝不存储；
 B7 regex 隔离 worker 硬超时；detached 后代无法存活（或平台 fail-closed）。
+
+Reviewer Patch 3 否证（6 组 blocker，reviewer-locked，P3-A..P3-L）：
+B1 PDF 真实封闭结构：伪 PDF（marker+%%EOF 无结构）/ 错误 startxref / 截断
+   xref / trailer 缺 Root / xref 条目偏移造假 一律拒绝；合法最小 PDF（真实
+   xref 表 + startxref 偏移）必须 PASS（夹具升级为自洽最小 PDF）；
+B2 单路径单快照：同一路径 expectation/declared/exists/text 只打开一次；
+   criterion-only 文件完整读取（≤8MiB）+ 整体合法文本证明（NUL 尾 FAIL）；
+   空/超界 artifact_file_exists FAIL；JSON 快照后换纯文本拼接攻击被缓存阻断；
+B3 接受 VERIFIED 前最终稳定边界：接受门后 ≥2 轮完整安全扫描
+   （hash→cost→cancel→新鲜时间），cancellation 改 cost / cost 推时钟 /
+   seal 认证翻取消 / standard_hash 推 deadline / 回调异常 → 全部
+   final_report=None（BUDGET_EXHAUSTED/TIMEOUT/CANCELLED/UNSTABLE_BOUNDARY）；
+B4 POSIX regex worker start_new_session + pgid 归属守卫：timeout 后 worker
+   必死、宿主进程组必活；stdout/stderr DEVNULL、输入有界；
+B5 公开模型身份验证：TerminalObservation/ArtifactObservation/EvidenceBundle/
+   VerificationReport 直接构造秘密形态身份拒绝；秘密路径异常回显脱敏
+   （禁止 {path!r} 原文）；
+B6 安全测试禁止 skip：PowerShell 枚举不可用 → FAIL（P2-T/进程树终止测试），
+   process 证明不可用 → fail-closed NOT_EVALUABLE（绝不 skip/best-effort）。
 """
 
 import base64
@@ -76,6 +95,7 @@ from furina.agent.verification import (
     MAX_ARTIFACT_BYTES,
     MAX_EXPLANATION_CHARS,
     MAX_REPORT_JSON_BYTES,
+    MAX_TEXT_READ_BYTES,
     RepairStopReason,
     TERMINAL_CLAIM_KEYS,
     VERIFICATION_INPUT_KEYS,
@@ -1294,16 +1314,44 @@ def test_declared_artifact_alone_is_not_substantive(env):
 # ================================================================
 
 # 结构合法的最小图像/PDF 夹具（Patch 2 blocker B1：内容必须通过确定性结构
-# 验证——PNG/JPEG 经 Pillow verify+load，PDF 要求偏移 0 header + 尾部 %%EOF）。
+# 验证——PNG/JPEG 经 Pillow verify+load；PDF 需真实封闭结构）。
+# Patch 3 B1：PDF 夹具升级为含真实 xref 表 + startxref 偏移 + trailer
+# （/Size,/Root）+ %%EOF 的自洽最小 PDF——偏移关系程序化计算，杜绝手算漂移。
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
 JPEG_BYTES = base64.b64decode(
     "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDo6KKK/nk/lQ//2Q==")
-PDF_BYTES = (b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
-             b"1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n"
-             b"2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n"
-             b"3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>\nendobj\n"
-             b"trailer\n<</Size 4/Root 1 0 R>>\nstartxref\n0\n%%EOF\n")
+
+
+def _minimal_pdf() -> bytes:
+    """结构合法的最小 PDF（Patch 3 B1）：header + 对象 + 真实 xref 表 +
+    startxref 偏移 + trailer(/Size,/Root) + %%EOF——所有偏移关系程序化自洽。"""
+    parts = [b"%PDF-1.4\n"]
+    offsets: dict = {}
+
+    def add_obj(num: int, body: bytes) -> None:
+        offsets[num] = sum(len(p) for p in parts)
+        parts.append(b"%d 0 obj\n" % num)
+        parts.append(body)
+        parts.append(b"endobj\n")
+
+    add_obj(1, b"<</Type/Catalog/Pages 2 0 R>>\n")
+    add_obj(2, b"<</Type/Pages/Kids[3 0 R]/Count 1>>\n")
+    add_obj(3, b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>\n")
+    xref_pos = sum(len(p) for p in parts)
+    parts.append(b"xref\n0 4\n")
+    for num in (0, 1, 2, 3):
+        if num == 0:
+            parts.append(b"%010d 65535 f \n" % 0)
+        else:
+            parts.append(b"%010d 00000 n \n" % offsets[num])
+    parts.append(b"trailer\n<</Size 4/Root 1 0 R>>\n")
+    parts.append(b"startxref\n%d\n" % xref_pos)
+    parts.append(b"%%EOF\n")
+    return b"".join(parts)
+
+
+PDF_BYTES = _minimal_pdf()
 
 
 def test_text_bytes_png_suffix_declared_image_png_fail(env):
@@ -1711,8 +1759,8 @@ def test_process_timeout_terminates_process_tree(env):
     while time.monotonic() < deadline and count:
         time.sleep(0.5)
         count = marker_count()
-    if count is None:
-        pytest.skip("PowerShell 进程枚举不可用")
+    # Patch 3 B6：枚举/证明能力不可用时测试必须 FAIL，不得 SKIP。
+    assert count is not None, "PowerShell 进程枚举不可用——枚举能力缺失必须 FAIL（不得 SKIP）"
     assert count == 0
 
 
@@ -2527,8 +2575,9 @@ def test_p2_t_detached_descendant_cannot_survive_or_checker_fails_closed(env, tm
     if sys.platform == "win32":
         assert rep.verdict is VerificationVerdict.VERIFIED      # 父进程 exit 0
         survivors = _p16f_descendant_count()
-        if survivors is None:
-            pytest.skip("PowerShell 进程枚举不可用")
+        # Patch 3 B6：枚举/证明能力不可用时测试必须 FAIL，不得 SKIP。
+        assert survivors is not None, \
+            "PowerShell 进程枚举不可用——枚举能力缺失必须 FAIL（不得 SKIP）"
         assert survivors == 0                    # detached 后代无法在 job 外存活
     else:
         assert rep.verdict is VerificationVerdict.INCONCLUSIVE
@@ -2638,3 +2687,459 @@ def test_p2_n_criterion_only_path_swap_cannot_escape(env, monkeypatch):
     assert rep.authority_seal == ""
     crit = [ch for ch in rep.checks if ch.check_id == "criterion:win"]
     assert crit and crit[0].result is CheckResult.FAIL         and "path_escape" in crit[0].explanation
+
+
+# ================================================================
+# ================================================================
+# Reviewer Patch 3 — B1: PDF 真实封闭结构（P3-A/P3-B）
+# ================================================================
+
+
+def test_p3_a_fake_pdf_rejected(env):
+    """P3-A 否证：伪 PDF（%PDF- marker + %%EOF 但无任何结构）→ full_content_
+    verdict 必须拒绝（绝非 ("application/pdf", "")）；作为 pdf_document 期望
+    验证同样 required FAIL。"""
+    from furina.agent.verification import full_content_verdict
+    fake = b"%PDF-1.7\nnot a PDF\n%%EOF"
+    mime, rejection = full_content_verdict(fake)
+    assert mime == "application/pdf"                 # 魔数识别仍是 PDF 族
+    assert rejection.startswith("malformed_content:")   # 但结构验证必须失败
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "doc.pdf"
+    art.write_bytes(fake)
+    c = _expectation_contract(work_real, "wc_16f_p3a_0001",
+                              atype="pdf_document", path=art)
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p3a_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any(ch.result is CheckResult.FAIL
+               and ch.explanation.startswith("malformed_content:")
+               for ch in rep.checks)
+
+
+def test_p3_b_broken_xref_startxref_rejected(env):
+    """P3-B 否证：错误 startxref / 截断 xref / 缺失 trailer-Root / xref 条目
+    偏移造假 全部 full_content_verdict 拒绝（封闭结构 + 偏移关系，fail-closed）。"""
+    from furina.agent.verification import full_content_verdict
+    pdf = PDF_BYTES
+    # xref 表关键字位置（注意 rfind 会命中 startxref 内部的 "xref"——必须 find）
+    xref_pos = pdf.find(b"xref")
+    # (a) startxref 指向对象中间（非 xref 表）
+    sx = pdf.rfind(b"startxref")
+    bad_a = pdf[:sx] + b"startxref\n10\n%%EOF\n"
+    # (b) xref 表截断（缺 %%EOF）
+    bad_b = pdf[:xref_pos + 20]
+    # (c) trailer 缺 /Root
+    bad_c = pdf.replace(b"/Size 4/Root 1 0 R", b"/Size 4")
+    # (d) xref 条目记录的对象字节偏移造假
+    bad_d = pdf.replace(b"%010d 00000 n" % 54, b"%010d 00000 n" % 99)
+    # (e) xref 子段 count 与条目数不符（截断 xref 表）
+    bad_e = pdf.replace(b"xref\n0 4\n", b"xref\n0 3\n")
+    for tag, blob in (("startxref", bad_a), ("trunc_xref", bad_b),
+                      ("no_root", bad_c), ("offset_forgery", bad_d),
+                      ("count_mismatch", bad_e)):
+        mime, rejection = full_content_verdict(blob)
+        assert mime == "application/pdf"
+        assert rejection.startswith("malformed_content:"), (tag, rejection)
+    # 正对照：合法最小 PDF 必须 PASS
+    mime, rejection = full_content_verdict(pdf)
+    assert mime == "application/pdf" and rejection == ""
+
+
+# ================================================================
+# Reviewer Patch 3 — B2: 单路径单快照 + criterion 完整内容（P3-C..P3-F）
+# ================================================================
+
+
+def test_p3_c_oversize_empty_exists_rejected(env):
+    """P3-C 否证：criterion artifact_file_exists 对空文件 → FAIL artifact_empty、
+    对 >8MiB 文件 → FAIL artifact_oversize（存在本身不是有效证据）。"""
+    tmp, work, work_real, outside, outside_real = env
+    empty = work_real / "empty.md"
+    empty.write_bytes(b"")
+    c = _contract(work_real, contract_id="wc_16f_p3c_a_0001",
+                  verification_standard=VerificationStandard(criteria=(
+                      VerificationCriterion(criterion_id="empty_exists",
+                                            kind="artifact_file_exists",
+                                            params={"path": str(empty)}),)))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p3c_a_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    crit = [ch for ch in rep.checks if ch.check_id == "criterion:empty_exists"][0]
+    assert crit.result is CheckResult.FAIL and "artifact_empty" in crit.explanation
+
+    big = work_real / "big.md"
+    big.write_bytes(b"\x00" * (MAX_ARTIFACT_BYTES + 1))
+    c2 = _contract(work_real, contract_id="wc_16f_p3c_b_0001",
+                   verification_standard=VerificationStandard(criteria=(
+                       VerificationCriterion(criterion_id="big_exists",
+                                             kind="artifact_file_exists",
+                                             params={"path": str(big)}),)))
+    rep2 = IndependentVerifier(c2).verify(_submission(c2, "run_p3c_b_0001"))
+    assert rep2.verdict is VerificationVerdict.FAILED
+    crit2 = [ch for ch in rep2.checks if ch.check_id == "criterion:big_exists"][0]
+    assert crit2.result is CheckResult.FAIL and "artifact_oversize" in crit2.explanation
+
+
+def test_p3_d_binary_tail_after_text_window_rejected(env):
+    """P3-D 否证：criterion-only 文件前 1 MiB 是合法文本、其后接 NUL/二进制 →
+    整体不是合法文本 → content_not_text FAIL——NUL 尾不得被前 1 MiB 窗口掩盖。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "note.md"
+    blob = b"NEEDLE_P3D " + b"a" * (MAX_TEXT_READ_BYTES - 11) + b"\x00binary\x00tail"
+    assert len(blob) > MAX_TEXT_READ_BYTES and len(blob) <= MAX_ARTIFACT_BYTES
+    art.write_bytes(blob)
+    c = _contract(work_real, contract_id="wc_16f_p3d_0001",
+                  verification_standard=VerificationStandard(criteria=(
+                      VerificationCriterion(criterion_id="win", kind="text_contains",
+                                            params={"path": str(art),
+                                                    "needle": "NEEDLE_P3D"}),)))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p3d_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    crit = [ch for ch in rep.checks if ch.check_id == "criterion:win"][0]
+    assert crit.result is CheckResult.FAIL and "content_not_text" in crit.explanation
+
+
+def test_p3_e_one_canonical_snapshot_per_path(env, monkeypatch):
+    """P3-E 否证：同一路径被 expectation/declared/exists/text 同时引用时，
+    单次 verify 只打开一次——canonical-path snapshot cache 复用同一不可变快照。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "summary.md"
+    content = b"# summary\nsnapshot single open test"
+    art.write_bytes(content)
+    opens = {"n": 0}
+    real_open = builtins.open
+    tgt = os.path.normcase(os.path.realpath(str(art)))
+
+    def counting_open(file, mode="r", *a, **k):
+        if "r" in str(mode) and "b" in str(mode) \
+                and os.path.normcase(os.path.realpath(str(file))) == tgt:
+            opens["n"] += 1
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", counting_open)
+    exp = ArtifactExpectation(artifact_id="doc", artifact_type="markdown_document",
+                              expected_path=str(art), required=True)
+    c = _content_contract(work_real, "wc_16f_p3e_0001", expectations=(exp,),
+                          criteria=(
+                              VerificationCriterion(
+                                  criterion_id="exists", kind="artifact_file_exists",
+                                  params={"path": str(art)}),
+                              VerificationCriterion(
+                                  criterion_id="text", kind="text_contains",
+                                  params={"path": str(art), "needle": "single"}),))
+    v = IndependentVerifier(c)
+    rep = v.verify(_submission(
+        c, "run_p3e_0001",
+        declared=[_declared(art, sha_hex=_sha(content), mime="text/markdown",
+                            artifact_id="doc")]))
+    assert rep.verdict is VerificationVerdict.VERIFIED
+    assert v.seal_is_authentic(rep) is True
+    assert opens["n"] == 1          # 同一路径只打开一次（缓存复用）
+
+
+def test_p3_f_cross_snapshot_json_text_attack_rejected(env, monkeypatch):
+    """P3-F 否证：expectation 先观察合法 JSON、criterion 再读同一路径——若允许
+    第二次打开（旧实现），攻击者可在其间把文件换成含 needle 的纯文本拼接出
+    VERIFIED；snapshot cache 使 criterion 复用同一 JSON 快照（只打开一次）→
+    needle 未命中 → FAIL，绝不 VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "data.json"
+    art.write_bytes(b'{"k": "json value"}')
+    opens = {"n": 0}
+    real_open = builtins.open
+    tgt = os.path.normcase(os.path.realpath(str(art)))
+
+    def swapping_open(file, mode="r", *a, **k):
+        h = real_open(file, mode, *a, **k)
+        if "r" in str(mode) and "b" in str(mode) \
+                and os.path.normcase(os.path.realpath(str(file))) == tgt:
+            opens["n"] += 1
+            if opens["n"] >= 2:
+                # 第二次打开（旧实现会发生）：文件已被替换为含 needle 的文本
+                with real_open(str(art), "wb") as g:
+                    g.write(b"NEEDLE_P3F text version")
+        return h
+
+    monkeypatch.setattr(builtins, "open", swapping_open)
+    exp = ArtifactExpectation(artifact_id="prod_doc", artifact_type="json_data",
+                              expected_path=str(art), required=True)
+    c = _content_contract(work_real, "wc_16f_p3f_0001", expectations=(exp,),
+                          criteria=(
+                              VerificationCriterion(
+                                  criterion_id="cross", kind="text_contains",
+                                  params={"path": str(art),
+                                          "needle": "NEEDLE_P3F"}),))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p3f_0001"))
+    assert opens["n"] == 1          # 同一路径只打开一次——攻击者无第二次打开机会
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    crit = [ch for ch in rep.checks if ch.check_id == "criterion:cross"][0]
+    assert crit.result is CheckResult.FAIL
+
+
+# ================================================================
+# Reviewer Patch 3 — B3: 接受 VERIFIED 前最终稳定边界（P3-G/P3-H）
+# ================================================================
+
+
+def test_p3_g_cancellation_mutates_cost_before_accept(env):
+    """P3-G 否证（任务书复现用例）：最终稳定复核中 cancellation 回调把 cost
+    从 0 改成 6（limit=5）→ 第二轮完整安全扫描捕获 → BUDGET_EXHAUSTED /
+    final_report=None（绝不 VERIFIED）；cost 回调在最终复核内推进时钟 →
+    新鲜时间越过 deadline → TIMEOUT；最终复核内回调异常 → UNSTABLE_BOUNDARY
+    fail-closed。"""
+    tmp, work, work_real, outside, outside_real = env
+    # (a) cancellation 回调修改 cost（limit=5，cost 0→6）
+    c = _verified_summary_contract(work_real, "wc_16f_p3g_a_0001")
+    box = {"used": 0.0, "cancel_calls": 0}
+
+    def cost_used_a():
+        return box["used"]
+
+    def cancel_flips_cost():
+        box["cancel_calls"] += 1
+        if box["cancel_calls"] == 4:    # 最终复核第 1 轮：cancel 回调把 cost 改成 6
+            box["used"] = 6.0
+        return False
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cost_used=cost_used_a, cancel_requested=cancel_flips_cost).run()
+    assert out.attempts[0].verdict == "VERIFIED"     # 报告本身真实产出
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert out.final_report is None
+
+    # (b) cost 回调在最终复核内推进时钟 → 新鲜时间越过 deadline → TIMEOUT
+    clock = FakeClock(0.0)
+    (work_real / "summary.md").write_bytes(b"ok")
+    c2 = _contract(work_real, contract_id="wc_16f_p3g_b_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    v2 = IndependentVerifier(c2, now_fn=clock)
+    reads = {"n": 0}
+
+    def cost_advances_clock():
+        reads["n"] += 1
+        if reads["n"] == 4:             # 最终复核第 1 轮的 cost 读取推进时钟
+            clock.advance(20.0)         # 0 → 20 > deadline 15
+        return 0.0
+
+    out2 = BoundedRepairLoop(
+        contract=c2, verifier=v2,
+        collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+        cost_used=cost_advances_clock, now_fn=clock).run()
+    assert out2.attempts[0].verdict == "VERIFIED"
+    assert out2.stop_reason is RepairStopReason.TIMEOUT
+    assert out2.final_report is None
+    assert clock.t == 20.0
+
+    # (c) 最终复核内回调异常 → 无法取得稳定安全结果 → fail-closed
+    c3 = _verified_summary_contract(work_real, "wc_16f_p3g_c_0001")
+    cancel_calls = {"n": 0}
+
+    def cancel_boom():
+        cancel_calls["n"] += 1
+        if cancel_calls["n"] >= 4:      # 最终复核第 1 轮回调抛异常
+            raise RuntimeError("cancel callback exploded")
+        return False
+
+    out3 = BoundedRepairLoop(
+        contract=c3, verifier=IndependentVerifier(c3),
+        collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
+        cancel_requested=cancel_boom).run()
+    assert out3.attempts[0].verdict == "VERIFIED"
+    assert out3.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out3.final_report is None
+    assert "final_boundary_unstable" in out3.diagnostic
+
+
+def test_p3_h_authentication_mutates_deadline_or_cancel(env):
+    """P3-H 否证：接受门（seal 认证 / standard_hash 属性访问）内的回调副作用
+    必须被最终稳定边界复核捕获——(a) seal_is_authentic 翻转取消标志 →
+    CANCELLED / final_report=None；(b) standard_hash 属性推进时钟越过 deadline
+    → TIMEOUT / final_report=None。"""
+    tmp, work, work_real, outside, outside_real = env
+    # (a) seal 认证回调翻转 cancellation
+    c = _verified_summary_contract(work_real, "wc_16f_p3h_a_0001")
+    flags = {"cancel": False}
+
+    class _SealSideEffectVerifier(IndependentVerifier):
+        def seal_is_authentic(self, report):
+            flags["cancel"] = True       # 认证回调副作用：翻转取消标志
+            return super().seal_is_authentic(report)
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=_SealSideEffectVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cancel_requested=lambda: flags["cancel"]).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.CANCELLED
+    assert out.final_report is None
+
+    # (b) standard_hash 属性回调推进时钟越过 deadline（接受门内访问时触发）
+    clock = FakeClock(1000.0)
+    c2 = _verified_summary_contract(work_real, "wc_16f_p3h_b_0001")
+
+    class _HashAdvancingVerifier(IndependentVerifier):
+        def __init__(self, contract, clock):
+            super().__init__(contract, now_fn=clock)
+            self._clock = clock
+            self._calls = 0
+
+        @property
+        def standard_hash(self):
+            self._calls += 1
+            if self._calls >= 3:         # 接受门内（seal/身份复核）的访问推进时钟
+                self._clock.advance(100000.0)
+            return super().standard_hash
+
+    v2 = _HashAdvancingVerifier(c2, clock)
+    out2 = BoundedRepairLoop(
+        contract=c2, verifier=v2,
+        collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+        now_fn=clock).run()
+    assert out2.attempts[0].verdict == "VERIFIED"
+    assert out2.stop_reason is RepairStopReason.TIMEOUT
+    assert out2.final_report is None
+
+
+# ================================================================
+# Reviewer Patch 3 — B4: POSIX regex worker 独立 session（P3-I）
+# ================================================================
+
+
+def test_p3_i_posix_regex_timeout_preserves_parent_group(env, monkeypatch):
+    """P3-I 否证：POSIX regex worker 必须 start_new_session 自建进程组/会话；
+    timeout 终止仅当 pgid 归属 worker 自身才 killpg——绝不触碰宿主进程组
+    （worker 必死、测试进程必活）；Windows 保持有界终止。stdout/stderr 继续
+    DEVNULL、输入继续有界。"""
+    import subprocess as sp
+
+    from furina.agent.verification import checks as vchecks
+    from furina.agent.verification import regex_match_bounded
+    worker_kwargs = {}
+    worker_proc = {"p": None}
+    real_popen = sp.Popen
+
+    def spy_popen(*args, **kwargs):
+        # 第一个 Popen 是 regex worker；timeout 终止路径的 taskkill Popen
+        # 会随后出现（同样 DEVNULL）——只记录 worker 的调用与句柄。
+        p = real_popen(*args, **kwargs)
+        if worker_proc["p"] is None:
+            worker_kwargs.update(kwargs)
+            worker_proc["p"] = p
+        return p
+
+    monkeypatch.setattr(vchecks.subprocess, "Popen", spy_popen)
+    parent_pgid = os.getpgid(0) if os.name == "posix" else None
+    t0 = time.monotonic()
+    matched, rejection = regex_match_bounded("(a+)+$", "a" * 30000 + "!", 0.5)
+    elapsed = time.monotonic() - t0
+    assert rejection == "regex_timeout"           # 灾难性回溯硬超时
+    assert elapsed < 60                           # 有界返回
+    assert worker_kwargs["stdin"] is sp.PIPE      # 输入有界（上游 ≤1MiB 窗口）
+    assert worker_kwargs["stdout"] is sp.DEVNULL \
+        and worker_kwargs["stderr"] is sp.DEVNULL
+    if os.name == "posix":
+        assert worker_kwargs.get("start_new_session") is True   # 独立 session/进程组
+        assert os.getpgid(0) == parent_pgid             # 宿主进程组未被 killpg 触碰
+    assert worker_proc["p"].poll() is not None    # worker 已死（timeout 后终止）
+
+
+# ================================================================
+# Reviewer Patch 3 — B5: 公开模型身份验证 + 秘密路径脱敏（P3-J/P3-K）
+# ================================================================
+
+
+def test_p3_j_public_model_secret_identities_rejected(env):
+    """P3-J 否证：public 模型（TerminalObservation/ArtifactObservation/
+    EvidenceBundle/VerificationReport）直接构造时身份字段走 canonical
+    validate_identity——秘密形态直接拒绝（绝不清洗后继续作为身份）；
+    to_dict()/to_json() 因此不可能导出 raw secret 身份。"""
+    from furina.agent.verification import (
+        ArtifactObservation,
+        EvidenceBundle,
+        TerminalObservation,
+    )
+    with pytest.raises(VerificationError):
+        TerminalObservation(event_id="token:supersecret", kind="backend.completed",
+                            observed_at_epoch=1.0, bound=True)
+    with pytest.raises(VerificationError):
+        ArtifactObservation("expectation", "api_key:sk-abc123", "/p/a.md",
+                            "/p/a.md", True, True, True, 3, "text/plain",
+                            "0" * 64, "", "text/markdown")
+    with pytest.raises(VerificationError):
+        EvidenceBundle(contract_id="wc_16f_p3j_0001", contract_hash="0" * 64,
+                       run_id="run_password:x", backend_id="native_agent",
+                       terminal=(), artifacts=())
+    ev = EvidenceBundle(contract_id="wc_16f_p3j_0001", contract_hash="0" * 64,
+                        run_id="run_p3j_0001", backend_id="native_agent",
+                        terminal=(), artifacts=())
+    base = dict(report_id="vrp_" + "a" * 32, verifier_id=VERIFIER_ID,
+                contract_id="wc_16f_p3j_0001", contract_hash="0" * 64,
+                standard_hash="0" * 64, run_id="run_p3j_0001",
+                backend_id="native_agent", verdict=VerificationVerdict.FAILED,
+                checks=(), diagnostics=(), evidence=ev,
+                started_at_epoch=1.0, finished_at_epoch=2.0)
+    for field in ("contract_id", "run_id", "backend_id"):
+        kw = dict(base)
+        kw[field] = "password:hunter2"
+        with pytest.raises(VerificationError):
+            VerificationReport(**kw)
+
+
+def test_p3_k_secret_path_exception_redacted(env):
+    """P3-K 否证：秘密形态 artifact path 的 VerificationInputError 回显一律
+    脱敏——raw secret 绝不进入异常消息（禁止 {path!r} 原文）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    evil = str(work_real / "password=hunter2secret.md")
+    with pytest.raises(VerificationInputError) as ei:
+        v.verify(_submission(c, "run_p3k_0001", declared=[_declared(evil)]))
+    msg = str(ei.value)
+    assert "hunter2secret" not in msg
+    assert "[REDACTED]" in msg
+    # 非绝对路径（且带秘密形态）的异常同样不回显 raw 原文（纵深防御）
+    rel = "work/relative/password=hunter2secret.md"
+    with pytest.raises(VerificationInputError) as ei2:
+        v.verify(_submission(c, "run_p3k_0002", declared=[_declared(rel)]))
+    assert "hunter2secret" not in str(ei2.value)
+
+
+# ================================================================
+# Reviewer Patch 3 — B6: 进程证明不可 skip（P3-L）
+# ================================================================
+
+
+def test_p3_l_process_proof_cannot_skip(env, monkeypatch):
+    """P3-L 否证：进程树 containment 证明能力被剥除（模拟 POSIX 无树级硬
+    约束）→ process 判据 fail-closed NOT_EVALUABLE → INCONCLUSIVE / 零 seal，
+    绝不 best-effort PASS、绝不 skip；证明可用（win32 Job Object）时真实
+    评估。"""
+    from furina.agent.verification import checks as vchecks
+    tmp, work, work_real, outside, outside_real = env
+    py = sys.executable
+    command = f'"{py}" -c "import sys; sys.exit(0)"'
+    c = _contract(work_real, contract_id="wc_16f_p3l_0001",
+                  verification_standard=VerificationStandard(criteria=(
+                      VerificationCriterion(criterion_id="proc",
+                                            kind="process_exit_zero",
+                                            params={"command": command}),)))
+    original_guard = vchecks.process_containment_guaranteed
+    monkeypatch.setattr(vchecks, "process_containment_guaranteed", lambda: False)
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p3l_0001"))
+    crit = [ch for ch in rep.checks if ch.check_id == "criterion:proc"][0]
+    assert crit.result is CheckResult.NOT_EVALUABLE
+    assert "process_containment_unavailable" in crit.explanation
+    assert rep.verdict is VerificationVerdict.INCONCLUSIVE
+    assert rep.authority_seal == ""
+    # 恢复真实实现后：真实平台（win32：Job Object 树级硬约束可用）→ 正常评估
+    # exit 0 → VERIFIED（证明能力可用时必须真实评估，不得跳过）。
+    monkeypatch.setattr(vchecks, "process_containment_guaranteed", original_guard)
+    if sys.platform == "win32":
+        assert vchecks.process_containment_guaranteed() is True
+        rep2 = IndependentVerifier(c).verify(_submission(c, "run_p3l_0002"))
+        assert rep2.verdict is VerificationVerdict.VERIFIED
+        assert rep2.authority_seal

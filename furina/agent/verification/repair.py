@@ -1,5 +1,15 @@
 """Phase 16F — BoundedRepairLoop：严格有界修复循环（16F 任务书 §5 + 关键锁定 9–12
-+ Reviewer Patch 1 blocker 4/6）。
++ Reviewer Patch 1 blocker 4/6 + Reviewer Patch 3（blocker B3）。
+
+- **接受 VERIFIED 前的最终稳定边界复核（Patch 3 B3）**：``_accept_verified_
+  report``（seal 认证 / standard·hash 属性访问——都可能携带调用方回调副作用）
+  **完成后**再执行最终边界复核——至多 :data:`_FINAL_BOUNDARY_SCAN_LIMIT` 轮
+  完整安全扫描（contract hash → cost → cancellation → 新鲜当前时间）；
+  任一轮出现超限/取消/超时/异常/契约漂移 → 立即停止且 ``final_report=None``
+  （VERIFIED 绝不成为成功结果）；两轮都安全才允许接受。扫描次数有硬上限；
+  回调异常（无法取得稳定安全结果）→ ``UNSTABLE_BOUNDARY`` fail-closed。
+  ——cancellation 回调把 cost 从 0 改成 6 / cost 回调推进时钟 / seal 认证
+  回调翻转取消 / standard_hash 属性推进 deadline 全部被该复核拦截。
 
 - **修复允许条件**：WorkContract 允许（``budget.max_attempts > 1`` 才有修复余地；
   approval-gated 策略必须提供 ``approval_authority``，否则构造期 fail-closed）
@@ -93,6 +103,9 @@ class RepairStopReason(str, enum.Enum):
     #: blocker B4：VERIFIED 格式报告未通过当前验证器 seal/精确身份复核——
     # 绝不接受、绝不修补/重签外来报告（final_report=None，立即停止）。
     REPORT_REJECTED = "REPORT_REJECTED"
+    #: Patch 3 B3：接受 VERIFIED 前的最终稳定边界复核无法取得稳定安全结果
+    # （回调异常）→ fail-closed，final_report=None，VERIFIED 绝不成为成功结果。
+    UNSTABLE_BOUNDARY = "UNSTABLE_BOUNDARY"
 
 
 @dataclass(frozen=True)
@@ -148,6 +161,11 @@ def _failure_signature(report: VerificationReport) -> str:
 
 def _diag_signature(diagnostic: str) -> str:
     return hashlib.sha256(f"collect:{diagnostic}".encode("utf-8")).hexdigest()
+
+
+#: Patch 3 B3：最终稳定边界复核的完整安全扫描次数硬上限（至少 2 轮 +
+#: 1 次余量；任何一轮越界即停，回调异常 → fail-closed UNSTABLE_BOUNDARY）。
+_FINAL_BOUNDARY_SCAN_LIMIT = 3
 
 
 class BoundedRepairLoop:
@@ -297,6 +315,18 @@ class BoundedRepairLoop:
                     stop_diag = f"verification_report_rejected:{why[:256]}"
                     final_report = None
                     break
+                # 6a. Patch 3 B3：接受门（seal/身份复核，可能带调用方回调副作用）
+                #     完成后，再执行**最终稳定边界复核**——至多
+                #     _FINAL_BOUNDARY_SCAN_LIMIT 轮完整安全扫描
+                #     （contract hash → cost → cancellation → 新鲜当前时间）。
+                #     任一轮出现超限/取消/超时/异常/契约漂移 → 立即停止且
+                #     final_report=None（VERIFIED 绝不成为成功结果）；两轮都
+                #     安全才允许接受。
+                reason, diag = self._final_stable_boundary(attempt_finished)
+                if reason is not None:
+                    stop, stop_diag = reason, diag
+                    final_report = None
+                    break
                 stop, final_report = RepairStopReason.VERIFIED, report
                 break
             # 7. 硬失败：立即停止（绝不重试）。
@@ -350,6 +380,30 @@ class BoundedRepairLoop:
         if report.standard_hash != self._verifier.standard_hash:
             reasons.append("standard_hash_mismatch")
         return (not reasons), ":".join(reasons)
+
+    def _final_stable_boundary(self,
+                               attempt_finished: float) -> Tuple[Optional[RepairStopReason], str]:
+        """Patch 3 B3：接受 VERIFIED 前的**最终**稳定边界复核。
+
+        ``_accept_verified_report``（seal 认证 + standard/hash 属性访问——
+        都可能携带调用方回调副作用）完成后执行：至多
+        ``_FINAL_BOUNDARY_SCAN_LIMIT`` 轮**完整安全扫描**，每轮读取次序
+        contract hash → cost → cancellation → **新鲜当前时间**。任一轮出现
+        超限 / 取消 / 超时 / 异常 / 契约漂移 → 立即返回越界原因（调用方置
+        ``final_report=None``，VERIFIED 绝不成为成功结果）；仅当全部扫描
+        安全才返回 ``(None, "")`` 允许接受。扫描次数有硬上限；回调异常
+        （无法取得稳定安全结果）→ ``UNSTABLE_BOUNDARY`` fail-closed。
+        """
+        for _ in range(_FINAL_BOUNDARY_SCAN_LIMIT):
+            try:
+                reason, diag = self._boundary_violation(pre=False,
+                                                        attempt_finished=attempt_finished)
+            except Exception as exc:      # 回调异常 → 无法证明安全 → fail-closed
+                return (RepairStopReason.UNSTABLE_BOUNDARY,
+                        f"final_boundary_unstable:{type(exc).__name__}")
+            if reason is not None:
+                return reason, diag
+        return None, ""
 
     # -- 边界复核 / 计量器 -------------------------------------------------------
     def _boundary_violation(self, *, pre: bool,
