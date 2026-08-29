@@ -19,9 +19,14 @@ BACKEND_DONE_UNVERIFIED；本地独立验证才是真值）。
 """
 from .checks import (
     observe_file,
+    open_contained,
+    process_containment_guaranteed,
     read_text_window,
+    read_text_window_contained,
+    regex_match_bounded,
     run_process_bounded,
     sha256_file_bounded,
+    snapshot_file_contained,
 )
 from .models import (
     ARTIFACT_CLAIM_KEYS,
@@ -50,6 +55,7 @@ from .models import (
     VerificationVerdict,
     compute_report_digest,
     declared_mime_consistent,
+    full_content_verdict,
     sniff_content_mime,
     scrub_secrets,
     validate_identity,
@@ -95,11 +101,17 @@ __all__ = [
     "VerificationVerdict",
     "compute_report_digest",
     "declared_mime_consistent",
+    "full_content_verdict",
     "observe_file",
+    "open_contained",
+    "process_containment_guaranteed",
     "read_text_window",
+    "read_text_window_contained",
+    "regex_match_bounded",
     "run_process_bounded",
     "sniff_content_mime",
     "scrub_secrets",
     "sha256_file_bounded",
+    "snapshot_file_contained",
     "validate_identity",
 ]

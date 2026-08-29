@@ -37,8 +37,24 @@ B6 秘密边界：HardBackendFailure/approval 诊断脱敏、秘密形态路径/
 B7 稳定快照：验证期间文件变异 → artifact_mutated_during_verification；
    criterion-only 文件受 MAX_ARTIFACT_BYTES 上限；
 B8 canonical identity：首尾空白/控制字符/秘密形态身份 → VerificationInputError。
+
+Reviewer Patch 2 否证（7 组 blocker，reviewer-locked，P2-A..P2-T）：
+B1 完整内容真实性：malformed JSON（合法前导）/ 前导垃圾后 %PDF / sniff 窗口
+   后 NUL/二进制尾 / 空 required / unreadable required / 截断 PNG·JPEG·PDF
+   一律 required FAIL；六类合法内容正例；optional 存在即完整检查；
+B2 artifact_type 策略 API 层不可变（mutation 不可能且事后策略事实不变）；
+B3 句柄锚定 containment：symlink/junction 交换（含 declared 与 criterion-only
+   两条路径）不能逃逸；
+B4 RepairLoop 只接受当前验证器真实报告：foreign signer / 陈旧 run /
+   异 contract 报告 → REPORT_REJECTED / final_report=None；
+B5 全部外部回调后新鲜状态复核：factory 期间取消/超时/成本耗尽阻止 collect；
+   cost 回调推进时钟阻止 VERIFIED；
+B6 canonical identity 统一：嵌入下划线秘密身份拒绝；秘密 run_id_factory
+   输出绝不存储；
+B7 regex 隔离 worker 硬超时；detached 后代无法存活（或平台 fail-closed）。
 """
 
+import base64
 import builtins
 import dataclasses
 import hashlib
@@ -46,6 +62,7 @@ import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -757,7 +774,9 @@ def test_cost_budget_stops_exactly(env):
 
     def cost_used():
         calls["n"] += 1
-        return 0.0 if calls["n"] == 1 else 6.0   # 第二次预检时已超 5.0 上限
+        # Patch 2：预检现在在身份分配后复核两次（0.0 × 2），attempt 完成后的
+        # 后置复核读到 6.0 > 5.0 上限 → BUDGET_EXHAUSTED，零 further collect。
+        return 0.0 if calls["n"] <= 2 else 6.0
 
     out = BoundedRepairLoop(contract=c, verifier=v,
                             collect_evidence=_failing_collector(c, distinct=True),
@@ -829,7 +848,10 @@ def test_cancellation_prevents_next_attempt(env):
 
     def cancel_requested():
         flags["checked"] += 1
-        return flags["checked"] > 1             # 第二次预检起为 True
+        # Patch 2：预检在身份分配后复核——前两次预检（attempt 1 前）为 False，
+        # 第三次复核（attempt 1 完成后的后置边界）起为 True → 第 2 次 attempt
+        # 被取消阻止，恰好 1 个 attempt。
+        return flags["checked"] > 2
 
     out = BoundedRepairLoop(contract=c, verifier=v,
                             collect_evidence=_failing_collector(c, distinct=True),
@@ -1271,9 +1293,17 @@ def test_declared_artifact_alone_is_not_substantive(env):
 # Reviewer Patch 1 — B2: MIME / content / artifact_type
 # ================================================================
 
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"0" * 24
-JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"0" * 24 + b"\xff\xd9"
-PDF_BYTES = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n" + b"0" * 32
+# 结构合法的最小图像/PDF 夹具（Patch 2 blocker B1：内容必须通过确定性结构
+# 验证——PNG/JPEG 经 Pillow verify+load，PDF 要求偏移 0 header + 尾部 %%EOF）。
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+JPEG_BYTES = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDo6KKK/nk/lQ//2Q==")
+PDF_BYTES = (b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
+             b"1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n"
+             b"2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n"
+             b"3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>\nendobj\n"
+             b"trailer\n<</Size 4/Root 1 0 R>>\nstartxref\n0\n%%EOF\n")
 
 
 def test_text_bytes_png_suffix_declared_image_png_fail(env):
@@ -1524,7 +1554,10 @@ def test_post_attempt_cost_overrun_blocks_verified(env):
 
     def cost_used():
         calls["n"] += 1
-        return 0.0 if calls["n"] == 1 else 6.0        # 完成后计量超 5.0 上限
+        # Patch 2：前两次预检（0.0×2）允许 attempt 执行；attempt 完成后的
+        # 后置边界复核读到 6.0 > 5.0 上限 → BUDGET_EXHAUSTED，VERIFIED
+        # report 不成为成功结果。
+        return 0.0 if calls["n"] <= 2 else 6.0
 
     out = BoundedRepairLoop(
         contract=c, verifier=v,
@@ -1761,6 +1794,9 @@ def test_artifact_mutated_during_verification_fails(env, monkeypatch):
                     g.write(b"-MUTATED-DURING-VERIFY")
             return data
 
+        def close(self):
+            return self._h.close()
+
         def __enter__(self):
             self._h.__enter__()
             return self
@@ -1852,3 +1888,753 @@ def test_secret_shaped_identity_rejected(env):
     s2["terminal_events"] = [t2]
     with pytest.raises(VerificationInputError):
         v.verify(s2)
+
+
+# ================================================================
+# Reviewer Patch 2 — B1: 完整内容真实性（P2-A..P2-H）
+# ================================================================
+
+TRUNC_JSON = b'{"k": 1,'                       # 合法前导 + 截断
+TRAILING_JSON = b'{"k": 1} trailing garbage'   # 完整 JSON + 尾随垃圾
+LEAD_JUNK_PDF = b"plain notes then %PDF-1.7\n%%EOF\n"   # marker 非偏移 0
+
+
+def _expectation_contract(work_real: Path, cid: str, *, atype: str, path: Path,
+                          required: bool = True, criteria=()):
+    exp = ArtifactExpectation(artifact_id="prod_doc", artifact_type=atype,
+                              expected_path=str(path), required=required)
+    return _content_contract(work_real, cid, expectations=(exp,), criteria=criteria)
+
+
+def test_p2_a_malformed_json_with_valid_lead_fails(env):
+    """P2-A 否证：JSON 合法前导 { 后语法错误/截断/尾随垃圾 → FAIL（完整解析）。"""
+    tmp, work, work_real, outside, outside_real = env
+    for tag, blob in (("trunc", TRUNC_JSON), ("garbage", TRAILING_JSON)):
+        art = work_real / "data.json"
+        art.write_bytes(blob)
+        c = _expectation_contract(work_real, f"wc_16f_p2a_{tag}_0001",
+                                  atype="json_data", path=art)
+        rep = IndependentVerifier(c).verify(_submission(
+            c, f"run_p2a_{tag}_0001",
+            declared=[_declared(art, sha_hex=_sha(blob), mime="application/json",
+                                artifact_id="prod_doc")]))
+        assert rep.verdict is VerificationVerdict.FAILED
+        assert rep.authority_seal == ""
+        assert any(ch.result is CheckResult.FAIL
+                   and ch.explanation.startswith("malformed_content:json")
+                   for ch in rep.checks), \
+            [(ch.check_id, ch.explanation) for ch in rep.checks]
+
+
+def test_p2_b_pdf_marker_after_leading_junk_fails(env):
+    """P2-B 否证：任意窗口中出现 %PDF marker 不构成 PDF——前导垃圾 + marker
+    → 内容判为 text/plain → 命名/类型/声明通道全部矛盾 FAIL。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "doc.pdf"
+    art.write_bytes(LEAD_JUNK_PDF)
+    exp = ArtifactExpectation(artifact_id="prod_doc", artifact_type="pdf_document",
+                              expected_path=str(art), required=True)
+    c = _content_contract(work_real, "wc_16f_p2b_0001", expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_p2b_0001",
+        declared=[_declared(art, sha_hex=_sha(LEAD_JUNK_PDF),
+                            mime="application/pdf", artifact_id="prod_doc")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    fails = " ".join(ch.explanation for ch in rep.checks if ch.result is CheckResult.FAIL)
+    assert "suffix_mime_mismatch" in fails and "artifact_type_mime_mismatch" in fails \
+        and "declared_mime_mismatch" in fails
+
+
+def test_p2_c_binary_tail_after_sniff_window_fails(env):
+    """P2-C 否证：前 1 KiB 是纯文本、其后才是 NUL/二进制 → FAIL（完整内容
+    验证，前缀不得掩盖尾部）。"""
+    tmp, work, work_real, outside, outside_real = env
+    blob = b"lorem ipsum summary " * 80 + b"\x00\x01\x02binary\x00tail"
+    assert len(blob) > 1024
+    art = work_real / "note.txt"
+    art.write_bytes(blob)
+    c = _expectation_contract(work_real, "wc_16f_p2c_0001",
+                              atype="plain_text", path=art)
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_p2c_0001",
+        declared=[_declared(art, sha_hex=_sha(blob), mime="text/plain",
+                            artifact_id="prod_doc")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    fails = " ".join(ch.explanation for ch in rep.checks if ch.result is CheckResult.FAIL)
+    assert "suffix_mime_mismatch" in fails and "declared_mime_mismatch" in fails
+
+
+def test_p2_d_empty_required_artifact_fails(env):
+    """P2-D 否证：空 required artifact → required FAIL artifact_empty（含
+    binary_blob——空文件绝不是有效 binary artifact）。"""
+    tmp, work, work_real, outside, outside_real = env
+    for tag, atype, suffix in (("text", "plain_text", "note.txt"),
+                               ("bin", "binary_blob", "blob.bin")):
+        art = work_real / suffix
+        art.write_bytes(b"")
+        c = _expectation_contract(work_real, f"wc_16f_p2d_{tag}_0001",
+                                  atype=atype, path=art)
+        rep = IndependentVerifier(c).verify(_submission(c, f"run_p2d_{tag}_0001"))
+        assert rep.verdict is VerificationVerdict.FAILED
+        assert rep.authority_seal == ""
+        assert any(ch.result is CheckResult.FAIL and ch.explanation == "artifact_empty"
+                   for ch in rep.checks)
+
+
+def _deny_reads_for(monkeypatch, target: Path) -> None:
+    """POSIX 确定性 unreadable：对目标路径的只读 open 一律 PermissionError
+    （advisory 锁不阻止读取；win32 测试走真实 msvcrt 区域锁）。"""
+    real_open = builtins.open
+    tgt = os.path.normcase(os.path.realpath(str(target)))
+
+    def denying_open(file, mode="r", *a, **k):
+        if "r" in str(mode) and os.path.normcase(os.path.realpath(str(file))) == tgt:
+            raise PermissionError(13, "simulated unreadable (test)")
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", denying_open)
+
+
+@contextmanager
+def _locked_unreadable(path: Path):
+    """win32 确定性 unreadable：区域锁（LockFile 语义）使任何其他句柄读取
+    PermissionError——生产真实 IO 失败路径，非模拟。"""
+    import msvcrt
+    size = max(os.path.getsize(path), 1)
+    lock = open(path, "r+b")
+    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, size)
+    try:
+        yield
+    finally:
+        try:
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, size)
+        finally:
+            lock.close()
+
+
+def test_p2_e_unreadable_required_artifact_fails(env, monkeypatch):
+    """P2-E 否证：required artifact unreadable → required FAIL artifact_
+    unreadable——绝不跳过 MIME/hash/size 后让剩余检查通过（含声明 hash）。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "summary.md"
+    art.write_bytes(b"locked content")
+    c = _expectation_contract(work_real, "wc_16f_p2e_0001",
+                              atype="markdown_document", path=art)
+    sub = _submission(c, "run_p2e_0001",
+                      declared=[_declared(art, sha_hex=_sha(b"locked content"),
+                                          mime="text/markdown",
+                                          artifact_id="prod_doc")])
+    if sys.platform == "win32":
+        with _locked_unreadable(art):
+            rep = IndependentVerifier(c).verify(sub)
+    else:
+        _deny_reads_for(monkeypatch, art)
+        rep = IndependentVerifier(c).verify(sub)
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any(ch.result is CheckResult.FAIL and ch.explanation == "artifact_unreadable"
+               for ch in rep.checks)
+
+
+@pytest.mark.parametrize("tag,atype,suffix,cut", [
+    ("png", "png_image", "pic.png", 8),   # Pillow 容忍尾部 ≤4 字节截断——截到结构破坏
+    ("jpeg", "jpeg_image", "pic.jpg", 10),
+    ("pdf", "pdf_document", "doc.pdf", 6),
+])
+def test_p2_f_truncated_image_and_pdf_fail(env, tag, atype, suffix, cut):
+    """P2-F 否证：截断 PNG/JPEG（Pillow verify+load）/ 截断 PDF（缺 %%EOF）
+    一律 malformed FAIL——最短魔数绝不接受截断/畸形文件。"""
+    tmp, work, work_real, outside, outside_real = env
+    full = {"png": PNG_BYTES, "jpeg": JPEG_BYTES, "pdf": PDF_BYTES}[tag]
+    blob = full[:-cut]
+    art = work_real / suffix
+    art.write_bytes(blob)
+    c = _expectation_contract(work_real, f"wc_16f_p2f_{tag}_0001",
+                              atype=atype, path=art)
+    rep = IndependentVerifier(c).verify(_submission(
+        c, f"run_p2f_{tag}_0001",
+        declared=[_declared(art, sha_hex=_sha(blob), artifact_id="prod_doc")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any(ch.result is CheckResult.FAIL
+               and ch.explanation.startswith("malformed_content:")
+               for ch in rep.checks), \
+        [(ch.check_id, ch.explanation) for ch in rep.checks]
+
+
+@pytest.mark.parametrize("name,content,mime,atype", [
+    ("note.txt", b"hello world", "text/plain", "plain_text"),
+    ("note.md", b"# title\ntext", "text/markdown", "markdown_document"),
+    ("data.json", b'{"k": 1}', "application/json", "json_data"),
+    ("doc.pdf", PDF_BYTES, "application/pdf", "pdf_document"),
+    ("pic.png", PNG_BYTES, "image/png", "png_image"),
+    ("pic.jpg", JPEG_BYTES, "image/jpeg", "jpeg_image"),
+])
+def test_p2_g_valid_content_positive_controls(env, name, content, mime, atype):
+    """P2-G 正例：六类合法内容（JSON/text/PDF/PNG/JPEG，完整结构验证通过）
+    + 一致命名/声明/类型 → VERIFIED + 可认证 seal + content_rejection 为空。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / name
+    art.write_bytes(content)
+    c = _expectation_contract(work_real, f"wc_16f_p2g_{atype}_0001",
+                              atype=atype, path=art)
+    v = IndependentVerifier(c)
+    rep = v.verify(_submission(
+        c, f"run_p2g_{atype}_0001",
+        declared=[_declared(art, sha_hex=_sha(content), mime=mime,
+                            size=len(content), artifact_id="prod_doc")]))
+    assert rep.verdict is VerificationVerdict.VERIFIED
+    assert rep.authority_seal and v.seal_is_authentic(rep) is True
+    obs = [a for a in rep.evidence.artifacts if a.artifact_id == "prod_doc"]
+    assert obs and all(a.content_rejection == "" and a.rejection == "" for a in obs)
+
+
+def test_p2_h_optional_existing_malformed_or_unreadable_fails(env, monkeypatch):
+    """P2-H 否证：optional 只豁免"不存在"——存在但 malformed/unreadable 一律
+    required FAIL；真正不存在仍 VERIFIED（对照）。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    # (a) optional 存在但 JSON 截断
+    bad = work_real / "extra.json"
+    bad.write_bytes(TRUNC_JSON)
+    c = _expectation_contract(work_real, "wc_16f_p2h_a_0001", atype="json_data",
+                              path=bad, required=False)
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p2h_a_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED and rep.authority_seal == ""
+    assert any(ch.required and ch.result is CheckResult.FAIL
+               and ch.explanation.startswith("malformed_content:")
+               for ch in rep.checks)
+    # (b) optional 存在但 unreadable
+    lock_art = work_real / "extra2.txt"
+    lock_art.write_bytes(b"locked optional")
+    c2 = _expectation_contract(work_real, "wc_16f_p2h_b_0001", atype="plain_text",
+                               path=lock_art, required=False)
+    sub2 = _submission(c2, "run_p2h_b_0001")
+    if sys.platform == "win32":
+        with _locked_unreadable(lock_art):
+            rep2 = IndependentVerifier(c2).verify(sub2)
+    else:
+        _deny_reads_for(monkeypatch, lock_art)
+        rep2 = IndependentVerifier(c2).verify(sub2)
+    assert rep2.verdict is VerificationVerdict.FAILED and rep2.authority_seal == ""
+    assert any(ch.required and ch.result is CheckResult.FAIL
+               and ch.explanation == "artifact_unreadable" for ch in rep2.checks)
+    # (c) 对照：optional 真正不存在 → VERIFIED（唯一豁免；锚定判据满足
+    #     substantive gate）
+    c3 = _expectation_contract(work_real, "wc_16f_p2h_c_0001", atype="plain_text",
+                               path=work_real / "ghost.txt", required=False,
+                               criteria=(VerificationCriterion(
+                                   criterion_id="p2h_anchor",
+                                   kind="artifact_file_exists",
+                                   params={"path": str(work_real / "summary.md")}),))
+    rep3 = IndependentVerifier(c3).verify(_submission(c3, "run_p2h_c_0001"))
+    assert rep3.verdict is VerificationVerdict.VERIFIED
+
+
+# ================================================================
+# Reviewer Patch 2 — B2: artifact_type 策略不可变（P2-I/P2-J）
+# ================================================================
+
+
+def test_p2_i_artifact_policy_mutation_is_impossible(env):
+    """P2-I 否证：导出策略对象任何修改路径都失败，且修改尝试后验证事实
+    不变（json_data 仍只收 JSON、未知类型仍 fail-closed）。"""
+    import types
+
+    from furina.agent.verification import ARTIFACT_TYPE_CONTENT_RULES as rules
+    assert isinstance(rules, types.MappingProxyType)
+    with pytest.raises(TypeError):
+        rules["rogue_type"] = ("text/plain",)                 # 追加
+    with pytest.raises(TypeError):
+        rules["json_data"] = ("text/plain",)                  # 放宽既有类型
+    with pytest.raises(TypeError):
+        del rules["json_data"]                                # 删除
+    with pytest.raises((AttributeError, TypeError)):
+        rules.pop("json_data", None)                          # mappingproxy 无 pop
+    with pytest.raises((AttributeError, TypeError)):
+        rules.setdefault("rogue", ())                         # 无 setdefault
+    with pytest.raises((AttributeError, TypeError)):
+        rules["json_data"].append("text/plain")               # 嵌套 tuple 不可变
+    with pytest.raises((AttributeError, TypeError)):
+        rules.clear()                                         # 无 clear
+    # 修改尝试后策略事实不变（production API 复核）
+    tmp, work, work_real, outside, outside_real = env
+    ok = work_real / "data.json"
+    ok.write_bytes(b'{"k": 1}')
+    c_ok = _expectation_contract(work_real, "wc_16f_p2i_ok_0001",
+                                 atype="json_data", path=ok)
+    rep_ok = IndependentVerifier(c_ok).verify(_submission(c_ok, "run_p2i_ok_0001"))
+    assert rep_ok.verdict is VerificationVerdict.VERIFIED
+    art = work_real / "doc.txt"
+    art.write_bytes(b"hello")
+    c_bad = _expectation_contract(work_real, "wc_16f_p2i_bad_0001",
+                                  atype="rogue_type", path=art)
+    rep_bad = IndependentVerifier(c_bad).verify(_submission(c_bad, "run_p2i_bad_0001"))
+    assert rep_bad.verdict is VerificationVerdict.FAILED
+    assert any("unknown_artifact_type" in ch.explanation for ch in rep_bad.checks)
+
+
+def test_p2_j_unknown_artifact_type_remains_fail_closed(env):
+    """P2-J 否证：未知/变体 artifact_type 始终 fail-closed（大小写/空格变体
+    不放宽）。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "doc.txt"
+    art.write_bytes(b"hello")
+    for i, atype in enumerate(("rogue_type_1", "JSON_DATA", "plain text",
+                               "json_data;x")):
+        exp = ArtifactExpectation(artifact_id="prod_doc", artifact_type=atype,
+                                  expected_path=str(art), required=True)
+        c = _content_contract(work_real, f"wc_16f_p2j_{i:02d}_0001",
+                              expectations=(exp,))
+        rep = IndependentVerifier(c).verify(_submission(c, f"run_p2j_{i:02d}_0001"))
+        assert rep.verdict is VerificationVerdict.FAILED
+        assert rep.authority_seal == ""
+        assert any("unknown_artifact_type" in ch.explanation
+                   for ch in rep.checks if ch.result is CheckResult.FAIL)
+
+
+# ================================================================
+# Reviewer Patch 2 — B4: 当前验证器真实报告门（P2-K/P2-L）
+# ================================================================
+
+
+class _ForeignSignerVerifier(IndependentVerifier):
+    """对抗性代理：verify() 转发给另一独立验证器实例（外来签发者）。"""
+
+    def __init__(self, contract, signer: IndependentVerifier) -> None:
+        super().__init__(contract)
+        self._signer = signer
+
+    def verify(self, evidence):
+        return self._signer.verify(evidence)
+
+
+class _ReplayVerifier(IndependentVerifier):
+    """对抗性代理：verify() 返回预置报告（陈旧 attempt / 异契约来源）。"""
+
+    def __init__(self, contract, replay=None) -> None:
+        super().__init__(contract)
+        self._replay = replay
+
+    def verify(self, evidence):
+        if self._replay is not None:
+            return self._replay
+        return super().verify(evidence)
+
+
+def _ok_summary_submission(c: WorkContract, run_id: str) -> dict:
+    art = Path(c.workspace_scope.write_roots[0]) / "summary.md"
+    return _submission(c, run_id,
+                       declared=[_declared(art, sha_hex=_sha(b"ok"),
+                                           mime="text/markdown",
+                                           artifact_id="doc")])
+
+
+def _verified_summary_contract(work_real: Path, cid: str) -> WorkContract:
+    (work_real / "summary.md").write_bytes(b"ok")
+    return _contract(work_real, contract_id=cid, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0),
+        max_attempts=5))
+
+
+def test_p2_k_foreign_verifier_seal_rejected_by_repair_loop(env):
+    """P2-K 否证：子类代理把另一 IndependentVerifier 实例签发的有效格式
+    VERIFIED 报告递给 RepairLoop → REPORT_REJECTED / final_report=None，
+    绝不修补或重签。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p2k_0001")
+    foreign = IndependentVerifier(c)          # 另一密钥的真实验证器
+    loop = BoundedRepairLoop(
+        contract=c, verifier=_ForeignSignerVerifier(c, foreign),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r))
+    out = loop.run()
+    assert out.stop_reason is RepairStopReason.REPORT_REJECTED
+    assert out.final_report is None
+    assert out.attempts[0].verdict == "VERIFIED"     # 报告本身格式真实产出
+    assert "seal_not_authentic_for_current_verifier" in out.diagnostic
+
+
+def test_p2_l_stale_or_foreign_contract_report_rejected(env):
+    """P2-L 否证：seal 真实但 run_id 属旧 attempt 的报告、以及异契约验证器
+    签发的报告都被精确身份复核拒绝（REPORT_REJECTED / final_report=None）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p2l_0001")
+    # (a) 陈旧 run：报告由 loop 绑定验证器真实签发（seal 可过），但
+    #     run_id 是早前 attempt 的 → run_id 精确不一致拒绝。
+    proxy = _ReplayVerifier(c)
+    stale = IndependentVerifier.verify(proxy, _ok_summary_submission(c, "run_stale_0001"))
+    assert stale.verdict is VerificationVerdict.VERIFIED
+    proxy._replay = stale
+    out = BoundedRepairLoop(
+        contract=c, verifier=proxy,
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r)).run()
+    assert out.stop_reason is RepairStopReason.REPORT_REJECTED
+    assert out.final_report is None
+    assert "run_id_mismatch" in out.diagnostic
+    # (b) 异契约：另一契约验证器签发的 VERIFIED 报告（seal/契约身份全不符；
+    #     c2 使用不同判据 → standard_hash 也不一致）。
+    c2 = _contract(work_real, contract_id="wc_16f_p2l_other_0001",
+                   budget=ExecutionBudget(max_duration_seconds=600.0,
+                                          cost_limit=CostBudget(amount=5.0),
+                                          max_attempts=5),
+                   verification_standard=VerificationStandard(criteria=(
+                       VerificationCriterion(criterion_id="p2l_sha_anchor",
+                                             kind="artifact_sha256",
+                                             params={"path": str(work_real / "summary.md"),
+                                                     "sha256_hex": _sha(b"ok")}),
+                   )))
+    foreign_rep = IndependentVerifier(c2).verify(_ok_summary_submission(c2, "run_p2l_x"))
+    assert foreign_rep.verdict is VerificationVerdict.VERIFIED
+    assert foreign_rep.standard_hash != IndependentVerifier(c).standard_hash
+    proxy2 = _ReplayVerifier(c, replay=foreign_rep)
+    out2 = BoundedRepairLoop(
+        contract=c, verifier=proxy2,
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r)).run()
+    assert out2.stop_reason is RepairStopReason.REPORT_REJECTED
+    assert out2.final_report is None
+    assert "contract_id_mismatch" in out2.diagnostic \
+        and "standard_hash_mismatch" in out2.diagnostic \
+        and "run_id_mismatch" in out2.diagnostic
+
+
+# ================================================================
+# Reviewer Patch 2 — B5: 回调后新鲜状态复核（P2-Q/P2-R）
+# ================================================================
+
+
+def test_p2_q_factory_side_effects_block_collect(env):
+    """P2-Q 否证：run_id_factory 回调期间出现的 cancellation / 超时 / 成本
+    耗尽必须阻止 collect（零 collect 零 attempt）。"""
+    tmp, work, work_real, outside, outside_real = env
+    # (a) factory 期间取消
+    c = _contract(work_real)
+    ran = {"n": 0}
+    flags = {"cancel": False}
+
+    def factory_cancel(attempt_id):
+        flags["cancel"] = True
+        return f"run_factory_c_{attempt_id[-8:]}"
+
+    def collector(attempt_id, run_id):
+        ran["n"] += 1
+        return _submission(c, run_id)
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=collector,
+                            cancel_requested=lambda: flags["cancel"],
+                            run_id_factory=factory_cancel).run()
+    assert out.stop_reason is RepairStopReason.CANCELLED
+    assert ran["n"] == 0 and len(out.attempts) == 0
+
+    # (b) factory 期间时钟越过 deadline
+    clock = FakeClock(1000.0)
+    c2 = _contract(work_real, contract_id="wc_16f_p2q_b_0001", budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+
+    def factory_deadline(attempt_id):
+        clock.advance(100000.0)
+        return f"run_factory_d_{attempt_id[-8:]}"
+
+    out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2, now_fn=clock),
+                             collect_evidence=collector, now_fn=clock,
+                             run_id_factory=factory_deadline).run()
+    assert out2.stop_reason is RepairStopReason.TIMEOUT
+    assert ran["n"] == 0 and len(out2.attempts) == 0    # factory 后零 collect
+
+    # (c) factory 期间成本耗尽
+    c3 = _contract(work_real, contract_id="wc_16f_p2q_c_0001", budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    box = {"used": 0.0}
+
+    def factory_cost(attempt_id):
+        box["used"] = 6.0
+        return f"run_factory_e_{attempt_id[-8:]}"
+
+    ran["n"] = 0
+    out3 = BoundedRepairLoop(contract=c3, verifier=IndependentVerifier(c3),
+                             collect_evidence=collector, cost_used=lambda: box["used"],
+                             run_id_factory=factory_cost).run()
+    assert out3.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert ran["n"] == 0 and len(out3.attempts) == 0
+
+
+def test_p2_r_cost_callback_advancing_clock_prevents_verified(env):
+    """P2-R 否证（任务书复现用例）：attempt_finished=10 < deadline=15，但
+    cost meter 回调把时钟推进到 20 → 后置边界必须用**新鲜时间**判定 TIMEOUT，
+    越界 VERIFIED 丢弃（final_report=None）。"""
+    tmp, work, work_real, outside, outside_real = env
+    clock = FakeClock(0.0)
+    (work_real / "summary.md").write_bytes(b"ok")
+    c = _contract(work_real, contract_id="wc_16f_p2r_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    v = IndependentVerifier(c, now_fn=clock)
+    art = work_real / "summary.md"
+
+    def collector(attempt_id, run_id):
+        clock.advance(10.0)                # attempt 完成时刻 10 < deadline 15
+        return _submission(c, run_id,
+                           declared=[_declared(art, sha_hex=_sha(b"ok"))])
+
+    reads = {"n": 0}
+
+    def cost_used():
+        reads["n"] += 1
+        if reads["n"] >= 3:                # 后置边界内的 cost 回调推进时钟
+            clock.advance(10.0)            # 10 → 20 > deadline 15
+        return 0.0
+
+    out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
+                            cost_used=cost_used, now_fn=clock).run()
+    assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
+    assert out.stop_reason is RepairStopReason.TIMEOUT
+    assert out.final_report is None                    # 绝不作为成功结果
+    assert clock.t == 20.0
+
+
+# ================================================================
+# Reviewer Patch 2 — B6: canonical identity 统一（P2-O/P2-P）
+# ================================================================
+
+
+def test_p2_o_embedded_underscore_secret_identity_rejected(env):
+    """P2-O 否证：嵌入下划线等合法分隔前缀的秘密形态身份（scrubber 与
+    identity rejector 共享同一秘密边界）→ VerificationInputError，且异常
+    不含 raw secret。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    bad_ids = ("token:supersecret", "run_password:hunter2", "x.api_key=abc",
+               "prefix-client_secret:value", "authorization:BearerValue")
+    for bid in bad_ids:
+        with pytest.raises(VerificationInputError) as ei:
+            v.verify(_submission(c, bid))
+        secret_value = bid.split(":", 1)[-1].split("=", 1)[-1]
+        assert secret_value not in str(ei.value)
+    # terminal claim 身份字段同样拒绝
+    for field in ("backend_id", "contract_id", "run_id"):
+        t = _bound_terminal(c, "run_ok_p2o")
+        t[field] = "run_password:hunter2"
+        with pytest.raises(VerificationInputError):
+            v.verify(_submission(c, "run_ok_p2o", terminal=[t]))
+
+
+def test_p2_p_secret_bearing_run_id_factory_output_never_stored(env):
+    """P2-P 否证：run_id_factory 输出直接经 canonical validate_identity——
+    秘密形态拒绝（异常脱敏）、非字符串拒绝（绝不 str() 强转）、绝不进入
+    AttemptRecord（拒绝先于存储）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    for bad in ("run_password:hunter2", "token:supersecret", 123, None):
+        def factory(attempt_id, _b=bad):
+            return _b
+        with pytest.raises(VerificationError) as ei:
+            BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                              collect_evidence=lambda a, r: _submission(c, r),
+                              run_id_factory=factory).run()
+        msg = str(ei.value)
+        assert "hunter2" not in msg and "supersecret" not in msg
+
+
+# ================================================================
+# Reviewer Patch 2 — B7: regex 隔离有界 + 进程树硬约束（P2-S/P2-T）
+# ================================================================
+
+
+def test_p2_s_catastrophic_regex_is_forcibly_bounded(env):
+    """P2-S 否证：经典灾难性回溯 pattern + 长近似匹配输入 → 隔离 worker
+    硬超时 → NOT_EVALUABLE（绝不 VERIFIED）；同报告内普通 pattern 仍 PASS
+    （不是全面禁用）；测试自身有硬耗时上限断言。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "summary.md"
+    art.write_bytes(b"HEAD_" + b"a" * 30000 + b"!tail")
+    c = _contract(work_real, contract_id="wc_16f_p2s_0001",
+                  verification_standard=VerificationStandard(criteria=(
+                      VerificationCriterion(criterion_id="p2s_evil", kind="regex_matches",
+                                            params={"path": str(art),
+                                                    "pattern": "(a+)+$"}),
+                      VerificationCriterion(criterion_id="p2s_ok", kind="regex_matches",
+                                            params={"path": str(art),
+                                                    "pattern": "HEAD_"}),
+                  ), verifier_refs=(VERIFIER_ID,)))
+    t0 = time.monotonic()
+    rep = IndependentVerifier(c, process_timeout_seconds=2.0).verify(
+        _submission(c, "run_p2s_0001"))
+    elapsed = time.monotonic() - t0
+    assert elapsed < 60                      # 测试自身硬上限（worker 超时 2s）
+    results = {ch.check_id: ch.result for ch in rep.checks}
+    assert results["criterion:p2s_ok"] is CheckResult.PASS          # 正常 pattern 不受影响
+    assert results["criterion:p2s_evil"] is CheckResult.NOT_EVALUABLE
+    assert any("regex_timeout" in ch.explanation for ch in rep.checks)
+    assert rep.verdict is VerificationVerdict.INCONCLUSIVE
+    assert rep.authority_seal == ""
+
+
+P2T_PARENT_TEMPLATE = """import subprocess, sys
+desc = [sys.executable, "-c", "import time; time.sleep(30)  # P16FDESC16f"]
+kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL, close_fds=True)
+try:
+    # 先尝试脱离 job/breakaway——失败再普通 detached 启动（两种都不应存活）
+    subprocess.Popen(desc, creationflags=0x00000008 | 0x00000200 | 0x01000000, **kw)
+except (OSError, ValueError):
+    subprocess.Popen(desc, creationflags=0x00000008 | 0x00000200, **kw)
+sys.exit(0)
+"""
+
+
+def _p16f_descendant_count():
+    import subprocess as sp
+    ps_script = ("@(Get-CimInstance Win32_Process | Where-Object { "
+                 "$_.CommandLine -like '*P16FDESC16f*' -and $_.Name -ne "
+                 "'powershell.exe' }).Count")
+
+    def count():
+        try:
+            r = sp.run(["powershell", "-NoProfile", "-Command", ps_script],
+                       capture_output=True, text=True, timeout=60)
+        except (OSError, sp.TimeoutExpired):
+            return None
+        try:
+            return int(r.stdout.strip() or "0")
+        except ValueError:
+            return None
+
+    deadline = time.monotonic() + 25
+    n = count()
+    while time.monotonic() < deadline and n:
+        time.sleep(0.5)
+        n = count()
+    return n
+
+
+def test_p2_t_detached_descendant_cannot_survive_or_checker_fails_closed(env, tmp_path):
+    """P2-T 否证：Windows——尝试 breakaway/detached 的孙进程从启动起被 Job
+    收编，criterion 正常退出路径结束后有界轮询证明零存活后代；POSIX——无
+    树级硬约束证明时 checker fail-closed 拒绝评估（绝不 PASS）。"""
+    tmp, work, work_real, outside, outside_real = env
+    parent = tmp_path / "p2t_parent.py"
+    parent.write_text(P2T_PARENT_TEMPLATE, encoding="utf-8")
+    c = _contract(work_real, contract_id="wc_16f_p2t_0001",
+                  verification_standard=VerificationStandard(criteria=(
+                      VerificationCriterion(
+                          criterion_id="proc", kind="process_exit_zero",
+                          params={"command": f'"{sys.executable}" "{parent}"'}),
+                  )))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p2t_0001"))
+    if sys.platform == "win32":
+        assert rep.verdict is VerificationVerdict.VERIFIED      # 父进程 exit 0
+        survivors = _p16f_descendant_count()
+        if survivors is None:
+            pytest.skip("PowerShell 进程枚举不可用")
+        assert survivors == 0                    # detached 后代无法在 job 外存活
+    else:
+        assert rep.verdict is VerificationVerdict.INCONCLUSIVE
+        assert rep.authority_seal == ""
+        assert any("process_containment_unavailable" in ch.explanation
+                   for ch in rep.checks)
+# ================================================================
+# Reviewer Patch 2 — B3: 句柄锚定 containment（P2-M/P2-N）
+# ================================================================
+
+
+def _swap_parent_during_open(monkeypatch, target: Path, parent: Path,
+                             outside_dir: Path) -> dict:
+    """确定性同步点（blocker B3 否证工具）：目标路径第一次被打开时，把其
+    父目录替换为指向 outside_dir 的 symlink/junction——即"containment 检查
+    后、读取前替换"。返回 state（swapped 标志）。"""
+    real_open = builtins.open
+    state = {"swapped": False}
+    tgt = os.path.normcase(os.path.realpath(str(target)))
+
+    def swapping_open(file, mode="r", *a, **k):
+        try:
+            same = os.path.normcase(os.path.realpath(str(file))) == tgt
+        except OSError:
+            same = False
+        if not state["swapped"] and same and "r" in str(mode) and "b" in str(mode):
+            state["swapped"] = True
+            os.rename(parent, parent.with_name(parent.name + "_bak16f"))
+            assert _make_dir_link(parent, outside_dir), "symlink/junction 不可用"
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", swapping_open)
+    return state
+
+
+def _restore_swapped_parent(parent: Path) -> None:
+    """清理：移除替换出的链接，把备份父目录改名还原（避免 tmp 清理递归）。"""
+    bak = parent.with_name(parent.name + "_bak16f")
+    try:
+        if bak.exists():
+            if parent.exists():
+                os.rmdir(parent)          # 移除 symlink/junction reparse point
+            os.rename(bak, parent)
+    except OSError:
+        pass
+
+
+def test_p2_m_handle_anchored_symlink_junction_swap_cannot_escape(env, monkeypatch):
+    """P2-M 否证：declared/expectation 观察的"containment 检查后、读取前
+    替换"（父目录换成指向 workspace 外的链接）→ 句柄级真实目标证明拦截
+    path_escape，绝不读取 workspace 外内容（外部文件 hash 一致也不放行）。"""
+    tmp, work, work_real, outside, outside_real = env
+    subdir = work_real / "sub16f"
+    subdir.mkdir()
+    target = subdir / "f.md"
+    target.write_bytes(b"inside-stale-content")
+    outside_dir = tmp / "outside16f"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "f.md"
+    outside_file.write_bytes(b"escaped-secret-content")
+    (work_real / "summary.md").write_bytes(b"ok")
+    exp = ArtifactExpectation(artifact_id="doc", artifact_type="markdown_document",
+                              expected_path=str(target), required=True)
+    c = _content_contract(work_real, "wc_16f_p2m_0001", expectations=(exp,))
+    # 声明 hash 与 workspace 外内容一致——旧"先 realpath 后按路径 open"实现
+    # 会读取外部内容并 VERIFIED；句柄锚定实现必须 path_escape 拒绝。
+    sub = _submission(c, "run_p2m_0001",
+                      declared=[_declared(target, sha_hex=_sha(b"escaped-secret-content"),
+                                          mime="text/markdown", artifact_id="doc")])
+    try:
+        _swap_parent_during_open(monkeypatch, target, subdir, outside_dir)
+        rep = IndependentVerifier(c).verify(sub)
+    finally:
+        _restore_swapped_parent(subdir)
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any(ch.required and ch.result is CheckResult.FAIL
+               and "path_escape" in ch.explanation for ch in rep.checks),         [(ch.check_id, ch.explanation) for ch in rep.checks]
+    assert all(ch.result is not CheckResult.PASS
+               for ch in rep.checks if ch.check_id.endswith(":hash"))
+
+
+def test_p2_n_criterion_only_path_swap_cannot_escape(env, monkeypatch):
+    """P2-N 否证：criterion-only 文件（text_contains 判据路径）在检查与读取
+    之间被替换为指向 workspace 外的链接 → 句柄锚定 containment 拦截
+    path_escape，needle 命中外部内容也绝不 PASS。"""
+    tmp, work, work_real, outside, outside_real = env
+    subdir = work_real / "sub16fn"
+    subdir.mkdir()
+    target = subdir / "f.md"
+    target.write_bytes(b"no needle here inside")
+    outside_dir = tmp / "outside16fn"
+    outside_dir.mkdir()
+    (outside_dir / "f.md").write_bytes(b"NEEDLE_16FN escaped content")
+    c = _contract(work_real, contract_id="wc_16f_p2n_0001",
+                  verification_standard=VerificationStandard(criteria=(
+                      VerificationCriterion(criterion_id="win", kind="text_contains",
+                                            params={"path": str(target),
+                                                    "needle": "NEEDLE_16FN"}),
+                  ), verifier_refs=(VERIFIER_ID,)))
+    try:
+        _swap_parent_during_open(monkeypatch, target, subdir, outside_dir)
+        rep = IndependentVerifier(c).verify(_submission(c, "run_p2n_0001"))
+    finally:
+        _restore_swapped_parent(subdir)
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    crit = [ch for ch in rep.checks if ch.check_id == "criterion:win"]
+    assert crit and crit[0].result is CheckResult.FAIL         and "path_escape" in crit[0].explanation

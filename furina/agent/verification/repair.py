@@ -9,13 +9,22 @@
   content_hash 逐 attempt 记录并校验不变；不得扩大 workspace / capabilities /
   backends / permission / 预算（结构上不可能：collect_evidence 只收到
   attempt_id/run_id，verifier 绑定构造期契约，无任何改约通道）。
-- **边界复核（blocker 4）**：cancellation / deadline / cost meter / contract
-  hash 在 attempt/approval/collect/verify 的真实副作用边界**前后**都要复核：
-  attempt 启动前（``used >= limit`` → 零 collect）、approval 回调之后、以及
-  **接受 VERIFIED 前**（``used > limit`` → BUDGET_EXHAUSTED；完成时间 >
-  deadline → TIMEOUT；attempt 中出现 cancellation → CANCELLED；contract hash
-  漂移 → CONTRACT_MUTATED）。越界后的 VERIFIED report 不得成为成功结果
+- **边界复核（blocker 4 + B5）**：cancellation / deadline / cost meter /
+  contract hash 在 attempt/approval/factory/collect/verify 的真实副作用边界
+  **前后**都要复核，且读取次序保证每个回调的副作用都被其后的读取捕获：
+  attempt 启动前（``used >= limit`` → 零 collect）、**run_id_factory 回调
+  之后**（factory 期间的取消/超时/成本耗尽/mutation 必须阻止 collect）、
+  approval 回调之后、以及**接受 VERIFIED 前**（post 复核全部使用回调结束
+  后的**新鲜当前时间**——cost meter 自身推进时钟后必须再次读取当前时间，
+  绝不缓存旧时间；``used > limit`` → BUDGET_EXHAUSTED；新鲜时间 > deadline
+  → TIMEOUT；attempt 中出现 cancellation → CANCELLED；contract hash 漂移
+  → CONTRACT_MUTATED）。越界后的 VERIFIED report 不得成为成功结果
   （``final_report`` 置空，stop reason 如实反映越界边界）。
+- **VERIFIED 接受门（blocker B4）**：RepairLoop 只接受**当前验证器**的真实
+  报告——``seal_is_authentic``（当前实例密钥）+ contract_id/run_id/
+  contract_hash/standard_hash 与当前契约和本次 attempt 精确一致全部通过才
+  接受；foreign-signer / 旧 attempt / run 或 contract mismatch 报告一律
+  ``REPORT_REJECTED``（final_report=None，绝不修补或重新签署外来报告）。
 - **严格 cost meter（blocker 4）**：``cost_used`` 必须是严格数值类型
   （bool/str 拒绝）、finite、``>= 0``——meter 异常 / NaN / Inf / 负数一律
   fail-closed（视同 +inf → BUDGET_EXHAUSTED），零误判。
@@ -23,13 +32,16 @@
   等价物）→ 再次独立验证；**绝不修补 verdict**（VERIFIED 只能来自 verifier）。
 - **精确停止**：VERIFIED / hard failure / approval deny·timeout / cancellation /
   超时（deadline 前不允许启动任何新 attempt）/ 成本超限 / attempts 耗尽 /
-  **重复相同 failure signature 断路**。
+  重复相同 failure signature 断路 / **外来报告拒绝**。
 - failure signature：对 failed/not_evaluable 检查的确定性摘要（check_id + result
   + explanation 的 canonical SHA-256）——不含时间戳/run_id，因此"同一原因再失败"
   会被识别；不同原因不误断；前置载荷同样脱敏（raw secret text 不进入签名载荷）。
-- **秘密边界（blocker 6）**：所有进入 RepairOutcome / AttemptRecord / diagnostic
-  的字符串面（HardBackendFailure / approval / cost / collector diagnostic）统一
-  脱敏；raw secret text 不进入对象字段、stop 诊断与 failure signature 载荷。
+- **秘密边界（blocker 6 + B6）**：所有进入 RepairOutcome / AttemptRecord /
+  diagnostic 的字符串面（HardBackendFailure / approval / cost / collector
+  diagnostic）统一脱敏；**run_id_factory 输出直接经公开 canonical
+  ``validate_identity``**（含 ``_``/``.``/``-``/``:`` 分隔前缀的秘密形态，
+  非字符串拒绝、绝不 ``str()`` 强转、绝不静默 trim）——原始 secret text
+  不进入对象字段、异常、stop 诊断与 failure signature 载荷。
 
 本模块零 DB / 零 C1–C7 / 零事件总线 / 零持久化（C6/C7/C3 写入属 16G）。
 """
@@ -78,6 +90,9 @@ class RepairStopReason(str, enum.Enum):
     APPROVAL_DENIED = "APPROVAL_DENIED"
     HARD_FAILURE = "HARD_FAILURE"
     CONTRACT_MUTATED = "CONTRACT_MUTATED"
+    #: blocker B4：VERIFIED 格式报告未通过当前验证器 seal/精确身份复核——
+    # 绝不接受、绝不修补/重签外来报告（final_report=None，立即停止）。
+    REPORT_REJECTED = "REPORT_REJECTED"
 
 
 @dataclass(frozen=True)
@@ -186,14 +201,25 @@ class BoundedRepairLoop:
         max_attempts = self._contract.budget.max_attempts
 
         while len(attempts) < max_attempts:
-            # 1. 副作用边界前复核：cancellation / contract hash / cost（>= limit
-            #    → 零 collect）/ deadline（deadline 前不启动新 attempt）。
+            # 1. 副作用边界前复核：contract hash / cost（>= limit → 零 collect）/
+            #    cancellation / deadline（deadline 前不启动新 attempt）。
+            #    读取次序 hash→cost→cancel→time：每个回调副作用都被其后的
+            #    读取捕获（blocker B5——cost meter 可能推进时钟/翻转取消）。
             reason, diag = self._boundary_violation(pre=True)
             if reason is not None:
                 stop, stop_diag = reason, diag
                 break
-            # 2. 审批门：未明确 approve 一律不放行（deny/timeout/pending/未知/空 → 停）。
+            # 2. 身份分配：run_id_factory 输出直接经 canonical validate_identity
+            #    （blocker B6——非 str 拒绝、秘密形态拒绝、绝不 str() 强转）。
             attempt_id, run_id = self._allocate_ids(len(attempts) + 1)
+            # 3. factory 回调（外部代码边界）之后复核：factory 期间出现的
+            #    cancellation / 超时 / 成本耗尽 / contract mutation 必须阻止
+            #    collect（blocker B5）。
+            reason, diag = self._boundary_violation(pre=True)
+            if reason is not None:
+                stop, stop_diag = reason, diag
+                break
+            # 4. 审批门：未明确 approve 一律不放行（deny/timeout/pending/未知/空 → 停）。
             if self._approval_authority is not None:
                 verdict_str = self._approval_authority(attempt_id, run_id)
                 if verdict_str != "approve":
@@ -249,27 +275,36 @@ class BoundedRepairLoop:
                     started_at_epoch=attempt_started, finished_at_epoch=attempt_finished,
                     diagnostic=diagnostic[:MAX_DIAGNOSTIC_CHARS]))
 
-            # 3. 副作用边界后复核——**在接受 VERIFIED 前必须再次复核**：
-            #    attempt 完成后 used > limit → BUDGET_EXHAUSTED；完成时间 >
-            #    deadline → TIMEOUT；attempt 中出现 cancellation → CANCELLED；
-            #    contract hash 漂移 → CONTRACT_MUTATED。
-            #    越界后的 VERIFIED report 不得成为成功结果（final_report 置空）。
+            # 5. 副作用边界后复核——**在接受 VERIFIED 前必须执行**，且全部使用
+            #    回调结束后的新鲜状态：cost meter 回调之后再次读取当前时间
+            #    （绝不缓存 attempt 完成前的旧时间——blocker B5）；
+            #    used > limit → BUDGET_EXHAUSTED；新鲜时间 > deadline → TIMEOUT；
+            #    attempt 中出现 cancellation → CANCELLED；contract hash 漂移 →
+            #    CONTRACT_MUTATED。越界后的 VERIFIED report 不得成为成功结果。
             reason, diag = self._boundary_violation(pre=False,
                                                     attempt_finished=attempt_finished)
             if reason is not None:
                 stop, stop_diag = reason, diag
                 final_report = None
                 break
-            # 4. VERIFIED 接受（只能来自 verifier 的真实密封报告）。
+            # 6. VERIFIED 接受门（blocker B4）：只能来自**当前验证器**的真实
+            #    密封报告——seal 真实性 + contract/run/standard/hash 精确身份
+            #    全部复核；任一不满足绝不接受、绝不修补/重签（final_report=None）。
             if report is not None and report.verdict is VerificationVerdict.VERIFIED:
+                accepted, why = self._accept_verified_report(report, run_id)
+                if not accepted:
+                    stop = RepairStopReason.REPORT_REJECTED
+                    stop_diag = f"verification_report_rejected:{why[:256]}"
+                    final_report = None
+                    break
                 stop, final_report = RepairStopReason.VERIFIED, report
                 break
-            # 5. 硬失败：立即停止（绝不重试）。
+            # 7. 硬失败：立即停止（绝不重试）。
             if hard:
                 stop = RepairStopReason.HARD_FAILURE
                 stop_diag = diagnostic
                 break
-            # 6. 重复相同 failure signature → 断路（不烧剩余 attempts）；
+            # 8. 重复相同 failure signature → 断路（不烧剩余 attempts）；
             #    最后一次验证报告作为 final_report 携带（绝不修补其 verdict）。
             if signature and signature == last_signature:
                 stop = RepairStopReason.REPEATED_FAILURE
@@ -287,21 +322,52 @@ class BoundedRepairLoop:
             final_report=final_report, started_at_epoch=started,
             finished_at_epoch=self._now_fn(), diagnostic=stop_diag)
 
+    # -- VERIFIED 接受门（blocker B4） ------------------------------------------
+    def _accept_verified_report(self, report: VerificationReport,
+                                run_id: str) -> Tuple[bool, str]:
+        """接受 VERIFIED 的完整条件（全部精确一致才接受）：
+
+        1. verdict == VERIFIED（调用方已判）；
+        2. seal 经**当前**验证器 ``seal_is_authentic`` 真实性复核通过——
+           另一实例/子类代理签发的有效格式报告一律拒绝；
+        3. contract_id 与当前不可变契约精确一致；
+        4. run_id 与本次 attempt 分配的 run_id 精确一致（非旧 attempt）；
+        5. contract_hash / verification standard hash 与当前 verifier/契约
+           预期精确一致。
+        报告来自本次 collect/verify 调用是结构事实（run() 内局部变量）；
+        4+5 将任何旧 attempt/异契约报告排除在外。失败返回 (False, 原因)，
+        绝不修补或重新签署外来报告。
+        """
+        reasons: List[str] = []
+        if not self._verifier.seal_is_authentic(report):
+            reasons.append("seal_not_authentic_for_current_verifier")
+        if report.contract_id != self._contract.contract_id:
+            reasons.append("contract_id_mismatch")
+        if report.run_id != run_id:
+            reasons.append("run_id_mismatch")
+        if report.contract_hash != self._contract.content_hash:
+            reasons.append("contract_hash_mismatch")
+        if report.standard_hash != self._verifier.standard_hash:
+            reasons.append("standard_hash_mismatch")
+        return (not reasons), ":".join(reasons)
+
     # -- 边界复核 / 计量器 -------------------------------------------------------
     def _boundary_violation(self, *, pre: bool,
                             attempt_finished: Optional[float] = None
                             ) -> Tuple[Optional[RepairStopReason], str]:
-        """cancellation / deadline / cost meter / contract hash 的边界复核。
+        """contract hash / cost meter / cancellation / deadline 的边界复核
+        （blocker B5：读取次序 hash→cost→cancel→time——cost meter 是可能推进
+        时钟/翻转取消的调用方回调，其副作用必须被其后的 cancellation 与
+        **新鲜当前时间**读取捕获，绝不缓存回调前的旧时间）。
 
         pre=True：attempt 副作用边界**前**（``used >= limit`` → 零 collect；
         ``now >= deadline`` → 不启动新 attempt）。pre=False：attempt 完成后、
-        接受 VERIFIED **前**（``used > limit`` / ``finished > deadline`` → 越界）。
+        接受 VERIFIED **前**（``used > limit`` / ``max(完成时间, 新鲜当前时间)
+        > deadline`` → 越界）。
         返回 ``(停止原因或 None, 诊断)``。
         """
         if self._contract.content_hash != self._initial_hash:
             return RepairStopReason.CONTRACT_MUTATED, "contract_hash_changed"
-        if bool(self._cancel_requested()):
-            return RepairStopReason.CANCELLED, "cancellation_requested"
         limit = self._contract.budget.cost_limit.amount
         if self._cost_used is not None:
             used, err = self._read_cost_used()
@@ -310,11 +376,17 @@ class BoundedRepairLoop:
             over = (used >= limit) if pre else (used > limit)
             if over:
                 return RepairStopReason.BUDGET_EXHAUSTED, "cost_limit_exceeded"
+        # cost meter 回调之后读取 cancellation（回调可能翻转取消标志）。
+        if bool(self._cancel_requested()):
+            return RepairStopReason.CANCELLED, "cancellation_requested"
         if pre:
             if self._now_fn() >= self._deadline:
                 return RepairStopReason.TIMEOUT, "time_budget_exhausted"
-        elif attempt_finished is not None and attempt_finished > self._deadline:
-            return RepairStopReason.TIMEOUT, "time_budget_exhausted"
+        elif attempt_finished is not None:
+            # 全部回调结束后的新鲜时间（cost meter 可能已把时钟推过 deadline）。
+            finished = max(float(attempt_finished), float(self._now_fn()))
+            if finished > self._deadline:
+                return RepairStopReason.TIMEOUT, "time_budget_exhausted"
         return None, ""
 
     def _read_cost_used(self) -> Tuple[float, str]:
@@ -336,12 +408,21 @@ class BoundedRepairLoop:
 
     # -- 工具 ----------------------------------------------------------------
     def _allocate_ids(self, n: int) -> Tuple[str, str]:
-        attempt_id = f"att_{n:02d}_{uuid.uuid4().hex[:8]}"
-        run_id = str(self._run_id_factory(attempt_id))
+        """身份分配（blocker B6）：run_id_factory 输出**直接**经公开的统一
+        canonical ``validate_identity``（词法 contract + 秘密形态拒绝）——
+        不得先 ``str()`` 强制转换非字符串返回值；原始秘密绝不进入
+        AttemptRecord（拒绝先于存储）。attempt_id 同走同一 canonical contract。
+        """
+        from .models import validate_identity
+        attempt_id = validate_identity(f"att_{n:02d}_{uuid.uuid4().hex[:8]}",
+                                       "attempt_id")
+        raw = self._run_id_factory(attempt_id)
+        if not isinstance(raw, str):
+            raise VerificationError(
+                f"run_id_factory 必须返回 str，得到 {type(raw).__name__}")
+        run_id = validate_identity(raw, "run_id")
         if not run_id or run_id in self._seen_run_ids:
-            raise VerificationError(f"run_id_factory 必须产出唯一非空 run_id，得到 {run_id!r}")
-        from .models import _RUN_ID_PATTERN
-        if not _RUN_ID_PATTERN.match(run_id):
-            raise VerificationError(f"run_id 词法非法: {run_id!r}")
+            raise VerificationError(
+                f"run_id_factory 必须产出唯一非空 run_id，得到 {run_id!r}")
         self._seen_run_ids.add(run_id)
         return attempt_id, run_id

@@ -1,6 +1,6 @@
 """Phase 16F — IndependentVerifier：任务级独立校验器（VERIFIED 唯一授权入口）。
 
-权威模型（16F 任务书 §1/§3 + 关键锁定 1–3 + Reviewer Patch 1）：
+权威模型（16F 任务书 §1/§3 + 关键锁定 1–3 + Reviewer Patch 1 + Reviewer Patch 2）：
 
 - **VERIFIED 只能由本类在真实执行全部确定性检查且全部通过后产生**。任何其它
   代码路径构造 verdict=VERIFIED 的报告要么被 :class:`VerificationAuthorityError`
@@ -14,14 +14,25 @@
   substantive deterministic check（WorkContract 判据本地确定性 PASS 或
   required artifact 真实本地检查 PASS）时，最终裁定强制 INCONCLUSIVE，
   绝不 VERIFIED、绝不签 seal。
-- **内容 MIME（blocker 2）**：产物 MIME 观察真值来自**内容识别**（PNG/JPEG/
-  PDF 魔数 + JSON/text 有界规则），扩展名只是命名层交叉核对（未知后缀 /
-  命名与内容矛盾一律 fail-closed）；``ArtifactExpectation.artifact_type`` 经
-  16F 封闭的 ``ARTIFACT_TYPE_CONTENT_RULES`` 进入验证策略，未知类型绝不静默
-  通过；binary/octet-stream 内容只能被显式允许的 artifact 类型/声明接受。
+- **完整内容真实性（blocker B1）**：产物 MIME 与有效性判定基于**同一稳定、
+  完整、有界快照**（≤ MAX_ARTIFACT_BYTES 的全部字节，
+  :func:`~checks.full_content_verdict`）——JSON 完整严格解析、text 完整严格
+  解码、PDF 偏移 0 + 封闭结构、PNG/JPEG Pillow 结构验证、binary 显式接受、
+  空/畸形/截断/不可读一律 required FAIL；绝不只检查文件头后默认剩余内容
+  可信，绝不把无法验证降级为 PASS。
+- **句柄锚定 containment（blocker B3）**：artifact 与判据文件的安全判断绝不
+  只依赖 open 前的 ``realpath``——先受约束打开，再依据**该句柄**的 OS 级
+  真实目标证明其位于 workspace root 内；hash/size/MIME/内容/判据读取全部
+  来自同一已证明句柄或同一不可变快照；验证期间路径替换/inode 变化/截断/
+  增长一律失败；平台无法给出句柄目标证明 → 拒绝该检查，绝不退回不安全
+  路径模式。
+- **artifact type 策略（blocker B2）**：``ARTIFACT_TYPE_CONTENT_RULES`` 在
+  API 层不可变（MappingProxyType + tuple 嵌套），验证器不持有可被调用方
+  修改的共享可变引用；未知 artifact_type 始终 fail-closed。
 - **optional artifact（blocker 3）**：optional 只豁免"不存在"；一旦存在，
-  path escape / symlink 逃逸 / oversize / unsupported MIME / non-regular /
-  声明矛盾任一发生都是 required FAIL，最终不得 VERIFIED。
+  path escape / symlink 逃逸 / oversize / empty / unreadable / malformed /
+  unsupported MIME / non-regular / 声明矛盾任一发生都是 required FAIL，
+  最终不得 VERIFIED。
 - **稳定快照（blocker 7）**：同一次 verify 内 size/hash/MIME 判据来自同一
   句柄的有界本地快照，前后 fstat/stat 一致性证明——验证期间文件被替换、
   截断、增长、inode 变化 → artifact_mutated_during_verification → FAIL。
@@ -83,7 +94,6 @@ from .models import (
     declared_mime_consistent,
     mime_for_suffix,
     scrub_secrets,
-    sniff_content_mime,
     validate_identity,
 )
 
@@ -379,34 +389,42 @@ class IndependentVerifier:
 
     def _observe(self, source: str, artifact_id: str, path: str) -> ArtifactObservation:
         claimed = os.path.normpath(os.path.expanduser(path))
-        # realpath 同时覆盖两类逃逸：目标存在时的 symlink 链，与目标尚不存在时
-        # 最近现存祖先（含 junction/挂点）的链接逃逸（Python 3.8+ 解析现存前缀）。
-        # containment **先于存在性**判定：逃逸路径即使目标不存在也报 path_escape，
-        # 绝不降级为 missing（fail-closed 高声拒绝）。
-        real = os.path.realpath(claimed)
-        within = self._contract.workspace_scope.contains_path(real, writable=True)
-        exists = os.path.exists(real)
-        if not within:
-            is_file = bool(exists) and os.path.isfile(real)
-            return ArtifactObservation(source, artifact_id, claimed, real,
+        # 预筛（未读取任何内容）：missing-最近现存祖先逃逸——目标不存在时句柄
+        # 无法打开，链接逃逸只能由路径解析发现；该预筛不是安全判断依据（真实
+        # containment 证明在句柄层，blocker B3），仅用于 missing/逃逸分类。
+        real_prefilter = os.path.realpath(claimed)
+        if not self._contract.workspace_scope.contains_path(real_prefilter, writable=True):
+            exists = os.path.exists(real_prefilter)
+            is_file = bool(exists) and os.path.isfile(real_prefilter)
+            return ArtifactObservation(source, artifact_id, claimed, real_prefilter,
                                        exists, is_file, False, None, "", "",
-                                       "path_escape")
-        if not exists:
-            return ArtifactObservation(source, artifact_id, claimed, real,
-                                       False, False, True, None, "", "", "missing")
-        is_file = os.path.isfile(real)
-        if not is_file:
-            return ArtifactObservation(source, artifact_id, claimed, real,
+                                       "path_escape", mime_for_suffix(real_prefilter))
+        # 句柄锚定（blocker B3）：受约束打开 + 句柄 OS 级真实目标 containment
+        # 证明；hash/size/完整内容 MIME 全部来自同一已证明句柄的不可变快照。
+        size, digest, content_mime, content_rej, final_path, rej = \
+            _checks.snapshot_file_contained(claimed, self._contains_path, True)
+        name_mime = mime_for_suffix(final_path or real_prefilter)
+        if rej == "missing":
+            return ArtifactObservation(source, artifact_id, claimed, real_prefilter,
+                                       False, False, True, None, "", "",
+                                       "missing", name_mime)
+        if rej == "path_escape":
+            # open 之后句柄目标逃逸（TOCTOU 竞态被句柄证明拦截）——高声拒绝
+            return ArtifactObservation(source, artifact_id, claimed, final_path,
+                                       True, True, False, None, "", "",
+                                       "path_escape", name_mime)
+        if rej == "not_regular_file":
+            return ArtifactObservation(source, artifact_id, claimed, final_path,
                                        True, False, True, None, "", "",
-                                       "not_regular_file")
-        # 稳定快照（blocker 7）：size/hash/head 来自同一句柄，前后 fstat/stat
-        # 一致性证明；验证期间替换/截断/增长 → rejection="mutated"。
-        size, digest, head, rejection = _checks.observe_file(real)
-        observed_mime = sniff_content_mime(head)
-        name_mime = mime_for_suffix(real)
-        return ArtifactObservation(source, artifact_id, claimed, real,
-                                   True, True, True, size, observed_mime, digest,
-                                   rejection, name_mime)
+                                       "not_regular_file", name_mime)
+        if rej:   # unreadable / handle_target_unprovable / oversize / mutated
+            return ArtifactObservation(source, artifact_id, claimed, final_path,
+                                       True, True, True, size, "", "", rej, name_mime)
+        # rej == "" —— 完整内容快照在手（blocker B1：observed_mime 是完整内容
+        # 识别真值；content_rejection 是结构验证拒绝原因）
+        return ArtifactObservation(source, artifact_id, claimed, final_path,
+                                   True, True, True, size, content_mime, digest,
+                                   "", name_mime, content_rej)
 
     # -- 检查构建 ----------------------------------------------------------------
     def _run_checks(self, bundle: EvidenceBundle,
@@ -518,12 +536,38 @@ class IndependentVerifier:
         d_sha = decl["declared_sha256"] if decl else None
         d_mime = decl["declared_mime"] if decl else None
         d_size = decl["declared_size_bytes"] if decl else None
-        if obs.rejection == "oversize" or d_size is not None:
-            if obs.rejection == "oversize" or obs.size_bytes is None:
+        # blocker B1：unreadable / 句柄目标不可证明 绝不跳过为"剩余检查通过"——
+        # required FAIL，最终不得 VERIFIED。
+        if obs.rejection in ("unreadable", "handle_target_unprovable"):
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:readable", kind="artifact_readable",
+                required=req, result=CheckResult.FAIL,
+                explanation=("artifact_unreadable" if obs.rejection == "unreadable"
+                             else "handle_target_unprovable")))
+            return out
+        if obs.rejection == "oversize":
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:size", kind="artifact_size", required=req,
+                result=CheckResult.FAIL, explanation="artifact_oversize"))
+            if d_sha is not None:
+                out.append(VerificationCheck(
+                    check_id=f"{prefix}:hash", kind="artifact_hash", required=req,
+                    result=CheckResult.NOT_EVALUABLE,
+                    explanation="hash_unavailable:oversize"))
+            return out
+        # blocker B1：空文件绝不是有效 artifact（含 binary_blob）。
+        if obs.size_bytes == 0 or obs.content_rejection == "empty_artifact":
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:content", kind="artifact_content",
+                required=req, result=CheckResult.FAIL,
+                explanation="artifact_empty"))
+            return out
+        if d_size is not None:
+            if obs.size_bytes is None:
                 out.append(VerificationCheck(
                     check_id=f"{prefix}:size", kind="artifact_size", required=req,
                     result=CheckResult.FAIL, explanation="artifact_oversize"))
-            elif d_size is not None and obs.size_bytes != d_size:
+            elif obs.size_bytes != d_size:
                 out.append(VerificationCheck(
                     check_id=f"{prefix}:size", kind="artifact_size", required=req,
                     result=CheckResult.FAIL, explanation="declared_size_mismatch",
@@ -533,11 +577,19 @@ class IndependentVerifier:
                     check_id=f"{prefix}:size", kind="artifact_size", required=req,
                     result=CheckResult.PASS, explanation="size_observed",
                     inputs=(("observed", str(obs.size_bytes)),)))
-        if obs.rejection == "" and obs.observed_mime:
+        # blocker B1：完整内容结构验证失败（malformed/截断/畸形）→ required
+        # FAIL，绝不 VERIFIED（与声明 hash 是否一致无关）。
+        if obs.content_rejection:
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:content", kind="artifact_content",
+                required=req, result=CheckResult.FAIL,
+                explanation=obs.content_rejection))
+            return out
+        if obs.observed_mime:
             out.extend(self._content_channel_checks(
                 prefix, req, obs, artifact_type=exp.artifact_type, d_mime=d_mime))
         elif d_mime is not None:
-            # 内容不可观察（oversize/unreadable）时的声明 MIME 无法被内容佐证
+            # 内容不可观察时的声明 MIME 无法被内容佐证
             if d_mime not in SUPPORTED_MIME_TYPES:
                 out.append(VerificationCheck(
                     check_id=f"{prefix}:mime", kind="artifact_mime", required=req,
@@ -604,12 +656,37 @@ class IndependentVerifier:
         d_sha = d["declared_sha256"]
         d_mime = d["declared_mime"]
         d_size = d["declared_size_bytes"]
-        if obs.rejection == "oversize" or d_size is not None:
-            if obs.rejection == "oversize" or obs.size_bytes is None:
+        # blocker B1：unreadable / 句柄目标不可证明 → required FAIL
+        if obs.rejection in ("unreadable", "handle_target_unprovable"):
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:readable", kind="artifact_readable",
+                required=True, result=CheckResult.FAIL,
+                explanation=("artifact_unreadable" if obs.rejection == "unreadable"
+                             else "handle_target_unprovable")))
+            return out
+        if obs.rejection == "oversize":
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:size", kind="artifact_size", required=True,
+                result=CheckResult.FAIL, explanation="artifact_oversize"))
+            if d_sha is not None:
+                out.append(VerificationCheck(
+                    check_id=f"{prefix}:hash", kind="artifact_hash", required=True,
+                    result=CheckResult.NOT_EVALUABLE,
+                    explanation="hash_unavailable:oversize"))
+            return out
+        # blocker B1：空文件绝不是有效 artifact。
+        if obs.size_bytes == 0 or obs.content_rejection == "empty_artifact":
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:content", kind="artifact_content",
+                required=True, result=CheckResult.FAIL,
+                explanation="artifact_empty"))
+            return out
+        if d_size is not None:
+            if obs.size_bytes is None:
                 out.append(VerificationCheck(
                     check_id=f"{prefix}:size", kind="artifact_size", required=True,
                     result=CheckResult.FAIL, explanation="artifact_oversize"))
-            elif d_size is not None and obs.size_bytes != d_size:
+            elif obs.size_bytes != d_size:
                 out.append(VerificationCheck(
                     check_id=f"{prefix}:size", kind="artifact_size", required=True,
                     result=CheckResult.FAIL, explanation="declared_size_mismatch",
@@ -619,7 +696,13 @@ class IndependentVerifier:
                     check_id=f"{prefix}:size", kind="artifact_size", required=True,
                     result=CheckResult.PASS, explanation="size_observed",
                     inputs=(("observed", str(obs.size_bytes)),)))
-        if obs.rejection == "" and obs.observed_mime:
+        if obs.content_rejection:
+            out.append(VerificationCheck(
+                check_id=f"{prefix}:content", kind="artifact_content",
+                required=True, result=CheckResult.FAIL,
+                explanation=obs.content_rejection))
+            return out
+        if obs.observed_mime:
             out.extend(self._content_channel_checks(
                 prefix, True, obs, artifact_type=None, d_mime=d_mime))
         elif d_mime is not None:

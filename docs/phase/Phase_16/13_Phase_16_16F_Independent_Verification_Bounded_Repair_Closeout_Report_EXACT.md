@@ -1,268 +1,313 @@
 # Phase 16 — 16F Independent Verification & Bounded Repair
-# Closeout Report — EXACT TEMPLATE（Reviewer Patch 1 后状态）
+# Closeout Report — EXACT TEMPLATE（Reviewer Patch 2 后状态）
 
 ```text
 STATUS                         = EXECUTED — 16F 独立验证 + 有界修复已实现并全量
-                                 测试通过；Reviewer Patch 1 修复 8 组 blocker：
-                                 (1) substantive gate——terminal claim/allowlist/
-                                 verifier_ref 全 PASS 但零 substantive
-                                 deterministic check（契约判据本地 PASS 或
-                                 required artifact 真实本地检查 PASS）→ 强制
-                                 INCONCLUSIVE/零 seal；(2) MIME 以有界内容识别
-                                 为真值（PNG/JPEG/PDF 魔数 + JSON/text 明确
-                                 有界规则）+ suffix 交叉核对 + 16F 封闭
-                                 artifact_type→MIME 规则 + binary 仅显式接受 +
-                                 unknown/unobservable fail-closed；(3) optional
-                                 artifact 只豁免"不存在"，存在即任何问题
-                                 required FAIL；(4) repair 在 attempt/approval/
-                                 collect/verify 副作用边界前后复核
-                                 cancellation/deadline/cost/contract hash，
-                                 越界后 VERIFIED report 不成为成功结果
-                                 （final_report=None），cost meter 严格类型/
-                                 finite/>=0/异常 fail-closed、启动前 >=limit
-                                 零 collect；(5) process 输出 DEVNULL 零聚合 +
-                                 超时 taskkill /T 可靠终止整棵进程树；(6)
-                                 全字符串面（含 HardBackendFailure/approval/
-                                 cost/collector 诊断、failure signature 前置
-                                 载荷、evidence 路径记录面）脱敏，秘密形态
-                                 身份/路径 fail-closed 拒绝；(7) 单句柄稳定
-                                 快照 + 前后 fstat/stat 一致性证明，验证期间
-                                 变异 → artifact_mutated_during_verification
-                                 FAIL，criterion-only 文件同受 8 MiB 上限；
-                                 (8) canonical identity 显式 lexical contract
-                                 （控制字符/首尾空白/静默 trim/秘密形态全部
-                                 拒绝，绝不 normalize 后重新绑定）；backend
-                                 completed/exit 0/成功文本/自报 verified 一律
-                                 不是证明；不写 C7/C6/C3、不实现 16G/16H、
-                                 不修改 C1–C7/schema/migration、16A/16B/16C/
-                                 16D/16E frozen contracts 零改动（git diff 仅
-                                 16F 自有 5 源文件 + 1 测试文件 + 本 closeout）；
+                                 测试通过；Reviewer Patch 1 修复 8 组 blocker
+                                 （substantive gate/内容 MIME/artifact_type/
+                                 optional 语义/边界复核/进程输出有界/秘密边界/
+                                 稳定快照/canonical identity）；Reviewer
+                                 Patch 2 在**洁净重放分支**上修复 7 组 blocker：
+                                 (B1) 内容真实性完整化——MIME 与有效性判定基于
+                                 同一稳定完整有界快照（JSON 完整严格解析/PDF
+                                 偏移 0 + 封闭结构/PNG·JPEG Pillow 结构验证/
+                                 text 完整严格解码/空·畸形·截断·不可读 required
+                                 FAIL）；(B2) artifact_type 策略 API 层不可变
+                                 （MappingProxyType + tuple，修改/删除/追加
+                                 全部失败且不影响验证事实）；(B3) 句柄锚定
+                                 containment——先受约束取得句柄，再依据该句柄
+                                 的 OS 级真实目标（GetFinalPathNameByHandle /
+                                 /proc/self/fd / F_GETPATH）证明归属，读取只来自
+                                 已证明句柄/同一不可变快照，symlink/junction
+                                 交换（declared 与 criterion-only 双路径）不能
+                                 逃逸；(B4) RepairLoop 只接受**当前验证器**的
+                                 真实报告——seal 真实性 + contract_id/run_id/
+                                 contract_hash/standard_hash 精确一致，外来
+                                 签发/陈旧 run/异契约报告 → REPORT_REJECTED/
+                                 final_report=None；(B5) 全部外部回调
+                                 （run_id_factory/approval/collect/verifier/
+                                 cost meter）之后用**新鲜状态**复核边界——
+                                 factory 期间取消/超时/成本耗尽阻止 collect，
+                                 cost 回调推进时钟后重新读取当前时间，越界
+                                 VERIFIED 丢弃；(B6) run_id_factory 输出直接
+                                 经公开 canonical validate_identity（非 str
+                                 拒绝、绝不 str() 强转），秘密形态覆盖
+                                 `_`/`.`/`-`/`:` 分隔前缀，异常回显一律脱敏；
+                                 (B7) 任意调用方 regex 在可强制终止的隔离
+                                 worker 中执行（硬超时 + 零输出聚合），Windows
+                                 进程树改用 Job Object 硬约束（KILL_ON_JOB_
+                                 CLOSE + CREATE_SUSPENDED 挂起态收编 + 拒绝
+                                 breakaway，正常退出/超时/异常路径全部终止仍
+                                 受管辖后代），POSIX 无等价保证 → process
+                                 判据 fail-closed 拒绝评估；backend completed/
+                                 exit 0/成功文本/自报 verified 一律不是证明；
+                                 不写 C7/C6/C3、不实现 16G/16H、不修改
+                                 C1–C7/schema/migration、16A/16B/16C/16D/16E
+                                 frozen contracts 零改动（git diff 仅 16F 自有
+                                 5 源文件 + 1 测试文件 + 本 closeout）；
                                  不合并 integration、不开始 16H、不声明
                                  16F_PASS；停在 READY_FOR_REVIEW
-BASE_SHA                       = d7a35c4e1d61954f77b288bd7e9c64955d260bcc
-                                 （16F 首次交付 commit；Reviewer Patch 1 自该
-                                 基线出发，git rev-parse HEAD 核验一致）
-FINAL_SHA                      = 见外部 handoff（closeout 不包含自身 commit SHA，
-                                 沿用 16A–16E 惯例）
-BRANCH                         = feature/phase16-16f-independent-verification
-LOCAL_REMOTE_MATCH             = push 后核验，结论记录于外部 handoff
-
-VERIFIER_MODULE                = furina/agent/verification/verifier.py
-                                 （IndependentVerifier——绑定单个不可变
-                                 WorkContract；verify(exact-schema 提交) 是
-                                 VERIFIED 唯一授权入口；substantive gate/
-                                 内容 MIME/artifact_type 封闭规则/optional
-                                 语义/稳定快照观察/身份 lexical contract）
-EVIDENCE_MODEL_MODULE          = furina/agent/verification/models.py
-                                 （EvidenceBundle/ArtifactObservation/
-                                 TerminalObservation/VerificationCheck/
-                                 VerificationReport/VerificationVerdict +
-                                 精确 schema 键集/有界常量/有界内容识别
-                                 sniff_content_mime/declared_mime_consistent/
-                                 ARTIFACT_TYPE_CONTENT_RULES/validate_identity；
-                                 checks.py 为 5 种 16A 判据的确定性检查器 +
-                                 observe_file 稳定快照 + run_process_bounded；
-                                 repair.py 为 BoundedRepairLoop）
-DETERMINISTIC_CHECKS_FIRST     = true（16A VERIFICATION_CRITERION_KINDS 白名单
-                                 五判据全部本地确定性执行：文件存在/realpath
-                                 归属/SHA-256/有界文本窗口/正则/进程退出码
-                                 本地重跑；无任何 LLM 组件，无 summary/proposal
-                                 通道——deterministic-only 是本实现的显式选择）
-SUBSTANTIVE_CHECK_REQUIRED     = true（Reviewer Patch 1 blocker 1：verifier_ref
-                                 只表示"选择/支持哪个 verifier"，terminal
-                                 claim/allowlist/verifier_ref 全 PASS 不构成
-                                 成功证据——无至少一项 substantive
-                                 deterministic check PASS（契约判据本地 PASS
-                                 或 required artifact 真实本地检查 PASS）→
-                                 强制 INCONCLUSIVE/零 seal；否证：criteria=()
-                                 + artifact_expectations=() + verifier_refs=
-                                 (VERIFIER_ID,) + backend.completed →
-                                 INCONCLUSIVE/seal=""）
-BACKEND_SELF_REPORT_TRUSTED    = false（证据提交 exact-schema 中不存在
-                                 verified/exit_code/status/final_text/success
-                                 等自报字段——未知键 VerificationInputError
-                                 fail-closed；终态事件仅是绑定"验证哪次 run"
-                                 的 claim，不构成证明；测试 §7.2/§7.6 源级+
-                                 行为双锁定）
-ARTIFACTS_HASHED_BOUNDED       = true（verifier 本地流式 SHA-256，>8 MiB
-                                 oversize 拒绝绝不哈希；MIME 以有界内容识别为
-                                 真值（magic/JSON/text 明确有界规则），扩展名
-                                 只是命名层交叉核对，unknown suffix/命名与内容
-                                 矛盾 fail-closed；artifact_type 经 16F 封闭
-                                 ARTIFACT_TYPE_CONTENT_RULES 进入验证策略，
-                                 binary/octet-stream 内容仅显式接受；终态事件
-                                 ≤64、声明产物 ≤32、检查 ≤128、诊断 ≤32、解释
-                                 ≤512 字符、报告 JSON ≤64 KiB。秘密边界准确
-                                 表述：**raw secret text 不进入报告、诊断与
-                                 身份载荷**——秘密形态（password/token/api_key/
-                                 authorization/bearer 等）在进入报告/检查文本/
-                                 诊断/failure signature 前置载荷前 [REDACTED]
-                                 或直接 fail-closed 拒绝（身份/路径带秘密形态
-                                 → VerificationInputError，绝不清洗后继续）；
-                                 artifact 内容按判据要求正常哈希——"artifact
-                                 内容从未被 hash"不是本实现的声明）
-CONTENT_MIME_CHECKED           = true（PNG/JPEG/PDF 魔数；JSON 首非空白字符
-                                 ∈{,[；text=无 NUL+严格 UTF-8；其余
-                                 application/octet-stream 仅显式接受；声明
-                                 MIME 与内容 exact 一致 + 文本族窄例外——
-                                 文本 bytes+.png+声明 image/png → FAIL；
-                                 PNG bytes+.jpg+声明 image/jpeg → FAIL）
-ARTIFACT_TYPE_ENFORCED         = true（16F 显式封闭 artifact_type→内容 MIME
-                                 允许集；未知 artifact_type → required FAIL
-                                 unknown_artifact_type，绝不静默通过；
-                                 artifact_type=png_image + 非 PNG 内容 → FAIL）
-OPTIONAL_ESCAPE_BLOCKED        = true（optional artifact 只豁免"真正不存在"；
-                                 一旦存在，path escape/symlink·junction 逃逸/
-                                 oversize/unsupported MIME/non-regular/声明
-                                 hash·size·MIME 矛盾任一发生都是 required
-                                 FAIL，最终不得 VERIFIED）
-PROCESS_OUTPUT_BOUNDED         = true（stdout/stderr/stdin 一律 DEVNULL——输出
-                                 内容零读取/零聚合/零存储，禁止 PIPE+
-                                 communicate 无界聚合；exit code 判定不变；
-                                 超时后 taskkill /F /T（Windows）或进程组
-                                 （POSIX）可靠终止整棵进程树；输出内容绝不
-                                 进入 report/诊断——测试以拼接构造输出 marker
-                                 锁定）
-STABLE_ARTIFACT_SNAPSHOT       = true（同一次 verify 内 size/hash/MIME 判据
-                                 来自同一打开句柄的单次有界读取；句柄前后
-                                 fstat 一致且 close 后 stat(path) 一致——
-                                 验证期间替换/截断/增长/inode 变化 →
-                                 artifact_mutated_during_verification → FAIL
-                                 绝不 VERIFIED；criterion-only 文件同样受
-                                 MAX_ARTIFACT_BYTES 硬上限——大文件不能靠
-                                 前 1 MiB 命中 needle 而 PASS）
-IDENTITY_NORMALIZATION_USED    = false（canonical identity 显式 lexical
-                                 contract：^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$
-                                 + 秘密形态 scrub 差异检测——控制字符/首尾
-                                 空白/静默 trim/非法字符/秘密形态一律
-                                 VerificationInputError；身份比较一律 exact，
-                                 无 trim/case-fold/normalize 后重新绑定）
-INCONCLUSIVE_CAN_VERIFY        = false（INCONCLUSIVE 永不映射 VERIFIED——无
-                                 绑定终态 claim/歧义终态/未授权 backend/未
-                                 支持 verifier_ref/检查不可执行/**零
-                                 substantive check** 一律 NOT_EVALUABLE →
-                                 INCONCLUSIVE 且零 seal；repair 亦绝不升级其
-                                 verdict）
-POST_ATTEMPT_BUDGET_RECHECK    = true（accept VERIFIED 前再次复核
-                                 cancellation/deadline/cost/contract hash——
-                                 attempt 完成后 used>limit → BUDGET_EXHAUSTED、
-                                 完成时间>deadline → TIMEOUT、attempt 中
-                                 cancellation → CANCELLED、hash 漂移 →
-                                 CONTRACT_MUTATED；越界后的 VERIFIED report
-                                 不得成为成功结果（final_report=None）；
-                                 cost_used 严格数值类型（bool/str 拒绝）/
-                                 finite/>=0，meter 异常/NaN/Inf/负数 fail-
-                                 closed；启动前 used>=limit → 零 collect；
-                                 FakeClock/计量器否证锁定零误判）
-MID_ATTEMPT_CANCELLATION_BLOCKED = true（collect/verify 期间翻转取消标志 →
-                                 CANCELLED，VERIFIED report 不作为成功结果）
-REPAIR_MAX_ATTEMPTS            = contract.budget.max_attempts（16A 硬界 [1,99]；
-                                 每次尝试新 attempt_id/run_id 绑定同一
-                                 content_hash；重复相同 failure signature 于
-                                 第 2 次出现即断路，不烧剩余 attempts）
-REPAIR_TIME_COST_BOUNDED       = true（deadline = 进入循环时刻 +
-                                 budget.max_duration_seconds；deadline 前不
-                                 启动任何新 attempt——精确停止；cost_used
-                                 注入计量器严格校验后超 budget.cost_limit.amount
-                                 即停；cancellation 在每次预检最先判定，取消后
-                                 零新 attempt；hard failure/approval deny·
-                                 timeout·pending·未知值 立停）
-CONTRACT_MUTATED_DURING_REPAIR = false（frozen 16A 契约 + 边界复核
-                                 content_hash 逐 attempt 校验；repair
-                                 结构上无改约通道：collect_evidence 只收
-                                 (attempt_id, run_id)，verifier 绑定构造期
-                                 契约；不扩大 workspace/capabilities/backends/
-                                 permission/预算）
-VERIFIER_WRITES_C7_C6_C3       = false（verification 包零 cognition/事件
-                                 总线/sqlite/持久化 import——源级扫描 + 运行时
-                                 monkeypatch spy 双否证；工作域状态机晋级
-                                 VERIFIED 的消费方属 16G）
-
-PRODUCTION_FILES_CHANGED       = furina/agent/verification/__init__.py,
-                                 furina/agent/verification/models.py,
-                                 furina/agent/verification/checks.py,
-                                 furina/agent/verification/verifier.py,
-                                 furina/agent/verification/repair.py
-                                 （Reviewer Patch 1 仅改 16F 自有五源文件；
-                                 既有其它生产文件零改动）
-TEST_FILES_CHANGED             = tests/agent/integration/
+PATCH2_BASE_SHA                 = 1f988fa（= PATCH1_REPLAY_SHA；Patch 2 唯一
+                                 BASE_SHA，洁净分支 tip）
+PATCH1_REPLAY_SHA               = 1f988fa（d7a35c4 上的洁净重放提交；
+                                 git diff d7a35c4..1f988fa 与
+                                 a1586f7..544d1d1 字节级完全一致——
+                                 PATCH1_DIFF_REPLAY_EXACT）
+FINAL_SHA                       = 见外部 handoff（closeout 不包含自身 commit
+                                 SHA，沿用 16A–16E 与 Patch 1 惯例；最终提交
+                                 SHA 记录于 commit message 与本回执交付说明）
+BRANCH                          = feature/phase16-16f-independent-verification-
+                                 patch2-clean（自 d7a35c4 新建；仅含 16F 洁净
+                                 重放 1f988fa + Patch 2 自有提交）
+CHANGED_FILES                   = furina/agent/verification/__init__.py,
+                                 models.py, checks.py, verifier.py, repair.py
+                                 + tests/agent/integration/
                                  test_phase16f_independent_verification.py
-                                 （保留原 70 项 + Reviewer Patch 1 新增 39 项
-                                 reviewer-locked 否证/正例）
-TARGETED_TESTS                 = 109 passed（16F 专项；70 原有 + 39 新增）
-VERIFICATION_REGRESSION        = 516 passed（tests/agent 全目录：16A/16B/
-                                 16C/16D/16E + agent C7 integration + 14.x/
-                                 15.x 回归）
-COGNITION_SUITE                = 279 passed（tests/cognition 全目录一次）
-FULL_SUITE                     = 1798 passed / 0 failed（仅一次；= 16F 首交付
-                                 1759 + Reviewer Patch 1 新增 39）
-REMAINING_GAPS                 = 见下方"剩余缺口"节（不阻塞 READY_FOR_REVIEW）
-READY_FOR_REVIEW               = YES
+                                 + 本 closeout（Patch 2 无新增私有测试辅助
+                                 文件——P2 全部测试内联于既有测试文件）
+CLEAN_ANCESTRY                  = true（d7a35c4 → 1f988fa → Patch 2 提交；
+                                 不含 a1586f7 及任何 NIGHT-03 文件）
+POLLUTING_ASSET_SHA_PRESENT     = false（d7a35c4..FINAL_SHA 无
+                                 data/assets_v2/ 文件——git diff --name-only
+                                 核验）
+PATCH1_DIFF_REPLAY_EXACT        = true（git diff d7a35c4 1f988fa 与
+                                 git diff a1586f7 544d1d1 逐字节一致：
+                                 diff -q 输出 PATCH_DIFF_EXACT_MATCH）
+FULL_CONTENT_VALIDATION         = true（full_content_verdict：MIME 识别与
+                                 artifact 有效性基于同一稳定完整有界快照——
+                                 JSON 完整严格 UTF-8 + 完整 json.loads、PDF
+                                 偏移 0 + 版本 + 尾部 %%EOF 封闭结构、PNG/
+                                 JPEG Pillow verify+load、text 完整无 NUL +
+                                 严格解码；绝不只检查文件头/前 1 KiB 后默认
+                                 剩余可信）
+EMPTY_UNREADABLE_FAIL_CLOSED    = true（空/不可读/畸形/截断/oversize/mutated/
+                                 逃逸/句柄目标不可证明 → required FAIL；
+                                 unreadable 绝不跳过 MIME/hash/size 后放行）
+OPTIONAL_PRESENT_FAIL_CLOSED    = true（optional 只豁免"不存在"；一旦存在，
+                                 empty/unreadable/malformed/逃逸/oversize/
+                                 声明矛盾全部 required FAIL）
+ARTIFACT_POLICY_IMMUTABLE       = true（ARTIFACT_TYPE_CONTENT_RULES 为
+                                 MappingProxyType，键/值/嵌套全部不可原地修改
+                                 ——append/pop/setdefault/clear/赋值/删除均抛
+                                 异常且不影响后续验证事实）
+HANDLE_ANCHORED_CONTAINMENT     = true（open_contained：先受约束取得句柄，
+                                 再依该句柄 OS 级真实目标证明归属；hash/size/
+                                 MIME/文本/判据读取全部来自同一已证明句柄或
+                                 同一不可变快照；平台无法证明句柄目标 →
+                                 handle_target_unprovable 拒绝检查；验证期间
+                                 路径替换/inode 变化/截断/增长 → mutated；
+                                 pre-open realpath 仅作 missing/逃逸预筛，
+                                 绝不作为安全判断依据）
+CURRENT_VERIFIER_SEAL_REQUIRED  = true（RepairLoop 接受 VERIFIED 前必须
+                                 self._verifier.seal_is_authentic(report)
+                                 True——foreign-signer 子类/代理签发的有效
+                                 格式报告一律 REPORT_REJECTED）
+REPORT_IDENTITY_BOUND           = true（接受前复核 report.contract_id ==
+                                 当前契约、report.run_id == 本次 attempt
+                                 分配的 run_id、contract_hash/standard_hash
+                                 与当前 verifier/契约预期精确一致——旧 attempt
+                                 报告/异契约报告被精确身份拒绝，绝不修补或
+                                 重新签署）
+POST_CALLBACK_BUDGET_RECHECK    = true（run_id_factory 之后、approval 之后、
+                                 collect/verify 之后、接受 VERIFIED 前全部
+                                 重新读取 cancellation/contract hash/cost/
+                                 当前时间——cost meter 回调推进时钟后再次
+                                 读取**新鲜当前时间**，绝不缓存回调前旧时间；
+                                 factory 期间取消/超时/成本耗尽/契约变异阻止
+                                 collect）
+FACTORY_IDENTITY_VALIDATED      = true（run_id_factory 输出直接经公开统一
+                                 validate_identity——非字符串拒绝（绝不
+                                 str() 强转）、词法 contract + 秘密形态拒绝；
+                                 attempt_id 同走同一 canonical contract）
+EMBEDDED_SECRET_BLOCKED         = true（秘密形态检测覆盖字符串内部及
+                                 `_`/`.`/`-`/`:` 合法身份分隔位置：
+                                 token:supersecret / run_password:hunter2 /
+                                 x.api_key=abc / prefix-client_secret:value /
+                                 authorization:BearerValue 全部拒绝；
+                                 scrubber 与 identity rejector 共享同一秘密
+                                 边界，异常回显先脱敏限长——raw secret 不
+                                 进入异常）
+RAW_SECRET_STORED_OR_EXPORTED   = false（原始秘密不进入 AttemptRecord/report/
+                                 诊断/异常/failure signature/closeout）
+REGEX_EXECUTION_BOUNDED         = true（任意调用方 pattern 绝不在主验证线程
+                                 执行回溯——可强制终止的隔离 worker 子进程 +
+                                 硬超时 + 输入上限 + 零输出聚合（stdout/
+                                 stderr DEVNULL，唯一通道 exit code）；
+                                 timeout/invalid/worker error → NOT_EVALUABLE
+                                 → 最终绝不 VERIFIED；灾难性回溯否证锁定）
+PROCESS_TREE_HARD_CONTAINED     = true（Windows：Job Object 硬约束——KILL_ON_
+                                 JOB_CLOSE + CREATE_SUSPENDED 挂起态收编 +
+                                 拒绝 breakaway，子进程从启动起即受约束；
+                                 正常退出/超时/异常路径关闭句柄即终止一切仍
+                                 受管辖后代（含 detached/新会话/新进程组），
+                                 timeout 另 TerminateJobObject；P2-T detached
+                                 后代否证 + 有界轮询零存活）
+UNSUPPORTED_PROCESS_MODE_FAILS_CLOSED = true（POSIX 无 unprivileged 树级
+                                 containment 证明 → process_exit_zero 判据
+                                 NOT_EVALUABLE process_containment_unavailable
+                                 → INCONCLUSIVE，绝不 best-effort 后 PASS；
+                                 run_process_bounded 保留有界低层执行供直接
+                                 调用，但 checker 拒绝评估）
+TARGETED                        = 136 passed（16F 专项：原 109 + Patch 2
+                                 新增 27 项 reviewer-locked）
+RELATED_TESTS_AGENT             = 543 passed（tests/agent 全目录一次）
+COGNITION                       = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                      = 1825 passed / 0 failed / 15 warnings（仅
+                                 一次；= Patch 1 基线 1798 + Patch 2 新增
+                                 27；15 warnings 全部来自非 16F 既有套件——
+                                 16F 包零外部导入方，16F targeted 运行零
+                                 warnings）
+C1_C7_UNCHANGED                 = true（零写入/零 schema 依赖/零持久化；
+                                 git diff 仅 16F 自有文件）
+GIT_DIFF_CHECK                  = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
+READY_FOR_REVIEW                = YES
 ```
 
-## 0. Reviewer Patch 1 — 8 组 blocker 修复摘要
+## 0. Reviewer Patch 2 — 洁净重放与 7 组 blocker 修复摘要
 
-1. **substantive verification gate**：`verify()` 在聚合前强制要求至少一项
-   substantive deterministic check PASS——来源封闭为 ① WorkContract 判据
-   （`criterion:*`）本地确定性 PASS；② required artifact（契约期望
-   `required=True`）的真实本地检查 PASS。verifier_ref/terminal claim/backend
-   allowlist 属资格检查，绝不计为成功证据；declared-only artifact 核对全 PASS
-   也不构成 substantive（backend 可任意声明，不是契约锚点）。缺失时追加
-   `evidence:substantive_check` NOT_EVALUABLE 检查 → INCONCLUSIVE、零 seal。
-   否证：空 criteria + 空期望 + 合法 verifier_ref + bound backend.completed →
-   INCONCLUSIVE；declared artifact hash 全核对 PASS 亦 INCONCLUSIVE。
-2. **MIME/content/artifact_type**：`observed_mime` 来自 `sniff_content_mime`
-   有界内容识别（PNG/JPEG/PDF 魔数；JSON=BOM/空白后首字符 ∈ `{[`；text=窗口
-   无 NUL 且严格 UTF-8；其余 octet-stream）；`mime_for_suffix` 未知后缀返回
-   `""`（后缀不再是 MIME）。三通道强制：命名通道（未知后缀 → FAIL；命名与
-   内容不一致 → suffix_mime_mismatch）、声明通道（exact 一致 + 文本族窄例外，
-   同族冒充 image/jpeg≠image/png 被精确相等拦截）、类型通道
-   （`ARTIFACT_TYPE_CONTENT_RULES` 封闭表，未知类型 required FAIL，内容 MIME
-   必须命中允许集）。binary/octets-tream 内容仅 `binary_blob` 类型或显式
-   `declared_mime=application/octet-stream` 接受。全部 unknown/unobservable
-   fail-closed。
-3. **optional artifact 语义**：optional 只豁免"真正不存在"（返回空检查集）；
-   一旦存在，containment/present/size/mime/hash/type/命名通道全部按
-   required=True 产出——escape/symlink·junction 逃逸（16A 契约层禁止期望路径
-   逃逸，逃逸只能经运行期链接发生）/oversize/unsupported MIME/non-regular/
-   声明矛盾任一 → required FAIL → 不得 VERIFIED。present-optional 的检查
-   同时**不计入 substantive**（防"空契约 + 摸一下 optional 文件"绕门）。
-4. **repair 边界复核**：`_boundary_violation(pre=...)` 在每次 attempt 副作用
-   边界前（cancellation 最先、contract hash、cost `>=limit` 零 collect、
-   `now>=deadline`）、approval 回调之后、以及**接受 VERIFIED 前**（完成后
-   `used>limit` → BUDGET_EXHAUSTED、`finished>deadline` → TIMEOUT、attempt 中
-   cancellation → CANCELLED、hash 漂移 → CONTRACT_MUTATED）复核；越界后的
-   VERIFIED report 不得成为成功结果（`final_report=None`，stop reason 如实）。
-   cost meter 严格校验：严格数值类型（bool/str 拒绝）、finite、`>=0`、异常 →
-   视同 +inf → BUDGET_EXHAUSTED，零误判（FakeClock/计量器否证锁定）。
-5. **process output 真正有界**：`run_process_bounded` 一律 DEVNULL（stdin/
-   stdout/stderr）——零读取/零聚合/零存储，exit code 判定保持正确；超时路径
-   **先** `taskkill /F /T /PID`（Windows，树完整时枚举——先 kill 会断根导致
-   孙进程存活）或 POSIX 进程组 SIGKILL，再 kill 兜底 + 有界 wait。输出内容
-   绝不进入 report/诊断（测试用拼接构造 marker 锁定）。
-6. **secret boundary**：全部字符串面统一脱敏——`VerificationCheck` 解释/输入
-   （既有）、`ArtifactObservation` claimed/resolved 路径记录面（新增）、
-   `EvidenceBundle` 诊断（新增）、`AttemptRecord`/`RepairOutcome` 诊断
-   （__post_init__ 脱敏限长）、HardBackendFailure/approval/cost/collector
-   diagnostic（新增）、failure signature 前置载荷（新增）。秘密形态身份字段
-   与 artifact 路径（含契约期望路径，构造期拒绝）一律 `VerificationInputError`
-   /`VerificationError` fail-closed——两个不同秘密值清洗成同一身份的歧义路径
-   被结构排除，绝不清洗后继续 VERIFIED。closeout 措辞修正：**raw secret text
-   不进入报告、诊断与身份载荷**（evidence digest payload/failure signature
-   前置载荷均脱敏或拒绝）；artifact 内容按判据要求正常哈希。
-7. **stable artifact snapshot**：`observe_file` 单句柄有界观察——size/hash/
-   head（MIME 识别窗口）来自同一次打开；句柄前后 `fstat` 一致且 close 后
-   `stat(path)` 一致（dev/ino/size/mtime_ns）；任一漂移 → rejection="mutated"
-   → required FAIL `artifact_mutated_during_verification`，绝不 VERIFIED。
-   `read_text_window` 同样快照化且先按 `MAX_ARTIFACT_BYTES` 硬上限拒绝——
-   criterion-only 文件不允许大文件靠前 1 MiB 窗口命中 needle 而 PASS。
-8. **canonical identity**：`validate_identity` 显式 lexical contract
-   （`^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$` + 秘密形态 scrub 差异检测）作用于
-   run_id/backend_id/event_id/contract_id/artifact_id（含 terminal claim 内
-   四元身份与 declared artifact_id）；静默 trim 全部移除（` run_x ` /
-   ` backend ` / 控制字符 / `password:hunter2` / `api_key:sk-…` →
-   VerificationInputError，零报告零 seal）；身份比较一律 exact，不 normalize
-   后重新绑定。
+### 0.0 洁净祖先链
+
+- `a1586f7`（NIGHT-03 资产提交）在 `544d1d1` 的祖先链上，即使与 16F 源码零
+  重叠也不得随 16F 进入 integration → 从 `ORIGINAL_16F_BASE_SHA=d7a35c4`
+  新建 `feature/phase16-16f-independent-verification-patch2-clean`，仅重放
+  `544d1d1` 自身的提交差异（cherry-pick），得到 `PATCH1_REPLAY_SHA=1f988fa`；
+  `git diff d7a35c4..1f988fa` 与 `git diff a1586f7..544d1d1` **字节级一致**
+  （`diff -q` 判定 PATCH_DIFF_EXACT_MATCH），且 `d7a35c4..FINAL_SHA` 无任何
+  `data/assets_v2/` 文件。Patch 2 全部改动以 `1f988fa` 为唯一 BASE_SHA。
+
+### B1 — 内容真实性完整、确定且 fail-closed
+
+- **完整内容验证器 `full_content_verdict(full)`**（models.py）：MIME 识别与
+  artifact 有效性判定基于**同一稳定、完整、有界快照**（≤ MAX_ARTIFACT_BYTES
+  的全部字节，单句柄读取，句柄前后 fstat + close 前 stat 一致性证明）：
+  - JSON：BOM 容忍 + **完整**严格 UTF-8 解码 + **完整** `json.loads`——
+    前导 `{`/`[` 正确但语法错误、截断、尾随垃圾全部 `malformed_content:
+    json_*`（P2-A 否证）；
+  - PDF：`%PDF-` 必须位于**偏移 0** 的合法起始位置（任意窗口出现 marker 不
+    构成 PDF）+ 封闭受支持结构（版本号 `%PDF-\d+\.\d+` + 尾部 1 KiB 内
+    `%%EOF`）——前导垃圾后嵌 marker 判为 text/plain → 命名/类型/声明通道
+    矛盾 FAIL（P2-B）；截断缺 `%%EOF` → `malformed_content:pdf_structure`
+    （P2-F）；
+  - PNG/JPEG：魔数偏移 0 + **Pillow 确定性结构验证**（`verify()` + 重新
+    打开 `load()`——截断 PNG 被 verify 捕获、截断 JPEG 被 load 捕获；
+    异常/缺少 decoder/无法确认一律 `malformed_content:image_*` fail-closed，
+    绝不接受截断/畸形文件（P2-F）；
+  - text：**完整**内容无 NUL 且严格 UTF-8 可解码——前 1 KiB 文本后接
+    NUL/二进制尾 → octet-stream → 命名/声明矛盾 FAIL（P2-C），前缀绝不掩盖
+    尾部；
+  - 空内容 → `("", "empty_artifact")`——空文件绝不是有效 artifact（含
+    binary_blob，P2-D）。
+- **required/unreadable/empty 分支**：`_expectation_checks`/`_declared_checks`
+  中 `unreadable`/`handle_target_unprovable` → required FAIL `artifact_
+  unreadable`/`handle_target_unprovable`（绝不跳过 MIME/hash/size 后让剩余
+  检查通过，P2-E）；`empty_artifact` → required FAIL `artifact_empty`
+  （P2-D）；`content_rejection`（malformed）→ required FAIL（P2-A/P2-F）。
+- **optional 只豁免"不存在"**：存在即执行与 required 相同的完整检查
+  （P2-H：malformed/unreadable → required FAIL；真正不存在仍 VERIFIED）。
+- **criterion-only 文件**：同受 MAX_ARTIFACT_BYTES 硬上限 + 同一句柄快照 +
+  可读性规则；不可读 → NOT_EVALUABLE、NUL/非法 UTF-8 窗口 → `content_not_
+  text` FAIL（绝不靠窗口命中 PASS）。
+- 六类合法内容（JSON/text/markdown/PDF/PNG/JPEG）正例 VERIFIED（P2-G +
+  Patch 1 正例，夹具升级为结构合法字节：Pillow 生成的 1×1 PNG/JPEG +
+  含 `%%EOF` 的最小 PDF）。
+
+### B2 — artifact type 策略不可变
+
+- `ARTIFACT_TYPE_CONTENT_RULES` 由可变 dict 改为 **MappingProxyType**（键不
+  可增删改），值为 **tuple**（嵌套不可原地修改），类型标注 `Mapping[str,
+  Tuple[str, ...]]`；验证器只读引用，进程内不存在可放宽策略的可变引用。
+- P2-I：append/pop/setdefault/clear/赋值/删除全部抛异常，且修改尝试后验证
+  事实不变（json_data 仍只收 JSON、未知类型仍 fail-closed）；P2-J：未知/
+  变体 artifact_type（含大小写/空格变体）始终 required FAIL。
+
+### B3 — 文件 containment 绑定已打开句柄
+
+- 安全判断绝不只依赖 open 前的 `realpath`：`open_contained(path, contains,
+  writable)` 先以只读方式取得句柄，再依据**该句柄**的 OS 级真实目标
+  （Windows `GetFinalPathNameByHandleW` / Linux `/proc/self/fd/<fd>` /
+  macOS `fcntl(F_GETPATH)`）证明其位于 workspace root 内；证明失败 →
+  `handle_target_unprovable` 拒绝检查，绝不退回"先解析路径、后按路径打开"
+  的不安全模式。
+- `snapshot_file_contained`：hash/size/完整内容 MIME/文本窗口全部来自同一
+  已证明句柄的同一不可变快照（≤ 8 MiB 完整读入内存后哈希+验证，有界）；
+  句柄前后 fstat 一致且 close 前 stat(句柄派生最终路径) 一致——验证期间
+  路径替换/inode 变化/截断/增长 → `mutated` → FAIL。
+- 预筛 realpath 仅用于 missing/最近现存祖先逃逸分类（目标不存在时句柄无法
+  打开），**不是**安全判断依据。
+- P2-M（declared/expectation 路径）/P2-N（criterion-only 路径）用确定性
+  同步点（monkeypatch open 时把父目录替换为指向 workspace 外的 junction/
+  symlink——"containment 检查后、读取前替换"）否证：句柄目标证明拦截
+  path_escape，外部内容 hash 一致/needle 命中也绝不放行。
+
+### B4 — RepairLoop 只接受当前验证器的真实报告
+
+- 新增 `_accept_verified_report(report, run_id)` 完整接受条件：
+  ① `verdict == VERIFIED`；② `self._verifier.seal_is_authentic(report)`
+  True（**当前实例密钥**——另一实例/子类代理签发的有效格式报告一律拒绝）；
+  ③ `report.contract_id` 与当前契约精确一致；④ `report.run_id` 与本 attempt
+  分配的 run_id 精确一致；⑤ `contract_hash`/`standard_hash` 与当前
+  verifier/契约预期精确一致。任一不满足 → 新停止原因 `REPORT_REJECTED`，
+  `final_report=None`，立即停止，绝不修补或重新签署外来报告；诊断有界
+  （≤256 字符原因串）且脱敏。
+- P2-K：foreign-signer 子类代理 → `seal_not_authentic_for_current_verifier`
+  → REPORT_REJECTED；P2-L：seal 真实但 run_id 属旧 attempt（本实例密钥
+  自签、run_id 不匹配）→ `run_id_mismatch` 拒绝；异契约验证器签发 →
+  `contract_id_mismatch`/`standard_hash_mismatch` 等全身份拒绝。
+
+### B5 — 所有外部回调后必须用当前状态复核边界
+
+- 边界复核读取次序改为 **hash → cost meter → cancellation → 当前时间**：
+  每个回调的副作用都被其后的读取捕获。`run_id_factory` 回调之后新增一次
+  复核（factory 期间取消/超时/成本耗尽/契约变异必须阻止 collect，零
+  collect 零 attempt——P2-Q 三种变体）；approval 回调之后复核（既有）；
+  collect/verify 之后、接受 VERIFIED 之前复核（既有位置）。
+- **post 边界使用回调全部结束后的新鲜时间**：`finished = max(attempt_
+  finished, self._now_fn())`——cost meter 自身推进时钟后必须再次读取当前
+  时间，绝不缓存 attempt 完成前的旧时间。任务书复现用例（attempt_finished
+  =10、cost 回调把时钟推至 20、deadline=15 → 仍 VERIFIED）已否证锁定：
+  P2-R → TIMEOUT、final_report=None、时钟 20.0。
+
+### B6 — 所有生成身份统一使用 canonical validator
+
+- `_allocate_ids`：`run_id_factory` 输出**直接**经公开统一 `validate_identity`
+  ——非字符串返回值拒绝（绝不 `str()` 强转）、词法 contract + 秘密形态拒绝、
+  拒绝先于存储（AttemptRecord 不可能携带原始秘密）；attempt_id 同走同一
+  contract。
+- `_SECRET_KV_RE` lookbehind 由 `(?<![a-z0-9_])` 收窄为 `(?<![a-z0-9])`——
+  **合法身份分隔符 `_`/`.`/`-`/`:` 前缀的秘密键**（`run_password:hunter2` /
+  `x.api_key=abc` / `prefix-client_secret:value` / `authorization:BearerValue`）
+  全部命中；scrubber 与 identity rejector 共享同一秘密边界。
+- `validate_identity` 异常消息**不再回显 raw value**（先脱敏限长）——原始
+  秘密不进入异常/诊断（P2-O/P2-P 断言 secret 不在异常文本中）。
+- §8.6 五类秘密形态（token:supersecret / run_password:hunter2 / x.api_key=abc
+  / prefix-client_secret:value / authorization:BearerValue）全部拒绝（P2-O）。
+
+### B7 — regex 与子进程的真实资源边界
+
+- **regex**：`regex_match_bounded` 把任意调用方 pattern 交给**可强制终止的
+  隔离 worker 子进程**（`python -c` + argv 传 pattern + stdin 传有界文本，
+  stdout/stderr 一律 DEVNULL——零输出聚合，唯一通道是 exit code
+  0=match/1=no-match/2=invalid/3=error）；硬超时（`communicate(timeout)` +
+  超时终止进程树）；pattern 超长（>2048）→ NOT_EVALUABLE。主验证线程零
+  回溯。P2-S：经典灾难性回溯 `(a+)+$` + 30k 近似输入 → worker 超时 →
+  `regex_timeout` NOT_EVALUABLE → INCONCLUSIVE/零 seal；同报告普通 pattern
+  仍 PASS（不是全面禁用）；测试自身硬耗时断言（<60s）。
+- **进程树**：Windows 用 **Job Object** 提供 OS 级、"从启动起"的树级硬约束
+  ——`CREATE_SUSPENDED` 创建子进程 → 挂起态 `AssignProcessToJobObject` 收编
+  （`KILL_ON_JOB_CLOSE`，默认拒绝 breakaway）→ `NtResumeProcess`/逐线程
+  ResumeThread 恢复；超时 → `TerminateJobObject`；正常退出/异常路径 → 关闭
+  job 句柄即终止一切仍受管辖的后代（含 detached/新进程组/新会话）；job 创建
+  失败 → 拒绝启动（fail-closed）。P2-T：父进程尝试以 DETACHED_PROCESS |
+  CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB 启动孙进程（breakaway
+  失败则退化为 detached）后 exit 0 → 验证 VERIFIED 后**有界轮询证明零存活
+  后代**。
+- **POSIX**：killpg 无法约束自行 `setsid` 的后代且无 unprivileged 容器
+  保证 → `process_containment_guaranteed()` 返回 False，`process_exit_zero`
+  判据在该平台 **fail-closed 拒绝评估**（NOT_EVALUABLE
+  `process_containment_unavailable` → INCONCLUSIVE，绝不 best-effort 后
+  PASS）；`run_process_bounded` 保留为有界低层执行工具（进程组 best-effort
+  终止），但 checker 层不据此报告 PASS。P2-T POSIX 分支断言 fail-closed。
 
 ## 1. 权威模型（关键锁定 1/2/3）
 
@@ -286,92 +331,94 @@ READY_FOR_REVIEW               = YES
   全部 `VerificationInputError`。终态 claim 必须与提交的 run_id/contract_id/
   backend_id 四元绑定（未绑定 claim 不参与裁定，全部未绑定 → INCONCLUSIVE）。
 
-## 2. 证据与 containment（关键锁定 4/5/6/8）
+## 2. 证据与 containment（关键锁定 4/5/6/8 + Patch 2 B1/B3）
 
 - 输入解析后立即 defensive-copy 并冻结（`MappingProxyType` 树 + flat 严格
   类型化）；报告 frozen dataclass + tuple，`to_dict()`/`to_json()` 每次构造
   全新对象图——测试断言导出篡改不回流、两次导出零共享嵌套引用、输入原地
   篡改不影响既有报告且新评估如实反映新值。
-- **containment 先于存在性**：`os.path.realpath` 解析后做
-  `WorkspaceScope.contains_path`（产物按 write_roots，判据路径按
-  read∪write）；逃逸路径即使目标不存在也报 `path_escape`（绝不降级
-  missing）。symlink 与"最近现存祖先"两类逃逸在无特权 Windows 宿主经
-  junction（`_winapi.CreateJunction`）等价覆盖——realpath 对两者解析一致，
-  测试实证：链接内现存文件与"链接/subdir/new.md（不存在）"均被判
-  path_escape；optional 期望经运行期 junction 逃逸同样 required FAIL。
+- **句柄锚定 containment（Patch 2 B3）**：先受约束取得句柄，再依据该句柄的
+  OS 级真实目标证明其位于 workspace 内（Windows `GetFinalPathNameByHandleW` /
+  Linux `/proc/self/fd` / macOS `F_GETPATH`）；读取只来自已证明句柄或同一
+  不可变快照；句柄目标不可证明 → 拒绝检查（`handle_target_unprovable`）。
+  预筛 realpath 仅作 missing/最近现存祖先逃逸分类（逃逸路径即使目标不存在
+  也报 `path_escape`，绝不降级 missing；symlink/junction 双路 + 确定性交换
+  同步点否证锁定——Patch 1 的 junction 逃逸测试与 Patch 2 的 P2-M/P2-N
+  交换测试全部经句柄证明拦截）。
+- **完整内容验证（Patch 2 B1）**：`full_content_verdict` 基于同一完整有界
+  快照（见 §0 B1）；artifact 有效性不再依赖 1 KiB sniff 窗口——observed_mime
+  即完整内容识别真值，`content_rejection`（empty/malformed）进入 required
+  FAIL 通道。
 - 本地哈希流式执行、8 MiB 硬界（超界 oversize 拒绝且零哈希零内容存储）；
   文本判据 1 MiB 有界窗口且同受 8 MiB 文件硬上限；进程重跑有界超时（默认
   60s、上限 600s）且 stdout/stderr/stdin 全 DEVNULL——输出内容零读取、零
-  聚合、零存储（仅 exit code/超时事实），超时可靠终止整棵进程树。
-- **秘密边界**：raw secret text 不进入报告、诊断与身份载荷——检查解释/输入、
-  evidence 路径记录面、evidence 诊断、repair 诊断（HardBackendFailure/
-  approval/cost/collector）、failure signature 前置载荷一律 `[REDACTED]`；
-  秘密形态身份/路径 fail-closed 拒绝（脱敏顺序授权头先于键值对，测试锁定）。
-- **稳定快照**：产物观察与判据评估全部经 `observe_file`/`read_text_window`
-  单句柄快照，前后 fstat/stat 一致性证明；验证期间替换/截断/增长/inode
-  变化 → `artifact_mutated_during_verification` FAIL（否证测试以确定性
-  变异注入器锁定）。
+  聚合、零存储（仅 exit code/超时事实），Windows 超时/退出路径由 Job Object
+  硬约束终止整棵进程树（Patch 2 B7）。
+- **秘密边界**：raw secret text 不进入报告、诊断、身份载荷与**异常**——
+  检查解释/输入、evidence 路径记录面、evidence 诊断、repair 诊断
+  （HardBackendFailure/approval/cost/collector）、failure signature 前置载荷
+  一律 `[REDACTED]`；`validate_identity` 异常回显先脱敏限长；秘密形态身份/
+  路径 fail-closed 拒绝（`_`/`.`/`-`/`:` 分隔前缀全覆盖，脱敏顺序授权头先于
+  键值对，测试锁定）。
+- **稳定快照**：产物观察与判据评估全部经单句柄快照（`snapshot_file_contained`
+  / `_text_window_from_handle`），句柄前后 fstat + close 前 stat 一致性证明；
+  验证期间替换/截断/增长/inode 变化 → `artifact_mutated_during_verification`
+  FAIL（确定性变异注入器否证锁定）。
 
-## 3. 有界修复循环（关键锁定 9/10/11/12 + blocker 4）
+## 3. 有界修复循环（关键锁定 9/10/11/12 + blocker 4 + Patch 2 B4/B5/B6）
 
-- 每次尝试：新 `att_NN_<hex>` + 工厂产出唯一 run_id（重复/词法非法 →
-  `VerificationError`，绝不虚构 attempt）；失败后从 BACKEND_DONE_UNVERIFIED
-  语义重入——重新收集证据并**再次独立验证**，绝不修补 verdict。
-- **边界复核（blocker 4）**：cancellation/deadline/cost/contract hash 在
-  attempt 副作用边界前、approval 回调后、接受 VERIFIED 前全部复核；越界后
-  的 VERIFIED report 不得成为成功结果（final_report=None）。cost meter 严格
-  数值类型/finite/>=0/异常 fail-closed；启动前 `used>=limit` 零 collect。
+- 每次尝试：新 `att_NN_<hex>` + 工厂产出唯一 run_id（**直接经 canonical
+  validate_identity**：非 str/词法非法/秘密形态 → VerificationError，绝不
+  `str()` 强转、拒绝先于存储）；失败后从 BACKEND_DONE_UNVERIFIED 语义重入——
+  重新收集证据并**再次独立验证**，绝不修补 verdict。
+- **边界复核（blocker 4 + Patch 2 B5）**：hash→cost→cancel→时间 的读取次序
+  保证每个回调副作用被其后读取捕获；复核点覆盖 attempt 前、**run_id_factory
+  之后（新增）**、approval 回调后、collect/verify 后、接受 VERIFIED 前；
+  post 边界使用**回调全部结束后的新鲜当前时间**（cost meter 推进时钟后重新
+  读取，绝不缓存旧时间）；越界后的 VERIFIED report 不得成为成功结果
+  （final_report=None）。cost meter 严格数值类型/finite/>=0/异常 fail-closed；
+  启动前 `used>=limit` 零 collect。
+- **VERIFIED 接受门（Patch 2 B4）**：`_accept_verified_report`——当前验证器
+  seal 真实性 + contract_id/run_id/contract_hash/standard_hash 精确身份全部
+  通过才接受；foreign-signer/旧 attempt/异契约报告 → `REPORT_REJECTED` 立即
+  停止，final_report=None，绝不修补或重签。
 - failure signature = 失败/不可判检查（check_id+result+explanation，脱敏后）
   的 canonical SHA-256——不含时间戳/run_id，同因再失败可识别；第 2 次相同
   签名 → `REPEATED_FAILURE` 断路（携带最后一次报告，verdict 原样）。不同
   原因不误断（专项测试：3 次三异签名 → 恰好 3 attempts 耗尽）。
-- 停止条件全覆盖并精确停止：VERIFIED / `HARD_FAILURE`（collect 显式信号，
-  记录后立即停）/ `APPROVAL_DENIED`（deny/timeout/pending/未知/空一律
-  fail-closed，含首次尝试前 0 attempt）/ `CANCELLED`（含 attempt 中途出现）
-  / `TIMEOUT`（deadline 前不启动新 attempt；完成后越过 deadline → TIMEOUT）/
-  `BUDGET_EXHAUSTED`（启动前 `>=limit` 零 collect；完成后 `>limit` 即停）/
-  `ATTEMPTS_EXHAUSTED` / `REPEATED_FAILURE` / 守卫性 `CONTRACT_MUTATED`。
+- 停止条件全覆盖并精确停止：VERIFIED / `REPORT_REJECTED`（Patch 2 新增）/
+  `HARD_FAILURE` / `APPROVAL_DENIED` / `CANCELLED`（含 attempt 中途出现）/
+  `TIMEOUT` / `BUDGET_EXHAUSTED` / `ATTEMPTS_EXHAUSTED` / `REPEATED_FAILURE` /
+  守卫性 `CONTRACT_MUTATED`。
 - approval-gated 契约（approval_required_each_step / on_risk_level）构造期
   强制要求 approval_authority，缺失即拒绝构造（fail-closed）。
 
-## 4. 测试覆盖（tests/agent/integration/test_phase16f_…py，109 项）
+## 4. 测试覆盖（tests/agent/integration/test_phase16f_…py，136 项）
 
-- §7.1 有效确定性证据 VERIFIED + seal 可认证 + standard_hash 绑定验收标准；
-- §7.2 伪造 completed/exit-zero/self-report 字段（verified/final_text/
-  exit_code/status 未知键）一律拒绝；exit zero 由本地重跑裁定（同一命令
-  退出 0/3 → VERIFIED/FAILED）；伪造 VERIFIED 报告无法通过真实性复核；
-- §7.3 篡改（声明 hash 矛盾）/相对与绝对路径逃逸/symlink 逃逸/最近现存祖先
-  逃逸/oversize/未知 MIME/声明 MIME 矛盾/声明产物缺失/声明路径偏离期望路径
-  全部 FAILED 且 typed explanation；
-- §7.4 混合检查一败即 FAILED（通过的检查仍在报告中）；§7.5 四类 INCONCLUSIVE
-  （无终态/未绑定/歧义/非终态 kind）+ 未支持 verifier_ref + 未授权 backend +
-  非法正则 + cwd 缺失，全部零 seal、repair 不升级；
-- §7.6 schema 无自报字段源级断言 + verifier 强类型入口；
-- §7.7 新证据才可 VERIFIED（stale 证据断路）；§7.8 attempts/time/cost 恰好
-  停止（FakeClock：deadline 后零新 attempt、started_at 全部 < deadline）；
-- §7.9 重复同签名 2 次断路、异签名不误断、INCONCLUSIVE 不升级；
-- §7.10 取消/审批拒绝/超时/未知值/硬失败各停点 + approval-gated 契约无
-  authority 拒绝构造；§7.11 跨 attempt 契约 hash 不变 + frozen 不可变 +
-  verifier 契约绑定强制；§7.12 零 C7/C6/C3 写入（源级 9 token 扫描 +
-  monkeypatch spy：`CognitionHub.persist_agent_result`/`EventBus.emit`
-  运行时零调用）；
-- 否证补充（首交付）：exact-schema 全型（缺键/NaN/Inf/bool/相对路径/重复 id/
-  非法 kind/超量/非 Mapping）、defensive-copy 冻结、导出零共享引用、长输入
-  限界、脱敏顺序、超时判据、可选 artifact 缺席仍可 VERIFIED；
-- **Reviewer Patch 1 否证/正例（39 项）**：B1 空 criteria+空期望+合法 ref+
-  bound completed → INCONCLUSIVE/零 seal、declared-only 不 substantive；
-  B2 文本+.png+声明 image/png FAIL、PNG bytes+.jpg+声明 image/jpeg FAIL、
-  未知后缀 FAIL、artifact_type=png_image+非 PNG 内容 FAIL、未知 artifact_type
-  FAIL、binary 无显式接受 FAIL、binary+显式 octet-stream 正例、六类合法内容
-  正例（PNG/JPEG/PDF/JSON/text/markdown）VERIFIED；B3 optional
-  junction 逃逸/oversize/声明 hash 矛盾/unsupported MIME 全部 required FAIL；
-  B4 attempt 中 cancellation/完成后 cost 超限/完成后越 deadline 时 VERIFIED
-  report 不成为成功结果、meter bool/str/NaN/Inf/负数/异常 fail-closed、
-  启动前 ==limit 零 collect；B5 DEVNULL 源面锁定 + 8MB 输出零聚合 + 输出
-  marker 不入报告 + 超时进程树可靠终止（PowerShell CIM 轮询否证）；B6
-  HardBackendFailure/approval 诊断脱敏、秘密形态路径拒绝；B7 确定性变异注入
-  → artifact_mutated_during_verification FAIL、criterion-only 大文件
-  oversize；B8 首尾空白/控制字符/秘密形态身份 → VerificationInputError。
+- 原 109 项（§7.1–§7.12 + exact-schema/冻结/导出/身份 + Patch 1 的
+  B1–B8 否证正例）全部保留并通过；Patch 2 仅做语义保持的夹具适配：
+  (a) PNG/JPEG/PDF 正例夹具升级为结构合法字节（Pillow 生成的 1×1 图像 +
+  含 `%%EOF` 的最小 PDF）——否则正例本身不满足新的完整结构验证；(b)
+  cost/cancel 计数适配 factory 后新增复核点（断言语义不变：meter 超限即停
+  零 further collect、取消阻止下一次 attempt）。
+- **Patch 2 新增 27 项 reviewer-locked（P2-A..P2-T，含参数化）**：
+  P2-A malformed JSON（合法前导+截断/尾随垃圾）FAIL；P2-B PDF marker 前导
+  垃圾后 FAIL；P2-C sniff 窗口后 NUL/二进制尾 FAIL；P2-D 空 required
+  artifact（text+binary_blob）FAIL；P2-E unreadable required artifact FAIL
+  （win32 真实 msvcrt 区域锁 / POSIX 确定性 PermissionError）；P2-F 截断
+  PNG/JPEG/PDF FAIL；P2-G 六类合法内容正例 VERIFIED；P2-H optional 存在但
+  malformed/unreadable FAIL、真正不存在 VERIFIED；P2-I 策略 mutation 不可
+  能且事后事实不变；P2-J 未知 artifact_type 变体 fail-closed；P2-K
+  foreign-signer 报告 REPORT_REJECTED；P2-L 陈旧 run/异契约报告精确身份拒绝；
+  P2-M 句柄锚定 junction 交换（declared/expectation）不能逃逸；P2-N
+  criterion-only 路径交换不能逃逸；P2-O 嵌入下划线秘密身份拒绝（§8.6 五
+  形态 + terminal claim 身份字段）；P2-P 秘密/非字符串 run_id_factory 输出
+  绝不存储；P2-Q factory 期间取消/超时/成本耗尽阻止 collect；P2-R cost
+  回调推进时钟阻止 VERIFIED；P2-S 灾难性 regex 隔离有界（NOT_EVALUABLE +
+  普通 pattern 仍 PASS + 硬耗时断言）；P2-T detached 后代无法存活
+  （win32 Job 硬约束 + 有界轮询）/ checker fail-closed（POSIX）。
+- 竞态测试全部使用确定性同步点（monkeypatch open 注入交换/变异/拒绝），
+  不依赖随机 sleep；timeout 测试自带硬上限断言。
 
 ## 5. 冻结边界确认
 
@@ -389,22 +436,31 @@ READY_FOR_REVIEW               = YES
 2. **16E reducer 权威通道未开放**：`VERIFICATION_BOUNDARY(verified)` 在公开
    reducer 保持 fail-closed（frozen）；工作域状态机的 VERIFIED 晋级消费在
    16G 以 `VerificationReport`（经 `seal_is_authentic` 复核）为唯一输入接入。
-3. **symlink 本体测试宿主依赖**：本宿主无 symlink 特权（WinError 1314），
-   逃逸测试以 junction 等价执行并通过；`os.symlink` 专属语义（如跨盘符号
-   链接差异）需在 Dev Mode/POSIX 宿主复跑方可覆盖（测试在链接机制完全
-   不可用的宿主自动 skip）。
-4. **成本口径**：`cost_used` 为注入计量器，16F 不发明成本语义；未注入时
+3. **POSIX 进程判据 fail-closed 不可用**：killpg 无法约束自行 `setsid` 的
+   后代且无 unprivileged 容器保证 → `process_exit_zero` 在非 Windows 平台
+   NOT_EVALUABLE（INCONCLUSIVE，绝不 PASS）。这是平台能力缺口的有意取舍
+   （§9.2.3），等待容器级 containment（cgroup/容器 runtime）后在组合根层
+   提供；Windows 路径为 Job Object 硬约束全量可用。
+4. **图像结构验证依赖 Pillow**：PNG/JPEG 结构验证使用现有 Pillow
+   （verify+load）；decoder 缺失/无法确认 → fail-closed（`malformed_content:
+   image_verifier_unavailable`），绝不误通过。
+5. **symlink 本体测试宿主依赖**：本宿主无 symlink 特权（WinError 1314），
+   逃逸/交换测试以 junction 等价执行并通过；`os.symlink` 专属语义需在 Dev
+   Mode/POSIX 宿主复跑（测试在链接机制完全不可用的宿主自动 skip）。
+6. **成本口径**：`cost_used` 为注入计量器，16F 不发明成本语义；未注入时
    成本维度不参与停止判定（attempts/time 仍硬界）——真实 token/费用计量
-   属组合根/16G 侧。Reviewer Patch 1 后计量器值本身受严格类型/finite/>=0
-   校验，异常即 fail-closed 停止。
-5. **文本判据有界窗口语义**：`text_contains`/`regex_matches` 仅在文件前
+   属组合根/16G 侧。计量器值本身受严格类型/finite/>=0 校验，异常即
+   fail-closed 停止。
+7. **文本判据有界窗口语义**：`text_contains`/`regex_matches` 仅在文件前
    1 MiB 窗口内判定（有界评估的显式取舍；窗口截断在 explanation 中如实
    标注 `window_truncated`），且文件整体受 8 MiB 硬上限——needle/pattern
    落在窗口外、或文件超上限的契约将被判 FAIL——这是 bounded evidence 的
-   代价，不是缺陷。
-6. **verifier 密钥生命周期**：seal 密钥随验证器实例存活（内存）；跨进程
+   代价，不是缺陷。窗口内容经严格文本验证（NUL/非法 UTF-8 → content_not_
+   text FAIL，绝不窗口内命中即 PASS）。
+8. **verifier 密钥生命周期**：seal 密钥随验证器实例存活（内存）；跨进程
    复核（16G 持久化后重验）需要组合根持有同一实例或引入可持久化密钥——
    留给 16G/16I 的装配决策，16F 不擅自引入密钥存储。
-7. **内容识别规则的有界性取舍**：JSON 识别为"首非空白字符 ∈ `{[`"的明确
-   有界规则（不做完整解析）——以 `{` 开头的纯文本文档在 .md 命名下会被判
-   命名/内容矛盾（fail-closed 方向，绝不误通过）；MIME 识别窗口 1 KiB。
+9. **受支持 PDF 结构为封闭确定性子集**：偏移 0 header + 版本号 + 尾部
+   `%%EOF`——满足该封闭结构的 PDF 通过，其余 fail-closed（不做任意 PDF
+   语法完整解析；这是显式的、确定的受支持结构声明）。
+```
