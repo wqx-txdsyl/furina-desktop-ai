@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from furina.agent.events.models import EventKind
 from furina.core import FurinaError
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,13 @@ from furina.core import FurinaError
 
 #: 16F 独立验证器唯一身份（VerificationStandard.verifier_refs 仅接受本 id 时才可判 PASS）。
 VERIFIER_ID = "furina.verifier.16f.independent"
+
+#: P4-E：TerminalObservation.kind 的**封闭词表**（16E EventKind 值）——公开
+#: 导出字符串类型封闭，任何词表外值（含秘密形态）在构造面直接拒绝。
+EVENT_KIND_VALUES = frozenset(k.value for k in EventKind)
+
+#: P4-E：ArtifactObservation.source 的封闭取值（expectation | declared）。
+ARTIFACT_SOURCE_VALUES = frozenset({"expectation", "declared"})
 
 _REPORT_ID_PATTERN = re.compile(r"^vrp_[0-9a-f]{32}$")
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$")   # 与 16B run_id 同形
@@ -122,6 +130,14 @@ MAX_TEXT_READ_BYTES = 1024 * 1024
 PROCESS_CHUNK_BYTES = 1024 * 1024
 DEFAULT_PROCESS_TIMEOUT_SECONDS = 60.0
 MAX_PROCESS_TIMEOUT_SECONDS = 600.0
+#: P4-F：单次 verify 的**快照总字节上界**（执行前资源门）。每个唯一路径快照
+#: ≤ MAX_ARTIFACT_BYTES（8 MiB），因此唯一路径数 × 8 MiB 必须 ≤ 64 MiB——
+#: 超限在零文件读取、零进程启动前直接拒绝。
+MAX_SNAPSHOT_TOTAL_BYTES = 64 * 1024 * 1024
+#: P4-F：图像结构验证的解码上界——width/height 有界、解码像素数有界，
+#: 超限在 load() 前按 malformed_content:image_* 拒绝（解压炸弹绝不解码）。
+MAX_IMAGE_DIMENSION = 4096
+MAX_IMAGE_PIXELS = 4096 * 4096
 
 #: 产物 MIME 白名单（声明值必须命中白名单；观察值来自**内容识别**而非扩展名）。
 SUPPORTED_MIME_TYPES = frozenset({
@@ -229,6 +245,10 @@ _PDF_XREF_ENTRY_RE = re.compile(rb"\d{10} \d{5} [nf][ \r][\n]")
 _PDF_TRAILER_ROOT_RE = re.compile(rb"/Root\s+(\d+)\s+0\s+R")
 _PDF_TRAILER_SIZE_RE = re.compile(rb"/Size\s+(\d+)")
 _PDF_OBJ_DEFINED_RE = re.compile(rb"(?m)^(\d+)\s+0\s+obj\b")
+# P4-A：Root 字典必须是 /Type /Catalog（字典键紧跟分隔符；\b 拒绝 /CatalogFoo 冒充）
+_PDF_CATALOG_TYPE_RE = re.compile(rb"/Type\s*/Catalog\b")
+_PDF_PAGES_TYPE_RE = re.compile(rb"/Type\s*/Pages\b")
+_PDF_PAGES_REF_RE = re.compile(rb"/Pages\s+(\d+)\s+0\s+R")
 
 #: 受支持 PDF 封闭子集的确定性验证界限（任何超界即 fail-closed）。
 _MAX_PDF_XREF_ENTRIES = 8192
@@ -253,9 +273,9 @@ def _parse_pdf_int(full: bytes, pos: int) -> Tuple[Optional[int], Optional[int]]
 
 
 def _validate_pdf_structure(full: bytes) -> str:
-    """封闭、确定性的受支持 PDF 结构验证（Patch 3 B1）——**绝不只检查**
-    ``%PDF-`` 与 ``%%EOF`` 两个 marker，而是验证 header / 对象 / xref /
-    startxref / trailer / EOF 及其偏移关系：
+    """封闭、确定性的受支持 PDF 结构验证（Patch 3 B1 + Patch 4 P4-A）——
+    **绝不只检查** ``%PDF-`` 与 ``%%EOF`` 两个 marker，而是验证 header / 对象
+    图 / xref / startxref / trailer / EOF 及其偏移关系：
 
     - header：``%PDF-<major>.<minor>`` 必须位于偏移 0（版本号后不得紧跟数字）；
     - EOF：``%%EOF`` 必须位于尾部 1 KiB 内且为其后唯一内容（仅允许空白）；
@@ -263,8 +283,16 @@ def _validate_pdf_structure(full: bytes) -> str:
     - xref：该偏移处必须是经典 ``xref`` 表——子段（start/count）+ 定长 20 字节
       条目（``nnnnnnnnnn ggggg n|f``），``n`` 条目记录的字节偏移必须精确指向
       文件中对应 ``<num> 0 obj`` 的位置（偏移关系，非仅对象存在）；
-    - trailer：``/Size`` + ``/Root`` 必须存在，Root 对象号必须落在 xref 覆盖
-      范围内且必须真实定义于文件中；
+    - **对象图（P4-A）**：每个 ``n`` 条目对象必须有匹配的 ``obj ... endobj``
+      （缺 ``endobj`` 或对象间存在非空白内容一律 fail-closed），对象体必须是
+      完整平衡字典 ``<<...>>``（任意文本/流对象体不被受支持子集接受）；定义
+      于文件中的对象号必须恰为 ``n`` 条目对象号（多余对象定义 fail-closed）；
+    - **Root 图（P4-A）**：Root 的 xref 条目必须是 ``n``（不得是 free）、
+      Root 对象体必须是字典且含 ``/Type /Catalog``（伪 Catalog fail-closed）、
+      Catalog 必须引用有效 ``/Pages`` 对象（``n`` 条目 + 字典 + ``/Type /Pages``）；
+    - **/Size 一致性（P4-A）**：``/Size`` 必须等于 xref 覆盖的最高对象号 + 1；
+    - **trailer 尾（P4-A）**：trailer 字典 ``>>`` 之后只允许合法 ``startxref``
+      + 十进制偏移 + 空白 + ``%%EOF``——任何文本对象/多余内容即 fail-closed；
     - 截断 xref / 错误 startxref / 随机内容 / 伪 PDF 一律 fail-closed；
       交叉引用流（/XRef stream）与本封闭子集不支持 → 同样 fail-closed。
     """
@@ -281,11 +309,13 @@ def _validate_pdf_structure(full: bytes) -> str:
     value, pos = _parse_pdf_int(full, _skip_pdf_ws(full, sx + len(b"startxref")))
     if value is None or pos is None or value < 0 or value >= eof:
         return "malformed_content:pdf_startxref_invalid"
+    xref_pos = value
     # xref 表（经典格式；/XRef stream 不支持 → fail-closed）
-    if full[value:value + 4] != b"xref":
+    if full[xref_pos:xref_pos + 4] != b"xref":
         return "malformed_content:pdf_xref_missing"
-    pos = _skip_pdf_ws(full, value + 4)
+    pos = _skip_pdf_ws(full, xref_pos + 4)
     covered: set = set()
+    n_offsets: dict = {}               # obj_num → n 条目记录的字节偏移
     total_entries = 0
     while True:
         start_num, pos = _parse_pdf_int(full, pos)
@@ -302,6 +332,8 @@ def _validate_pdf_structure(full: bytes) -> str:
             if len(entry) < 20 or not _PDF_XREF_ENTRY_RE.match(entry):
                 return "malformed_content:pdf_xref_entry"
             obj_num = start_num + i
+            if obj_num in covered:     # 同一对象号被两条 xref 条目覆盖 → fail-closed
+                return "malformed_content:pdf_xref_entry"
             covered.add(obj_num)
             if entry[17:18] == b"n":
                 total_entries += 1
@@ -309,18 +341,25 @@ def _validate_pdf_structure(full: bytes) -> str:
                     return "malformed_content:pdf_xref_too_large"
                 offset10 = int(entry[:10])
                 marker = b"%d 0 obj" % obj_num
-                if offset10 >= eof \
+                # 对象偏移必须位于文件内且落在 xref 表之前（经典布局：对象 →
+                # xref → trailer → startxref；指向 xref/trailer 区域或更后的
+                # 偏移不属于本封闭子集 → fail-closed）。
+                if offset10 >= eof or offset10 >= xref_pos \
                         or full[offset10:offset10 + len(marker)] != marker:
                     return "malformed_content:pdf_xref_offset"
+                n_offsets[obj_num] = offset10
             pos += 20
         pos = _skip_pdf_ws(full, pos)
         if pos < len(full) and full[pos:pos + 1].isdigit():
             continue              # 下一个子段
         break
+    if not covered:
+        return "malformed_content:pdf_xref_subsection"
+    xref_end = pos
     # trailer（/Size + /Root 及对象覆盖关系）
-    if full[pos:pos + 7] != b"trailer":
+    if full[xref_end:xref_end + 7] != b"trailer":
         return "malformed_content:pdf_trailer_missing"
-    pos = _skip_pdf_ws(full, pos + 7)
+    pos = _skip_pdf_ws(full, xref_end + 7)
     if full[pos:pos + 2] != b"<<":
         return "malformed_content:pdf_trailer_dict"
     end = full.find(b">>", pos + 2)
@@ -335,11 +374,75 @@ def _validate_pdf_structure(full: bytes) -> str:
     size = int(m_size.group(1))
     if size < 1 or root_num <= 0 or root_num >= size:
         return "malformed_content:pdf_trailer_dict"
-    if root_num not in covered:
-        return "malformed_content:pdf_trailer_dict"
-    if not any(int(m.group(1)) == root_num
-               for m in _PDF_OBJ_DEFINED_RE.finditer(full)):
-        return "malformed_content:pdf_root_missing"
+    # P4-A：/Size 必须与 xref 覆盖一致（最高对象号 + 1）。
+    if size != max(covered) + 1:
+        return "malformed_content:pdf_size_mismatch"
+    # P4-A：Root 的 xref 条目必须是 n（free Root 一律拒绝）。
+    if root_num not in n_offsets:
+        return "malformed_content:pdf_root_free"
+    # 对象图（P4-A）：n 条目对象与文件中定义的对象一一对应；每个对象必须有
+    # 匹配的 obj...endobj；对象体必须是完整平衡字典；对象间只允许空白。
+    markers = [(m.start(), int(m.group(1)))
+               for m in _PDF_OBJ_DEFINED_RE.finditer(full) if m.start() < xref_pos]
+    if len(markers) != len({num for _, num in markers}):
+        return "malformed_content:pdf_obj_duplicate"
+    obj_marker_pos = {num: p for p, num in markers}
+    if set(obj_marker_pos) != set(n_offsets):
+        # 文件里定义的对象必须恰为 xref n 条目对象——多余对象定义 / 缺失定义
+        # 都意味着对象图与 xref 不一致（含任意文本对象）→ fail-closed。
+        return "malformed_content:pdf_obj_graph"
+    positions = sorted(p for p, _ in markers)
+    obj_dict_bodies: dict = {}
+    prev_end: Optional[int] = None
+    for i, (p, num) in enumerate(sorted(markers)):
+        nl = full.find(b"\n", p)
+        if nl < 0:
+            return "malformed_content:pdf_obj_missing_endobj"
+        limit = positions[i + 1] if i + 1 < len(positions) else xref_pos
+        e = full.find(b"endobj", nl + 1, limit)
+        if e < 0:
+            return "malformed_content:pdf_obj_missing_endobj"
+        if prev_end is not None and full[prev_end:p].strip(b" \t\r\n"):
+            # 对象之间出现非空白内容（文本对象/垃圾）→ 对象图不封闭。
+            return "malformed_content:pdf_obj_graph"
+        body = full[nl + 1:e]
+        b0 = _skip_pdf_ws(body, 0)
+        if body[b0:b0 + 2] != b"<<":
+            # 任意文本对象体（非字典）不被受支持子集接受。
+            return "malformed_content:pdf_obj_not_dict"
+        be = body.find(b">>", b0 + 2)
+        if be < 0 or body[be + 2:].strip(b" \t\r\n"):
+            return "malformed_content:pdf_obj_not_dict"
+        obj_dict_bodies[num] = body[b0 + 2:be]
+        prev_end = e + len(b"endobj")
+    # 最后一个对象的 endobj 与 xref 表之间只允许空白。
+    if full[prev_end:xref_pos].strip(b" \t\r\n"):
+        return "malformed_content:pdf_obj_graph"
+    # P4-A：Root 必须是字典且含 /Type /Catalog；Catalog 必须引用有效 /Pages。
+    root_dict = obj_dict_bodies.get(root_num, b"")
+    if not _PDF_CATALOG_TYPE_RE.search(root_dict):
+        return "malformed_content:pdf_root_not_catalog"
+    m_pages = _PDF_PAGES_REF_RE.search(root_dict)
+    if not m_pages:
+        return "malformed_content:pdf_root_no_pages"
+    pages_num = int(m_pages.group(1))
+    if pages_num not in n_offsets:
+        return "malformed_content:pdf_pages_missing"
+    pages_dict = obj_dict_bodies.get(pages_num, b"")
+    if not _PDF_PAGES_TYPE_RE.search(pages_dict):
+        return "malformed_content:pdf_pages_not_pages"
+    # P4-A：trailer 之后只允许合法 startxref + 偏移 + 空白 + EOF——任何文本
+    # 对象/多余内容（startxref 与 trailer 之间出现其它 token）一律 fail-closed。
+    tail = _skip_pdf_ws(full, end + 2)
+    if full[tail:tail + len(b"startxref")] != b"startxref":
+        return "malformed_content:pdf_trailer_tail"
+    t2 = _skip_pdf_ws(full, tail + len(b"startxref"))
+    v2, t2 = _parse_pdf_int(full, t2)
+    if v2 is None or v2 != xref_pos:
+        return "malformed_content:pdf_startxref_invalid"
+    t3 = _skip_pdf_ws(full, t2)
+    if full[t3:t3 + 5] != b"%%EOF":
+        return "malformed_content:pdf_eof_after_startxref"
     return ""
 
 
@@ -359,9 +462,14 @@ def _validate_json_structure(body: bytes) -> str:
 
 def _validate_image_structure(full: bytes, expected_format: str) -> str:
     """确定性图像结构验证（Pillow）：verify() + 重新打开完整解码 load()——
-    异常、缺少 decoder 或无法确认时一律失败（B1 §3.1.7，fail-closed）。"""
+    异常、缺少 decoder 或无法确认时一律失败（B1 §3.1.7，fail-closed）。
+    **P4-F 解码上界**：width/height 有界（≤ MAX_IMAGE_DIMENSION）、解码像素
+    数有界（≤ MAX_IMAGE_PIXELS），超限在 load() 前拒绝（解压炸弹绝不实际
+    解码）；load() 期间 Pillow DecompressionBombWarning 升级为异常 → 同样
+    fail-closed。"""
     try:
         import io
+        import warnings
 
         from PIL import Image
     except Exception:      # decoder 缺失 → 无法确认 → fail-closed
@@ -370,9 +478,24 @@ def _validate_image_structure(full: bytes, expected_format: str) -> str:
         with Image.open(io.BytesIO(full)) as im:
             if (im.format or "") != expected_format:
                 return "malformed_content:image_structure"
+            # P4-F：解码前（load() 前）的尺寸/像素上界——头部声明超大尺寸的
+            # 解压炸弹在验证阶段即被拒绝，绝不进入解码。
+            w, h = im.size
+            if w <= 0 or h <= 0 or w > MAX_IMAGE_DIMENSION or h > MAX_IMAGE_DIMENSION:
+                return "malformed_content:image_dimension"
+            if w * h > MAX_IMAGE_PIXELS:
+                return "malformed_content:image_pixels"
             im.verify()
         with Image.open(io.BytesIO(full)) as im2:
-            im2.load()
+            w2, h2 = im2.size
+            if w2 <= 0 or h2 <= 0 or w2 > MAX_IMAGE_DIMENSION \
+                    or h2 > MAX_IMAGE_DIMENSION or w2 * h2 > MAX_IMAGE_PIXELS:
+                return "malformed_content:image_pixels"
+            with warnings.catch_warnings():
+                # P4-F：DecompressionBombWarning 升级为异常 → FAIL（绝不
+                # best-effort 解码继续）。
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                im2.load()
     except Exception:
         return "malformed_content:image_structure"
     return ""
@@ -458,11 +581,14 @@ _SECRET_KV_RE = re.compile(
     # lookbehind 只排除 [a-z0-9]（blocker B6）：合法身份分隔符 _/./-/: 前缀的
     # 秘密键（run_password: / x.api_key= / prefix-client_secret:）同样必须命中；
     # 仅当键紧贴字母/数字内部（keyword=x 的 "key" 类误报）才不触发。
+    # **P4-E：值匹配到真实分隔符为止（+/* 而非 {0,512}）**——600 字符秘密的
+    # 尾部不得因量词截断而泄漏；输出限长由调用方（_bounded_text / [:N]）完成。
     r"(?i)(?<![a-z0-9])(password|passwd|secret|token|api[_\-]?key|access[_\-]?key|"
     r"private[_\-]?key|client[_\-]?secret|authorization)(\s*[=:]\s*)"
-    r"(\"[^\"]{0,512}\"|'[^']{0,512}'|[^\s;,&()\[\]{}]{1,512})")
+    r"(\"[^\"]*\"|'[^']*'|[^\s;,&()\[\]{}]+)")
 _SECRET_SCHEME_RE = re.compile(
-    r"(?i)(?<![a-z0-9_])(bearer|basic|digest)\s+([^\s\"'{}\[\]();,]{1,512})")
+    # P4-E：scheme token 同样匹配至真实分隔符（+ 而非 {1,512}）。
+    r"(?i)(?<![a-z0-9_])(bearer|basic|digest)\s+([^\s\"'{}\[\]();,]+)")
 
 
 def scrub_secrets(text: str) -> str:
@@ -531,6 +657,12 @@ class TerminalObservation:
         # 秘密形态/词法非法直接拒绝，绝不清洗后继续作为身份。
         object.__setattr__(self, "event_id",
                            validate_identity(self.event_id, "event_id"))
+        # P4-E：kind 是公开导出字符串——16E EventKind 封闭词表，类型封闭；
+        # 词表外值（含秘密形态）构造面直接拒绝，绝不脱敏后继续导出。
+        if not isinstance(self.kind, str) or self.kind not in EVENT_KIND_VALUES:
+            raise VerificationError(
+                f"kind 必须是 16E 封闭词表值，得到 "
+                f"{scrub_secrets(str(self.kind))[:64]!r}")
 
 
 @dataclass(frozen=True)
@@ -567,6 +699,19 @@ class ArtifactObservation:
                            validate_identity(self.artifact_id, "artifact_id"))
         object.__setattr__(self, "claimed_path", scrub_secrets(self.claimed_path))
         object.__setattr__(self, "resolved_path", scrub_secrets(self.resolved_path))
+        # P4-E：公开导出字符串类型封闭或脱敏——source 是封闭取值（expectation|
+        # declared，词表外值直接拒绝）；rejection / name_mime / content_rejection
+        # 统一脱敏后限长（raw secret 绝不进入 to_dict()/to_digest_dict() 导出）。
+        if not isinstance(self.source, str) or self.source not in ARTIFACT_SOURCE_VALUES:
+            raise VerificationError(
+                f"source 必须是 expectation|declared（类型封闭），得到 "
+                f"{scrub_secrets(str(self.source))[:64]!r}")
+        object.__setattr__(self, "rejection",
+                           scrub_secrets(self.rejection)[:64])
+        object.__setattr__(self, "name_mime",
+                           scrub_secrets(self.name_mime)[:128])
+        object.__setattr__(self, "content_rejection",
+                           scrub_secrets(self.content_rejection)[:128])
 
 
 @dataclass(frozen=True)
@@ -790,9 +935,13 @@ class VerificationReport:
     def __post_init__(self) -> None:
         if not isinstance(self.report_id, str) or not _REPORT_ID_PATTERN.match(self.report_id):
             raise VerificationError(f"report_id 词法非法: {self.report_id!r}")
-        if not isinstance(self.verifier_id, str) or not self.verifier_id.strip() \
-                or len(self.verifier_id) > MAX_ID_CHARS:
-            raise VerificationError("verifier_id 必须是非空 str")
+        # P4-E：verifier_id 同样走 canonical validate_identity——秘密形态/
+        # 词法非法（含 600 字符长秘密值）构造面直接拒绝，绝不脱敏后继续导出。
+        if not isinstance(self.verifier_id, str):
+            raise VerificationError(
+                f"verifier_id 必须是 str（canonical identity），得到 "
+                f"{type(self.verifier_id).__name__}")
+        validate_identity(self.verifier_id, "verifier_id")
         # Patch 3 B5：公开身份字段（contract_id/run_id/backend_id）走 canonical
         # validate_identity——秘密形态直接拒绝，to_dict()/to_json() 因此不可能
         # 导出 raw secret 身份；绝不清洗秘密后继续作为身份。
@@ -895,18 +1044,23 @@ class VerificationReport:
 
 __all__ = [
     "ARTIFACT_CLAIM_KEYS",
+    "ARTIFACT_SOURCE_VALUES",
     "ARTIFACT_TYPE_CONTENT_RULES",
     "ArtifactObservation",
     "CheckResult",
     "DEFAULT_PROCESS_TIMEOUT_SECONDS",
+    "EVENT_KIND_VALUES",
     "EvidenceBundle",
     "MAX_ARTIFACT_BYTES",
     "MAX_DECLARED_ARTIFACTS",
     "MAX_DIAGNOSTICS",
     "MAX_EVIDENCE_EVENTS",
     "MAX_EXPLANATION_CHARS",
+    "MAX_IMAGE_DIMENSION",
+    "MAX_IMAGE_PIXELS",
     "MAX_REPORT_CHECKS",
     "MAX_REPORT_JSON_BYTES",
+    "MAX_SNAPSHOT_TOTAL_BYTES",
     "MAX_TEXT_READ_BYTES",
     "MIME_SNIFF_WINDOW",
     "SUPPORTED_MIME_TYPES",

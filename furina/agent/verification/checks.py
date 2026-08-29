@@ -255,6 +255,12 @@ class FileSnapshot:
     full_text_valid: bool           # 完整内容为合法文本（无 NUL + 严格 UTF-8）
     text_window: str                # 前 MAX_TEXT_READ_BYTES 解码文本（full_text_valid 时）
     rejection: str
+    # P4-C：OS 级物理文件身份与事实指纹——POSIX (st_dev, st_ino)；
+    # Windows 同样映射为 (volume serial, file index)。非读取/逃逸/不可读
+    # 快照为 (-1, -1)/None。mtime_ns 与 size/sha 一起构成"同一物理文件的
+    # 事实版本"——第二别名观察到不同指纹 → 全局 snapshot_alias_mutated。
+    physical_id: Tuple[int, int] = (-1, -1)
+    mtime_ns: Optional[int] = None
 
 
 def capture_file_contained(path: str, contains_path: Callable[[str, bool], bool],
@@ -302,9 +308,13 @@ def capture_file_contained(path: str, contains_path: Callable[[str, bool], bool]
     window = ""
     if full_text_valid:
         window = _decode_text_window(data[:MAX_TEXT_READ_BYTES]) or ""
+    # P4-C：物理身份来自已证明句柄的 fstat（读取前后一致性已由 _read_full_bounded
+    # 保证）——POSIX dev+inode / Windows volume-serial+file-index（os.stat 同形）。
+    physical_id = (int(st_last.st_dev), int(st_last.st_ino))
+    mtime_ns = int(st_last.st_mtime_ns)
     return FileSnapshot(claimed, final_path, True, True, True, size, digest,
                         content_mime, content_rejection, full_text_valid,
-                        window, "")
+                        window, "", physical_id, mtime_ns)
 
 
 def snapshot_file_contained(path: str, contains_path: Callable[[str, bool], bool],
@@ -571,6 +581,11 @@ def check_criterion(*, criterion_id: str, kind: str, params: Tuple[Tuple[str, st
         if rej == "unreadable":
             # Patch 3 B2：criterion-only 文件 unreadable 必须失败（绝不跳过）。
             return _with(check, CheckResult.FAIL, "unreadable", inputs)
+        # P4-B：文件类判据在 kind 分支分流前统一拒绝空文件——空文件绝不是
+        # 有效证据（artifact_file_exists 存在本身 / artifact_sha256 的 e3b0… /
+        # text_contains 的 needle / regex_matches 的 ^$ 都不得以空文件 PASS）。
+        if snap.size_bytes == 0:
+            return _with(check, CheckResult.FAIL, "artifact_empty", inputs)
 
         if kind == "artifact_file_exists":
             if rej == "oversize":
@@ -578,9 +593,6 @@ def check_criterion(*, criterion_id: str, kind: str, params: Tuple[Tuple[str, st
             if rej == "mutated":
                 return _with(check, CheckResult.FAIL,
                              "artifact_mutated_during_verification", inputs)
-            if snap.size_bytes == 0:
-                # Patch 3 B2：空文件 artifact_file_exists 必须 FAIL（绝非存在）。
-                return _with(check, CheckResult.FAIL, "artifact_empty", inputs)
             return _with(check, CheckResult.PASS, "file_exists", inputs)
 
         if kind == "artifact_sha256":

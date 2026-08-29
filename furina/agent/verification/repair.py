@@ -1,15 +1,19 @@
 """Phase 16F — BoundedRepairLoop：严格有界修复循环（16F 任务书 §5 + 关键锁定 9–12
-+ Reviewer Patch 1 blocker 4/6 + Reviewer Patch 3（blocker B3）。
++ Reviewer Patch 1 blocker 4/6 + Reviewer Patch 3（blocker B3）+ Patch 4（P4-D）。
 
-- **接受 VERIFIED 前的最终稳定边界复核（Patch 3 B3）**：``_accept_verified_
-  report``（seal 认证 / standard·hash 属性访问——都可能携带调用方回调副作用）
-  **完成后**再执行最终边界复核——至多 :data:`_FINAL_BOUNDARY_SCAN_LIMIT` 轮
-  完整安全扫描（contract hash → cost → cancellation → 新鲜当前时间）；
-  任一轮出现超限/取消/超时/异常/契约漂移 → 立即停止且 ``final_report=None``
-  （VERIFIED 绝不成为成功结果）；两轮都安全才允许接受。扫描次数有硬上限；
-  回调异常（无法取得稳定安全结果）→ ``UNSTABLE_BOUNDARY`` fail-closed。
-  ——cancellation 回调把 cost 从 0 改成 6 / cost 回调推进时钟 / seal 认证
-  回调翻转取消 / standard_hash 属性推进 deadline 全部被该复核拦截。
+- **接受 VERIFIED 前的原子最终边界（P4-D）**：``_accept_verified_report``
+  （seal 认证 / standard·hash 属性访问——都可能携带调用方回调副作用）
+  **完成后**，**原子取得一次**权威 :class:`BoundarySnapshot`（contract hash
+  → cancellation → cost → 新鲜当前时间），判定与 RepairOutcome 构造**只依据
+  该快照**（``snapshot.now`` 直接作为 finished_at_epoch），此后零回调
+  （cost/cancel/now/verifier 一律不再调用）。回调异常 → ``UNSTABLE_BOUNDARY``
+  fail-closed；越界（成本超限/取消/超时/契约漂移）→ 立即停止且
+  ``final_report=None``（VERIFIED 绝不成为成功结果）。禁止"再多扫一轮"
+  的轮次递增修复——只允许一次权威读取。legacy 分散回调（attempt 前后
+  ``_boundary_violation``）仍用于前置停止，但**不得单独授权最终 VERIFIED**。
+  ——cancellation 回调把 cost 从 0 改成 6（读取次序 cancel→cost 暴露其副作用）、
+  cost 回调推进时钟（cost→now 暴露其副作用）、seal 认证回调翻转取消 /
+  standard_hash 属性推进 deadline 全部被该快照拦截。
 
 - **修复允许条件**：WorkContract 允许（``budget.max_attempts > 1`` 才有修复余地；
   approval-gated 策略必须提供 ``approval_authority``，否则构造期 fail-closed）
@@ -163,9 +167,21 @@ def _diag_signature(diagnostic: str) -> str:
     return hashlib.sha256(f"collect:{diagnostic}".encode("utf-8")).hexdigest()
 
 
-#: Patch 3 B3：最终稳定边界复核的完整安全扫描次数硬上限（至少 2 轮 +
-#: 1 次余量；任何一轮越界即停，回调异常 → fail-closed UNSTABLE_BOUNDARY）。
-_FINAL_BOUNDARY_SCAN_LIMIT = 3
+@dataclass(frozen=True)
+class BoundarySnapshot:
+    """P4-D：接受 VERIFIED 前的**单一原子权威边界快照**。
+
+    一次调用同时取得 contract hash / cost / cancellation / 新鲜当前时间——
+    判定与 RepairOutcome 构造**只依据本快照**；此后不得再调用任何
+    cost/cancel/now/verifier 回调。读取次序 hash → cancelled → cost → now：
+    cancellation 回调可能改写 cost（其副作用被其后的 cost 读取捕获）、
+    cost 回调可能推进时钟（其副作用被最后的 now 读取捕获）。
+    """
+
+    contract_hash: str
+    cancelled: bool
+    cost_used: Optional[float]      # None = 未注入 cost meter
+    now: float
 
 
 class BoundedRepairLoop:
@@ -216,6 +232,8 @@ class BoundedRepairLoop:
         stop: Optional[RepairStopReason] = None
         stop_diag = ""
         final_report: Optional[VerificationReport] = None
+        final_now: Optional[float] = None    # P4-D：最终边界快照的 now（构造
+        # RepairOutcome 直接使用；此后零回调）
         max_attempts = self._contract.budget.max_attempts
 
         while len(attempts) < max_attempts:
@@ -315,18 +333,28 @@ class BoundedRepairLoop:
                     stop_diag = f"verification_report_rejected:{why[:256]}"
                     final_report = None
                     break
-                # 6a. Patch 3 B3：接受门（seal/身份复核，可能带调用方回调副作用）
-                #     完成后，再执行**最终稳定边界复核**——至多
-                #     _FINAL_BOUNDARY_SCAN_LIMIT 轮完整安全扫描
-                #     （contract hash → cost → cancellation → 新鲜当前时间）。
-                #     任一轮出现超限/取消/超时/异常/契约漂移 → 立即停止且
-                #     final_report=None（VERIFIED 绝不成为成功结果）；两轮都
-                #     安全才允许接受。
-                reason, diag = self._final_stable_boundary(attempt_finished)
+                # 6a. P4-D：接受门（seal/身份复核）完成后，**原子取得一次**最终
+                #     BoundarySnapshot（contract hash → cancelled → cost →
+                #     新鲜当前时间，一次权威读取）——此后不得再调用任何
+                #     cost/cancel/now/verifier 回调；判定只依据该快照，且
+                #     RepairOutcome 直接使用 ``snapshot.now`` 构造。回调异常
+                #     （无法取得稳定安全结果）→ UNSTABLE_BOUNDARY fail-closed；
+                #     越界（cost 超限/取消/超时/契约漂移）→ final_report=None，
+                #     VERIFIED 绝不成为成功结果。legacy 分散回调（前置停止）
+                #     不得单独授权最终 VERIFIED。
+                try:
+                    bsnap = self._take_final_boundary()
+                except Exception as exc:
+                    stop = RepairStopReason.UNSTABLE_BOUNDARY
+                    stop_diag = f"final_boundary_unstable:{type(exc).__name__}"
+                    final_report = None
+                    break
+                reason, diag = self._decide_final_boundary(bsnap)
                 if reason is not None:
                     stop, stop_diag = reason, diag
                     final_report = None
                     break
+                final_now = bsnap.now
                 stop, final_report = RepairStopReason.VERIFIED, report
                 break
             # 7. 硬失败：立即停止（绝不重试）。
@@ -346,11 +374,15 @@ class BoundedRepairLoop:
         if stop is None:
             stop = RepairStopReason.ATTEMPTS_EXHAUSTED
             stop_diag = "max_attempts_reached"
+        # P4-D：VERIFIED 成功路径用最终边界快照的 now 构造 RepairOutcome——
+        # 此后零回调（不再调用 now_fn/cost/cancel/verifier）。非成功路径无
+        # 边界快照，沿用既有单次 now_fn 读取。
         return RepairOutcome(
             stop_reason=stop, contract_id=self._contract.contract_id,
             contract_hash=self._contract.content_hash, attempts=tuple(attempts),
             final_report=final_report, started_at_epoch=started,
-            finished_at_epoch=self._now_fn(), diagnostic=stop_diag)
+            finished_at_epoch=(final_now if final_now is not None
+                               else self._now_fn()), diagnostic=stop_diag)
 
     # -- VERIFIED 接受门（blocker B4） ------------------------------------------
     def _accept_verified_report(self, report: VerificationReport,
@@ -381,28 +413,42 @@ class BoundedRepairLoop:
             reasons.append("standard_hash_mismatch")
         return (not reasons), ":".join(reasons)
 
-    def _final_stable_boundary(self,
-                               attempt_finished: float) -> Tuple[Optional[RepairStopReason], str]:
-        """Patch 3 B3：接受 VERIFIED 前的**最终**稳定边界复核。
+    def _take_final_boundary(self) -> BoundarySnapshot:
+        """P4-D：**原子取得一次**最终权威 BoundarySnapshot。
 
-        ``_accept_verified_report``（seal 认证 + standard/hash 属性访问——
-        都可能携带调用方回调副作用）完成后执行：至多
-        ``_FINAL_BOUNDARY_SCAN_LIMIT`` 轮**完整安全扫描**，每轮读取次序
-        contract hash → cost → cancellation → **新鲜当前时间**。任一轮出现
-        超限 / 取消 / 超时 / 异常 / 契约漂移 → 立即返回越界原因（调用方置
-        ``final_report=None``，VERIFIED 绝不成为成功结果）；仅当全部扫描
-        安全才返回 ``(None, "")`` 允许接受。扫描次数有硬上限；回调异常
-        （无法取得稳定安全结果）→ ``UNSTABLE_BOUNDARY`` fail-closed。
+        读取次序 contract hash → cancellation → cost → 新鲜当前时间：
+        - cancellation 回调可能改写 cost —— 其副作用被其后的 cost 读取捕获
+          （P3-G(a) 变体：cancel 回调把 cost 0→6 必须在同一快照内暴露）；
+        - cost 回调可能推进时钟 —— 其副作用被最后的 now 读取捕获
+          （P3-G(b)/P2-R 变体）。
+        任一回调抛异常 → 异常向调用方传播（fail-closed → UNSTABLE_BOUNDARY），
+        绝不降级为"默认安全"。返回后调用方**不得再调用任何回调**。
         """
-        for _ in range(_FINAL_BOUNDARY_SCAN_LIMIT):
-            try:
-                reason, diag = self._boundary_violation(pre=False,
-                                                        attempt_finished=attempt_finished)
-            except Exception as exc:      # 回调异常 → 无法证明安全 → fail-closed
-                return (RepairStopReason.UNSTABLE_BOUNDARY,
-                        f"final_boundary_unstable:{type(exc).__name__}")
-            if reason is not None:
-                return reason, diag
+        contract_hash = self._contract.content_hash
+        cancelled = bool(self._cancel_requested())
+        used: Optional[float] = None
+        if self._cost_used is not None:
+            used, err = self._read_cost_used()
+            if err:
+                raise VerificationError(err)
+        now = float(self._now_fn())
+        return BoundarySnapshot(contract_hash=contract_hash, cancelled=cancelled,
+                                cost_used=used, now=now)
+
+    def _decide_final_boundary(self, bsnap: BoundarySnapshot
+                               ) -> Tuple[Optional[RepairStopReason], str]:
+        """P4-D：**纯快照判定**——不读取任何回调，只依据传入的 BoundarySnapshot
+        （契约 hash 漂移 / 成本超限 / 取消 / 新鲜时间越过 deadline 任一 → 越界
+        停止；VERIFIED 绝不成为成功结果）。"""
+        if bsnap.contract_hash != self._initial_hash:
+            return RepairStopReason.CONTRACT_MUTATED, "contract_hash_changed"
+        limit = self._contract.budget.cost_limit.amount
+        if bsnap.cost_used is not None and bsnap.cost_used > limit:
+            return RepairStopReason.BUDGET_EXHAUSTED, "cost_limit_exceeded"
+        if bsnap.cancelled:
+            return RepairStopReason.CANCELLED, "cancellation_requested"
+        if bsnap.now > self._deadline:
+            return RepairStopReason.TIMEOUT, "time_budget_exhausted"
         return None, ""
 
     # -- 边界复核 / 计量器 -------------------------------------------------------

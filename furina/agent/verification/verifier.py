@@ -91,6 +91,7 @@ from .models import (
     MAX_PATH_CHARS,
     MAX_PROCESS_TIMEOUT_SECONDS,
     MAX_REPORT_CHECKS,
+    MAX_SNAPSHOT_TOTAL_BYTES,
     DEFAULT_PROCESS_TIMEOUT_SECONDS,
     SUPPORTED_MIME_TYPES,
     VERIFICATION_INPUT_KEYS,
@@ -116,18 +117,28 @@ _EVENT_KIND_VALUES = frozenset(k.value for k in EventKind)
 
 
 class _PathSnapshotCache:
-    """单次 verify 内的 canonical-path → 不可变快照（Patch 3 B2）。
+    """单次 verify 内的 canonical-path → 不可变快照（Patch 3 B2 + Patch 4 P4-C）。
 
     同一 canonical 路径（normcase + normpath + expanduser）在单次 verify
     中只捕获一次 :class:`~checks.FileSnapshot`——expectation / declared /
     exists / sha / text / regex 全部复用同一完整快照，任何检查都不得重新
     按路径打开已缓存文件（"同路径只打开一次"）。捕获一律经句柄锚定
     containment 证明（writable=True 观察语义）。
+
+    **P4-C 物理文件单快照**：即使路径不同（symlink / junction / hardlink
+    别名），只要 OS 物理身份（POSIX dev+inode / Windows volume-serial+
+    file-index）相同，就只允许**一个事实快照**——第二别名与首快照的
+    （size, sha256, mtime_ns）一致则复用首快照；不一致（验证期间经任一
+    别名被改写）则设置全局 ``alias_mutation``，verifier 追加 required
+    ``snapshot_alias_mutated`` FAIL——expectation/declared/criterion 绝不
+    组合不同版本，最终绝不 VERIFIED。
     """
 
     def __init__(self, contains_path: Callable[[str, bool], bool]) -> None:
         self._contains_path = contains_path
         self._entries: Dict[str, Any] = {}
+        self._physical: Dict[Tuple[int, int], Tuple[str, Any]] = {}
+        self.alias_mutation: Optional[str] = None
 
     def get(self, claimed_path: str) -> Any:
         key = os.path.normcase(os.path.normpath(os.path.expanduser(claimed_path)))
@@ -136,7 +147,31 @@ class _PathSnapshotCache:
             snap = _checks.capture_file_contained(claimed_path,
                                                   self._contains_path, True)
             self._entries[key] = snap
+            pid = snap.physical_id
+            if pid is not None and pid != (-1, -1) and snap.rejection == "":
+                prev = self._physical.get(pid)
+                if prev is None:
+                    self._physical[pid] = (key, snap)
+                elif prev[0] != key:
+                    prev_snap = prev[1]
+                    if prev_snap.rejection == "" and self._same_fact(prev_snap, snap):
+                        # 同一物理文件、同一事实版本 → 只允许一个事实快照，
+                        # 所有别名复用首快照（只打开过一次的完整内容）。
+                        snap = prev_snap
+                        self._entries[key] = snap
+                    else:
+                        # 第二别名观察到不同 size/sha/mtime → 全局 required
+                        # snapshot_alias_mutated FAIL（绝不组合不同版本）。
+                        if self.alias_mutation is None:
+                            self.alias_mutation = f"{prev[0]}<->{key}"
+                        snap = prev_snap
+                        self._entries[key] = snap
         return snap
+
+    @staticmethod
+    def _same_fact(a: Any, b: Any) -> bool:
+        return (a.size_bytes, a.sha256_hex, a.mtime_ns) == \
+               (b.size_bytes, b.sha256_hex, b.mtime_ns)
 
 
 class IndependentVerifier:
@@ -198,12 +233,24 @@ class IndependentVerifier:
     def verify(self, evidence: Mapping[str, Any]) -> VerificationReport:
         started = float(self._now_fn())
         submission = self._parse_submission(evidence)
+        # P4-F：执行前资源门——任何文件读取/进程启动之前检查期望/声明数量、
+        # check 估计与快照总字节上界；超限立即拒绝（零文件读取、零进程启动）。
+        self._preflight_resource_gates(submission)
         # Patch 3 B2：每次 verify() 建立 canonical-path snapshot cache——
         # 同一路径的 expectation/declared/exists/sha/text/regex 复用同一
         # 不可变快照，任何检查不得重新按路径打开已缓存文件。
         snapshots = _PathSnapshotCache(self._contains_path)
         bundle = self._collect_bundle(submission, snapshots)
         check_list, substantive_ids = self._run_checks(bundle, submission, snapshots)
+        # P4-C：同一物理文件经不同路径别名观察到不同事实版本 → 全局 required
+        # snapshot_alias_mutated FAIL（expectation/declared/criterion 绝不组合
+        # 不同版本，最终绝不 VERIFIED）。
+        if snapshots.alias_mutation is not None:
+            check_list.append(VerificationCheck(
+                check_id="evidence:snapshot_alias_mutated",
+                kind="snapshot_alias", required=True, result=CheckResult.FAIL,
+                explanation=scrub_secrets(
+                    f"snapshot_alias_mutated:{snapshots.alias_mutation[:256]}")))
         # substantive gate（blocker 1）：没有至少一项真实 substantive
         # deterministic check PASS → 强制 NOT_EVALUABLE → INCONCLUSIVE。
         if not any(c.check_id in substantive_ids and c.result is CheckResult.PASS
@@ -320,6 +367,58 @@ class IndependentVerifier:
 
         return {"run_id": run_id, "backend_id": backend_id,
                 "terminal": tuple(terminal), "declared": tuple(declared)}
+
+    def _preflight_resource_gates(self, submission: Dict[str, Any]) -> None:
+        """P4-F：执行前资源门——**任何文件读取或进程启动之前**检查：
+
+        - artifact expectations ≤ :data:`MAX_DECLARED_ARTIFACTS`（契约侧数量）；
+        - declared artifacts ≤ :data:`MAX_DECLARED_ARTIFACTS`；
+        - criteria/check 估计（terminal/backend/refs/criteria/expectation/
+          declared 的保守上界）≤ :data:`MAX_REPORT_CHECKS`；
+        - snapshot 总字节上界（唯一路径 × :data:`MAX_ARTIFACT_BYTES`）
+          ≤ :data:`MAX_SNAPSHOT_TOTAL_BYTES`。
+
+        任一超限立即 :class:`VerificationInputError`——零文件读取、零进程启动
+        （在 :meth:`_collect_bundle` / :meth:`_run_checks` 之前执行）。
+        """
+        n_exp = len(self._contract.artifact_expectations)
+        if n_exp > MAX_DECLARED_ARTIFACTS:
+            raise VerificationInputError(
+                f"artifact expectations 数量 {n_exp} 超界 "
+                f"{MAX_DECLARED_ARTIFACTS}（零执行）")
+        n_dec = len(submission["declared"])
+        if n_dec > MAX_DECLARED_ARTIFACTS:
+            raise VerificationInputError(
+                f"declared artifacts 数量 {n_dec} 超界 "
+                f"{MAX_DECLARED_ARTIFACTS}（零执行）")
+        n_crit = len(self._contract.verification_standard.criteria)
+        n_refs = len(self._contract.verification_standard.verifier_refs)
+        # 保守 check 上界：evidence:terminal_claim(1) + backend_authorized(1)
+        # + verifier_refs(n_refs) + criteria(各 1) + expectations(各 ≤10) +
+        # declared(各 ≤12，含 location-mismatch 检查) + no_substantive(1)。
+        estimate = 1 + 1 + n_refs + n_crit + 10 * n_exp + 12 * n_dec + 1
+        if estimate > MAX_REPORT_CHECKS:
+            raise VerificationInputError(
+                f"check 估计 {estimate} 超界 {MAX_REPORT_CHECKS}（零执行）")
+        paths: Set[str] = set()
+        for exp in self._contract.artifact_expectations:
+            paths.add(os.path.normcase(
+                os.path.normpath(os.path.expanduser(exp.expected_path))))
+        for d in submission["declared"]:
+            paths.add(os.path.normcase(
+                os.path.normpath(os.path.expanduser(d["path"]))))
+        for c in self._contract.verification_standard.criteria:
+            if c.kind in ("artifact_file_exists", "artifact_sha256",
+                          "text_contains", "regex_matches"):
+                p = dict(c.params).get("path")
+                if p:
+                    paths.add(os.path.normcase(
+                        os.path.normpath(os.path.expanduser(p))))
+        total_bound = len(paths) * MAX_ARTIFACT_BYTES
+        if total_bound > MAX_SNAPSHOT_TOTAL_BYTES:
+            raise VerificationInputError(
+                f"snapshot 总字节上界 {total_bound} 超界 "
+                f"{MAX_SNAPSHOT_TOTAL_BYTES}（零读取）")
 
     @staticmethod
     def _parse_terminal_claim(item: Any) -> Dict[str, Any]:

@@ -94,6 +94,7 @@ from furina.agent.verification import (
     IndependentVerifier,
     MAX_ARTIFACT_BYTES,
     MAX_EXPLANATION_CHARS,
+    MAX_REPORT_CHECKS,
     MAX_REPORT_JSON_BYTES,
     MAX_TEXT_READ_BYTES,
     RepairStopReason,
@@ -3143,3 +3144,493 @@ def test_p3_l_process_proof_cannot_skip(env, monkeypatch):
         rep2 = IndependentVerifier(c).verify(_submission(c, "run_p3l_0002"))
         assert rep2.verdict is VerificationVerdict.VERIFIED
         assert rep2.authority_seal
+
+
+# ================================================================
+
+
+# ================================================================
+# Reviewer Patch 4 — P4-A/P4-B: PDF 对象图 + Root 图 + trailer 尾
+# ================================================================
+
+
+def _pdf_with_body(pdf: bytes, obj_num: int, new_body: bytes) -> bytes:
+    """长度保持的对象体替换（新 body 短于旧 body 时以空白补齐）——保持全部
+    xref 偏移自洽，只验证目标对象体本身。"""
+    marker = b"%d 0 obj\n" % obj_num
+    start = pdf.find(marker)
+    assert start >= 0, f"对象 {obj_num} 不存在"
+    body_start = start + len(marker)
+    end = pdf.find(b"endobj", body_start)
+    assert end >= 0, f"对象 {obj_num} 缺 endobj"
+    old = pdf[body_start:end]
+    assert len(new_body) <= len(old), "新 body 必须不短于旧 body（保持偏移）"
+    pad = b" " * (len(old) - len(new_body))
+    return pdf[:body_start] + new_body + pad + pdf[end:]
+
+
+def test_p4_a_fake_root_object_rejected(env):
+    """P4-A 否证：带真实 xref 的伪对象仍必须被拒绝——Root 对象体是文本
+    （任意文本对象）→ pdf_obj_not_dict；Root 是字典但 /Type 不是 Catalog
+    （伪 Catalog）→ pdf_root_not_catalog——都 fail-closed；合法最小 PDF
+    正对照仍 PASS。"""
+    from furina.agent.verification import full_content_verdict
+    tmp, work, work_real, outside, outside_real = env
+    pdf = PDF_BYTES
+    assert full_content_verdict(pdf) == ("application/pdf", "")     # 正对照
+    text_root = _pdf_with_body(pdf, 1, b"not a PDF")
+    mime, rejection = full_content_verdict(text_root)
+    assert mime == "application/pdf"
+    assert "malformed_content:pdf_obj_not_dict" in rejection, rejection
+    fake_catalog = _pdf_with_body(pdf, 1, b"<</Type/Notes/Pages 2 0 R>>")
+    mime2, rejection2 = full_content_verdict(fake_catalog)
+    assert mime2 == "application/pdf"
+    assert "malformed_content:pdf_root_not_catalog" in rejection2, rejection2
+    # 端到端：文本 Root 伪对象作为 pdf_document 期望验证 → required FAIL
+    art = work_real / "doc.pdf"
+    art.write_bytes(text_root)
+    c = _expectation_contract(work_real, "wc_16f_p4a_0001",
+                              atype="pdf_document", path=art)
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p4a_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any(ch.result is CheckResult.FAIL
+               and ch.explanation.startswith("malformed_content:pdf_")
+               for ch in rep.checks), [(ch.check_id, ch.explanation) for ch in rep.checks]
+
+
+def test_p4_b_missing_endobj_and_free_root_rejected(env):
+    """P4-B 否证：n 条目对象缺 endobj → pdf_obj_missing_endobj；Root xref
+    条目被改成 free → pdf_root_free；/Size 与 xref 覆盖不一致 →
+    pdf_size_mismatch；trailer 之后出现文本对象（只允许 startxref/EOF/空白）
+    → pdf_trailer_tail——全部 fail-closed，绝不 VERIFIED。"""
+    from furina.agent.verification import full_content_verdict
+    tmp, work, work_real, outside, outside_real = env
+    pdf = PDF_BYTES
+    # (a) 对象 2 缺 endobj（长度保持：endobj 6 字符被空白替换）
+    missing_endobj = pdf.replace(b">>\nendobj\n3 0 obj", b">>\n      \n3 0 obj")
+    mime, rejection = full_content_verdict(missing_endobj)
+    assert mime == "application/pdf"
+    assert "malformed_content:pdf_obj_missing_endobj" in rejection, rejection
+    # (b) Root(1) 的 xref 条目由 n 改成 free（长度保持）
+    obj1_pos = pdf.find(b"1 0 obj\n")
+    free_root = pdf.replace(b"%010d 00000 n " % obj1_pos,
+                            b"%010d 65535 f " % 0)
+    mime2, rejection2 = full_content_verdict(free_root)
+    assert mime2 == "application/pdf"
+    assert "malformed_content:pdf_root_free" in rejection2, rejection2
+    # (c) /Size 与 xref 覆盖不一致（最高对象号 + 1 = 4，伪造 5）
+    size_bad = pdf.replace(b"/Size 4/Root 1 0 R", b"/Size 5/Root 1 0 R")
+    mime3, rejection3 = full_content_verdict(size_bad)
+    assert mime3 == "application/pdf"
+    assert "malformed_content:pdf_size_mismatch" in rejection3, rejection3
+    # (d) trailer 之后出现文本对象
+    tail_bad = pdf.replace(b">>\nstartxref", b">>\ntext object\nstartxref")
+    mime4, rejection4 = full_content_verdict(tail_bad)
+    assert mime4 == "application/pdf"
+    assert "malformed_content:pdf_trailer_tail" in rejection4, rejection4
+
+
+# ================================================================
+# Reviewer Patch 4 — P4-C: 空文件判据统一拒绝
+# ================================================================
+
+
+def test_p4_c_empty_sha_and_regex_rejected(env):
+    """P4-C 否证：所有文件类判据在 kind 分支分流前统一拒绝空文件——空文件
+    SHA（即使等于空串 e3b0c… 哈希）与空文件 ^$ regex 都不得 PASS → 全部
+    artifact_empty required FAIL → 绝不 VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    empty = work_real / "empty.md"
+    empty.write_bytes(b"")
+    criteria = (
+        VerificationCriterion(criterion_id="empty_sha", kind="artifact_sha256",
+                              params={"path": str(empty), "sha256_hex": _sha(b"")}),
+        VerificationCriterion(criterion_id="empty_regex", kind="regex_matches",
+                              params={"path": str(empty), "pattern": "^$"}),
+        VerificationCriterion(criterion_id="empty_exists", kind="artifact_file_exists",
+                              params={"path": str(empty)}),
+        VerificationCriterion(criterion_id="empty_text", kind="text_contains",
+                              params={"path": str(empty), "needle": "x"}),
+    )
+    c = _contract(work_real, contract_id="wc_16f_p4c_0001",
+                  verification_standard=VerificationStandard(criteria=criteria))
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p4c_0001"))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    for cid in ("empty_sha", "empty_regex", "empty_exists", "empty_text"):
+        crit = [ch for ch in rep.checks if ch.check_id == f"criterion:{cid}"][0]
+        assert crit.result is CheckResult.FAIL, (cid, crit.result)
+        assert "artifact_empty" in crit.explanation, (cid, crit.explanation)
+
+
+# ================================================================
+# Reviewer Patch 4 — P4-D: 物理文件单快照（hardlink 别名）
+# ================================================================
+
+
+def _make_file_link(link: Path, target: Path) -> bool:
+    """文件硬链接（同卷普通文件无需特权；os.link 失败返回 False——由测试
+    前提断言保证可用）。"""
+    try:
+        os.link(target, link)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def test_p4_d_hardlink_alias_cross_snapshot_rejected(env, monkeypatch):
+    """P4-D 否证：hardlink 别名指向同一物理文件——expectation 观察 JSON 后，
+    验证期间经任一别名把同一 inode 改写为含 needle 的文本；第二别名捕获到
+    不同事实（size/sha/mtime）→ 全局 required snapshot_alias_mutated FAIL，
+    绝不组合不同版本、绝不 VERIFIED；未改写的别名正对照复用同一事实快照
+    （两个别名各打开一次、判定用首快照）→ VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    a = work_real / "data.json"
+    a.write_bytes(b'{"k": "json value"}')
+    b = work_real / "alias.json"
+    assert _make_file_link(b, a), "hardlink 不可用（测试前提）"
+    assert os.stat(a).st_ino == os.stat(b).st_ino
+    exp = ArtifactExpectation(artifact_id="prod_doc", artifact_type="json_data",
+                              expected_path=str(a), required=True)
+    crit = VerificationCriterion(criterion_id="cross", kind="text_contains",
+                                 params={"path": str(b), "needle": "NEEDLE_P4D"})
+    c = _content_contract(work_real, "wc_16f_p4d_0001", expectations=(exp,),
+                          criteria=(crit,))
+    opens = {"n": 0}
+    real_open = builtins.open
+    tgt = {os.path.normcase(os.path.realpath(str(p))) for p in (a, b)}
+
+    def swapping_open(file, mode="r", *args, **kwargs):
+        h = real_open(file, mode, *args, **kwargs)
+        try:
+            same = os.path.normcase(os.path.realpath(str(file))) in tgt
+        except OSError:
+            same = False
+        if "r" in str(mode) and "b" in str(mode) and same:
+            opens["n"] += 1
+            if opens["n"] >= 2:
+                # 第二别名捕获前把同一物理文件（同一 inode）改写为含 needle
+                # 的文本——硬链接 JSON→文本复现攻击。
+                with real_open(str(a), "wb") as g:
+                    g.write(b"NEEDLE_P4D text version")
+        return h
+
+    monkeypatch.setattr(builtins, "open", swapping_open)
+    rep = IndependentVerifier(c).verify(_submission(c, "run_p4d_0001"))
+    assert opens["n"] == 2          # 两个别名各打开一次（不产生第三份快照）
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    alias = [ch for ch in rep.checks
+             if ch.check_id == "evidence:snapshot_alias_mutated"]
+    assert alias and alias[0].result is CheckResult.FAIL
+    # 正对照：未改写的别名 → 同一物理文件同一事实 → 复用首快照 VERIFIED
+    a2 = work_real / "data2.json"
+    a2.write_bytes(b'{"k": "NEEDLE_P4D ok"}')
+    b2 = work_real / "alias2.json"
+    assert _make_file_link(b2, a2)
+    exp2 = ArtifactExpectation(artifact_id="prod_doc", artifact_type="json_data",
+                               expected_path=str(a2), required=True)
+    crit2 = VerificationCriterion(criterion_id="cross2", kind="text_contains",
+                                  params={"path": str(b2), "needle": "NEEDLE_P4D"})
+    c2 = _content_contract(work_real, "wc_16f_p4d_ok_0001", expectations=(exp2,),
+                           criteria=(crit2,))
+    opens2 = {"n": 0}
+    real_open2 = builtins.open
+    tgt2 = {os.path.normcase(os.path.realpath(str(p))) for p in (a2, b2)}
+
+    def counting_open2(file, mode="r", *args, **kwargs):
+        h = real_open2(file, mode, *args, **kwargs)
+        try:
+            same = os.path.normcase(os.path.realpath(str(file))) in tgt2
+        except OSError:
+            same = False
+        if "r" in str(mode) and "b" in str(mode) and same:
+            opens2["n"] += 1
+        return h
+
+    monkeypatch.setattr(builtins, "open", counting_open2)
+    rep2 = IndependentVerifier(c2).verify(_submission(c2, "run_p4d_ok_0001"))
+    assert rep2.verdict is VerificationVerdict.VERIFIED
+    assert opens2["n"] == 2          # 别名各打开一次但只允许一个事实快照
+    assert not any(ch.check_id == "evidence:snapshot_alias_mutated"
+                   for ch in rep2.checks)
+
+
+# ================================================================
+# Reviewer Patch 4 — P4-E/P4-F: 原子最终边界（BoundarySnapshot）
+# ================================================================
+
+
+def test_p4_e_last_callback_cannot_escape(env):
+    """P4-E 否证：最终边界快照是唯一权威读取——最后一次回调的副作用必须被
+    捕获且不可逃逸：(a) 最终边界内 cost 回调把 cost 0→6（limit=5）→
+    BUDGET_EXHAUSTED；(b) 最终边界内 cancel 回调翻转为 True → CANCELLED；
+    (c) 最终边界内 now 越过 deadline → TIMEOUT；(d) 最终边界内回调抛异常 →
+    UNSTABLE_BOUNDARY——全部 final_report=None，VERIFIED 绝不成为成功结果。"""
+    tmp, work, work_real, outside, outside_real = env
+    # (a) 最终边界（第 4 次 cost 读取）内 cost 0→6
+    c = _verified_summary_contract(work_real, "wc_16f_p4e_a_0001")
+    box = {"used": 0.0, "calls": 0}
+
+    def cost_flip():
+        box["calls"] += 1
+        if box["calls"] == 4:
+            box["used"] = 6.0
+        return box["used"]
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            cost_used=cost_flip).run()
+    assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert out.final_report is None
+
+    # (b) 最终边界（第 4 次 cancel 读取）内翻转为 True
+    c2 = _verified_summary_contract(work_real, "wc_16f_p4e_b_0001")
+    flags = {"cancel": False, "calls": 0}
+
+    def cancel_flip():
+        flags["calls"] += 1
+        if flags["calls"] == 4:
+            flags["cancel"] = True
+        return flags["cancel"]
+
+    out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+                             cancel_requested=cancel_flip).run()
+    assert out2.attempts[0].verdict == "VERIFIED"
+    assert out2.stop_reason is RepairStopReason.CANCELLED
+    assert out2.final_report is None
+
+    # (c) 最终边界内的 now 读取越过 deadline（最终结果构造时越过 deadline）
+    clock = FakeClock(0.0)
+    (work_real / "summary.md").write_bytes(b"ok")
+    c3 = _contract(work_real, contract_id="wc_16f_p4e_c_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    v3 = IndependentVerifier(c3, now_fn=clock)
+    reads = {"n": 0}
+
+    def now_cross_deadline():
+        reads["n"] += 1
+        if reads["n"] == 8:           # 最终边界内的 now 读取推进时钟越过 deadline
+            clock.advance(20.0)
+        return clock.t
+
+    out3 = BoundedRepairLoop(contract=c3, verifier=v3,
+                             collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
+                             now_fn=now_cross_deadline).run()
+    assert out3.attempts[0].verdict == "VERIFIED"
+    assert out3.stop_reason is RepairStopReason.TIMEOUT
+    assert out3.final_report is None
+    assert clock.t == 20.0
+
+    # (d) 最终边界内回调抛异常 → 无法取得稳定安全结果 → fail-closed
+    c4 = _verified_summary_contract(work_real, "wc_16f_p4e_d_0001")
+    cancel_calls = {"n": 0}
+
+    def cancel_boom():
+        cancel_calls["n"] += 1
+        if cancel_calls["n"] >= 4:    # 最终边界内 cancel 回调抛异常
+            raise RuntimeError("final boundary callback exploded")
+        return False
+
+    out4 = BoundedRepairLoop(contract=c4, verifier=IndependentVerifier(c4),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c4, r),
+                             cancel_requested=cancel_boom).run()
+    assert out4.attempts[0].verdict == "VERIFIED"
+    assert out4.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out4.final_report is None
+    assert "final_boundary_unstable" in out4.diagnostic
+
+
+def test_p4_f_no_post_boundary_now_callback(env):
+    """P4-F 否证：接受 VERIFIED 前只原子读取**一次**最终 BoundarySnapshot——
+    此后不再调用任何 now/cost/cancel/verifier 回调；RepairOutcome.finished_
+    at_epoch 直接用 snapshot.now 构造（最后一个 now 值，零回调再发生）。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    c = _verified_summary_contract(work_real, "wc_16f_p4f_0001")
+    now_calls: list = []
+    clock = {"t": 0.0}
+
+    def now_fn():
+        now_calls.append(clock["t"])
+        return clock["t"]
+
+    cost_calls = {"n": 0}
+    boundary_cost_idx = {"n": None}
+
+    def cost_used():
+        cost_calls["n"] += 1
+        if cost_calls["n"] == 4:      # 最终边界内的 cost 读取
+            boundary_cost_idx["n"] = len(now_calls)
+        return 0.0
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c, now_fn=now_fn),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            cost_used=cost_used, now_fn=now_fn).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.final_report is not None
+    # 最终边界 cost 读取之后只允许边界自身的唯一一次 now 读取——零回调可再发生
+    assert cost_calls["n"] == 4
+    assert len(now_calls) == boundary_cost_idx["n"] + 1
+    assert out.finished_at_epoch == now_calls[-1]
+
+
+# ================================================================
+# Reviewer Patch 4 — P4-G/P4-H: 完整秘密边界
+# ================================================================
+
+
+def test_p4_g_long_secret_fully_redacted(env):
+    """P4-G 否证：600 字符秘密值必须**匹配至真实分隔符**整体脱敏——旧量词
+    {0,512} 只匹配前 512 字符、尾部 88 字符泄漏；现在尾部零泄漏。键值对 /
+    授权头 / 引号三种形态 + 端到端秘密形态路径异常回显。"""
+    from furina.agent.verification import scrub_secrets
+    secret = "sk-live-" + "A" * 600
+    assert len(secret) > 512
+    # 键值对形态
+    s1 = scrub_secrets(f"x.api_key={secret} ok")
+    assert secret not in s1 and "[REDACTED]" in s1
+    # 授权头形态
+    s2 = scrub_secrets(f"authorization: Bearer {secret}")
+    assert secret not in s2 and "[REDACTED]" in s2
+    # 引号形态
+    s3 = scrub_secrets(f'password="{secret}"')
+    assert secret not in s3 and "[REDACTED]" in s3
+    # 端到端：秘密形态路径异常回显不得含长秘密尾部
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    evil = str(work_real / f"password={secret}.md")
+    with pytest.raises(VerificationInputError) as ei:
+        v.verify(_submission(c, "run_p4g_0001", declared=[_declared(evil)]))
+    msg = str(ei.value)
+    assert secret not in msg and "[REDACTED]" in msg
+
+
+def test_p4_h_public_string_surfaces_secret_safe(env):
+    """P4-H 否证：公开导出字符串类型封闭或脱敏——TerminalObservation.kind
+    （16E 封闭词表）/ ArtifactObservation.source（expectation|declared）词表
+    外值（含秘密形态）直接拒绝；rejection/name_mime/content_rejection/路径面
+    统一脱敏——任意 to_dict()/to_digest_dict() 导出不含 raw secret；
+    verifier_id 走 canonical validate_identity。"""
+    from furina.agent.verification import (
+        ArtifactObservation,
+        EvidenceBundle,
+        TerminalObservation,
+    )
+    secret = "api_key=sk-" + "B" * 40
+    # kind 类型封闭（秘密形态/词表外值拒绝）
+    with pytest.raises(VerificationError):
+        TerminalObservation(event_id="evt_0001", kind=secret,
+                            observed_at_epoch=1.0, bound=True)
+    # source 类型封闭
+    with pytest.raises(VerificationError):
+        ArtifactObservation(secret, "doc", "/p/a.md", "/p/a.md", True, True,
+                            True, 3, "text/plain", "0" * 64, "", "text/markdown")
+    # 合法构造：字符串面带秘密形态 → 构造面脱敏，导出无 raw secret
+    ao = ArtifactObservation("expectation", "doc", "/p/" + secret + ".md",
+                             "/p/" + secret + ".md", True, True, True, 3,
+                             "text/plain", "0" * 64,
+                             "rejected:" + secret, "mime:" + secret,
+                             "content:" + secret)
+    ev = EvidenceBundle(contract_id="wc_16f_p4h_0001", contract_hash="0" * 64,
+                        run_id="run_p4h_0001", backend_id="native_agent",
+                        terminal=(), artifacts=(ao,))
+    blob = json.dumps(ev.to_dict()) + json.dumps(ev.to_digest_dict())
+    assert secret not in blob
+    assert "[REDACTED]" in blob
+    # verifier_id canonical（秘密形态直接拒绝，绝不脱敏后继续导出）
+    base = dict(report_id="vrp_" + "a" * 32, verifier_id=VERIFIER_ID,
+                contract_id="wc_16f_p4h_0001", contract_hash="0" * 64,
+                standard_hash="0" * 64, run_id="run_p4h_0001",
+                backend_id="native_agent", verdict=VerificationVerdict.FAILED,
+                checks=(), diagnostics=(), evidence=ev,
+                started_at_epoch=1.0, finished_at_epoch=2.0)
+    kw = dict(base)
+    kw["verifier_id"] = "password:hunter2"
+    with pytest.raises(VerificationError):
+        VerificationReport(**kw)
+
+
+# ================================================================
+# Reviewer Patch 4 — P4-I/P4-J: 执行前资源门 + 图像解码上界
+# ================================================================
+
+
+def test_p4_i_excessive_criteria_rejected_before_execution(env, monkeypatch):
+    """P4-I 否证：契约判据数量使 check 估计超过 MAX_REPORT_CHECKS 时，在
+    **任何文件读取或进程启动之前**拒绝（VerificationInputError）——零文件
+    打开、零进程启动。"""
+    import subprocess as sp
+
+    tmp, work, work_real, outside, outside_real = env
+    criteria = tuple(
+        VerificationCriterion(criterion_id=f"crit_{i:03d}",
+                              kind="artifact_file_exists",
+                              params={"path": str(work_real / "x.md")})
+        for i in range(MAX_REPORT_CHECKS + 1))
+    c = _contract(work_real, contract_id="wc_16f_p4i_0001",
+                  verification_standard=VerificationStandard(criteria=criteria))
+    opens = {"n": 0}
+    real_open = builtins.open
+    tgt = os.path.normcase(os.path.realpath(str(work_real)))
+
+    def counting_open(file, mode="r", *a, **k):
+        try:
+            if "r" in str(mode) and "b" in str(mode) \
+                    and os.path.normcase(os.path.realpath(str(file))).startswith(tgt):
+                opens["n"] += 1
+        except OSError:
+            pass
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", counting_open)
+    popens = {"n": 0}
+    real_popen = sp.Popen
+
+    def counting_popen(*a, **k):
+        popens["n"] += 1
+        return real_popen(*a, **k)
+
+    monkeypatch.setattr(sp, "Popen", counting_popen)
+    with pytest.raises(VerificationInputError):
+        IndependentVerifier(c).verify(_submission(c, "run_p4i_0001"))
+    assert opens["n"] == 0            # 零文件读取
+    assert popens["n"] == 0           # 零进程启动
+
+
+def _png_header_bomb(width: int = 100000, height: int = 100000) -> bytes:
+    """只含 IHDR（声明超大尺寸）的 PNG 头——解压炸弹；绝不被实际解码。"""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        c = struct.pack(">I", len(data)) + tag + data
+        return c + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
+
+
+def test_p4_j_decompression_bomb_rejected_before_load(env):
+    """P4-J 否证：头部声明超大尺寸的 PNG（解压炸弹）在 load() 前被 width/
+    height/像素数上界拒绝（malformed_content:image_dimension / image_pixels /
+    image_structure，Pillow DecompressionBombError 路径同样 fail-closed）——
+    required FAIL、绝不 VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    for tag, blob in (("dimension", _png_header_bomb(9000, 9000)),
+                      ("bomb_error", _png_header_bomb(100000, 100000)),
+                      ("pixels", _png_header_bomb(5000, 100))):
+        art = work_real / "bomb.png"
+        art.write_bytes(blob)
+        c = _expectation_contract(work_real, f"wc_16f_p4j_{tag}_0001",
+                                  atype="png_image", path=art)
+        rep = IndependentVerifier(c).verify(_submission(c, f"run_p4j_{tag}_0001"))
+        assert rep.verdict is VerificationVerdict.FAILED, tag
+        assert rep.authority_seal == ""
+        assert any(ch.result is CheckResult.FAIL
+                   and ch.explanation.startswith("malformed_content:image_")
+                   for ch in rep.checks), tag

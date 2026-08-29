@@ -1,5 +1,5 @@
 # Phase 16 — 16F Independent Verification & Bounded Repair
-# Closeout Report — EXACT TEMPLATE（Reviewer Patch 3 后状态）
+# Closeout Report — EXACT TEMPLATE（Reviewer Patch 4 后状态）
 
 ```text
 STATUS                         = EXECUTED — 16F 独立验证 + 有界修复已实现并全量
@@ -71,7 +71,38 @@ STATUS                         = EXECUTED — 16F 独立验证 + 有界修复已
                                  路径异常回显脱敏（禁止 {path!r} 原文）；
                                  (B6) 安全测试禁止 skip——PowerShell 枚举不可
                                  用 → FAIL（P2-T/进程树终止测试），P3 新增
-                                 安全否证零 skip/xfail；backend completed/
+                                 安全否证零 skip/xfail；Reviewer Patch 4 在
+                                 同一分支上修复 6 组 blocker：(P4-A) PDF 对象图
+                                 /Root 图/trailer 尾全封闭——n 条目对象必须匹配
+                                 obj...endobj、对象体必须是平衡字典（文本对象
+                                 拒绝）、Root xref 必须 n（free Root 拒绝）、
+                                 Root 必须 /Type /Catalog（伪 Catalog 拒绝）、
+                                 Catalog 必须引用有效 /Pages、/Size 必须等于
+                                 xref 覆盖最高对象号 + 1、trailer 后只允许
+                                 startxref/EOF/空白（带真实 xref 的伪对象/
+                                 缺 endobj/free Root/伪 Catalog 全部拒绝）；
+                                 (P4-B) 文件类判据在 kind 分支分流前统一拒绝
+                                 空文件（artifact_empty FAIL——空 SHA/^$ regex
+                                 都不得 PASS）；(P4-C) FileSnapshot 携带 OS 物理
+                                 身份（POSIX dev+inode / Windows volume-serial+
+                                 file-index）——symlink/junction/hardlink 别名
+                                 同一物理文件只允许一个事实快照，第二别名观察到
+                                 不同 size/sha/mtime → 全局 required
+                                 snapshot_alias_mutated FAIL（硬链接 JSON→文本
+                                 复现攻击 FAILED）；(P4-D) 接受 VERIFIED 前原子
+                                 取得**一次**权威 BoundarySnapshot（contract
+                                 hash→cancelled→cost→新鲜 now），判定与
+                                 RepairOutcome 构造只依据该快照、此后零回调，
+                                 回调异常 → UNSTABLE_BOUNDARY，禁止"再多扫
+                                 一轮"轮次递增修复（移除三轮扫描）；(P4-E)
+                                 秘密值匹配至真实分隔符整体脱敏（600 字符秘密
+                                 尾部零泄漏），kind/source 类型封闭、公开导出
+                                 字符串统一脱敏、verifier_id canonical 验证；
+                                 (P4-F) 执行前资源门（期望/声明数量、check
+                                 估计、快照总字节 ≤64MiB，超限零文件读取零进程
+                                 启动）+ 图像解码上界（width/height/像素有界，
+                                 解压炸弹 load() 前拒绝、DecompressionBomb
+                                 Warning/Error fail-closed）；backend completed/
                                  exit 0/成功文本/自报 verified 一律不是证明；
                                  不写 C7/C6/C3、不实现 16G/16H、不修改
                                  C1–C7/schema/migration、16A/16B/16C/16D/16E
@@ -295,6 +326,119 @@ FULL_SUITE                       = 1837 passed / 0 failed / 15 warnings（仅一
                                    15 warnings 全部来自非 16F 既有套件——16F 包
                                    零外部导入方，16F targeted 零 warnings 零
                                    skipped）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 16F 自有五源文件 + 1 测试文件
+                                   + 本 closeout）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+READY_FOR_REVIEW                 = YES
+```
+
+## 0.00 Patch 4 回执（Reviewer Patch 4 专用）
+
+```text
+BASE_SHA                         = c1bf2b1c8e0893ee1aeeffe966e9dd4c3afcb16e
+                                   （PATCH3_FINAL_SHA；Patch 4 唯一 BASE_SHA）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–3 惯例）
+CHANGED_FILES                    = furina/agent/verification/__init__.py, models.py,
+                                   checks.py, verifier.py, repair.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（Patch 4 无新增私有辅助文件——
+                                   P4 全部测试内联于既有测试文件）
+PDF_OBJECT_GRAPH_VALID            = true（P4-A：PDF 验证升级为对象图 / Root 图 /
+                                   trailer 尾全封闭——每个 n 条目对象必须匹配
+                                   obj...endobj（缺 endobj / 对象间非空白内容 /
+                                   多余对象定义一律 fail-closed）、对象体必须是
+                                   完整平衡字典（任意文本对象体 → pdf_obj_not_
+                                   dict）、Root xref 必须是 n（free Root →
+                                   pdf_root_free）、Root 必须是字典且含 /Type
+                                   /Catalog（伪 Catalog → pdf_root_not_catalog）、
+                                   Catalog 必须引用有效 /Pages 对象（n 条目 +
+                                   字典 + /Type /Pages → pdf_pages_*）、/Size
+                                   必须等于 xref 覆盖最高对象号 + 1
+                                   （pdf_size_mismatch）、trailer 之后只允许
+                                   startxref+偏移+空白+%%EOF（pdf_trailer_tail
+                                   / pdf_eof_after_startxref）——带真实 xref 的
+                                   伪对象 / 缺 endobj / free Root / 伪 Catalog
+                                   全部拒绝；P4-A/P4-B 否证 + P3-A/P3-B/P2-F/
+                                   P2-G 正反例全保留）
+EMPTY_CRITERIA_BLOCKED            = true（P4-B：文件类判据在 kind 分支分流前
+                                   统一执行 size==0 → artifact_empty FAIL——
+                                   artifact_file_exists 存在本身 / artifact_
+                                   sha256 空串 e3b0… 哈希 / text_contains /
+                                   regex_matches ^$ 都不得以空文件 PASS；
+                                   P4-C 四判据否证锁定）
+PHYSICAL_IDENTITY_SNAPSHOT        = true（P4-C：FileSnapshot 携带 OS 物理身份
+                                   （POSIX st_dev+st_ino / Windows volume-serial
+                                   +file-index，os.stat 同形）与 mtime_ns——
+                                   symlink/junction/hardlink 别名指向同一物理
+                                   文件只允许一个事实快照（同一 (size, sha256,
+                                   mtime_ns) 复用首快照）；第二别名观察到不同
+                                   事实 → 全局 required snapshot_alias_mutated
+                                   FAIL，expectation/declared/criterion 绝不
+                                   组合不同版本；硬链接 JSON→文本复现攻击
+                                   FAILED（P4-D 否证 + 未改写别名正对照 VERIFIED）
+ATOMIC_FINAL_BOUNDARY             = true（P4-D：接受 VERIFIED 前原子取得**一次**
+                                   最终 BoundarySnapshot（contract hash →
+                                   cancelled → cost → 新鲜 now）——判定只依据
+                                   该快照，RepairOutcome 直接用 snapshot.now
+                                   构造；禁止"再多扫一轮"的轮次递增修复（移除
+                                   _FINAL_BOUNDARY_SCAN_LIMIT 三轮扫描）；最后
+                                   一次回调修改 cost → BUDGET_EXHAUSTED、翻转
+                                   cancellation → CANCELLED、now 越过 deadline
+                                   → TIMEOUT、快照内回调异常 → UNSTABLE_BOUNDARY
+                                   全部 final_report=None（P4-E 四变体否证）
+POST_BOUNDARY_CALLBACKS           = false（P4-F：最终边界快照之后零
+                                   cost/cancel/now/verifier 回调——最终边界
+                                   cost 读取后只允许边界自身唯一一次 now 读取，
+                                   RepairOutcome.finished_at_epoch == 快照 now；
+                                   P4-F 断言 now/cost 回调计数锁死）
+LONG_SECRET_FULLY_REDACTED        = true（P4-G：秘密值匹配**至真实分隔符**
+                                   （键值对 / 引号 / 授权头 scheme 值量词从
+                                   {0,512} 改为 +/*）——600 字符秘密尾部零泄漏，
+                                   输出限长由调用方完成；端到端秘密形态路径
+                                   异常回显同样不回显长秘密尾部）
+PUBLIC_EXPORT_SECRET_SAFE         = true（P4-H：TerminalObservation.kind 走 16E
+                                   封闭词表（词表外 / 秘密形态构造面拒绝）、
+                                   ArtifactObservation.source 类型封闭
+                                   （expectation|declared）、rejection/name_mime/
+                                   content_rejection/路径面统一脱敏限长、
+                                   VerificationReport.verifier_id 走 canonical
+                                   validate_identity——任意 to_dict() /
+                                   to_digest_dict() / to_json() 导出不含 raw
+                                   secret）
+PREFLIGHT_RESOURCE_LIMITS         = true（P4-F：verify() 在任何文件读取/进程
+                                   启动前执行资源门——artifact expectations
+                                   ≤32、declared artifacts ≤32、criteria/check
+                                   估计 ≤ MAX_REPORT_CHECKS（保守上界）、快照
+                                   总字节上界（唯一路径 × 8 MiB）≤ 64 MiB——
+                                   超限立即 VerificationInputError，零文件打开
+                                   零进程启动（P4-I 断言 open/Popen 计数为 0）
+IMAGE_DECODE_BOUNDED              = true（P4-J：图像结构验证在 load() 前增加
+                                   width/height ≤ 4096、解码像素 ≤ 4096² 上界——
+                                   头部声明超大尺寸的 PNG 解压炸弹拒绝于解码前
+                                   （image_dimension / image_pixels），Pillow
+                                   DecompressionBombError/Warning 路径同样
+                                   fail-closed（image_structure））
+TARGETED                         = 158 passed / 0 failed / 0 skipped（原 148 全
+                                   保留 + Patch 4 新增 10：P4-A fake Root object
+                                   rejected / P4-B missing endobj·free Root
+                                   rejected / P4-C empty SHA·regex rejected /
+                                   P4-D hardlink alias cross-snapshot rejected /
+                                   P4-E last callback cannot escape /
+                                   P4-F no post-boundary now callback /
+                                   P4-G 600-char secret fully redacted /
+                                   P4-H public string surfaces secret-safe /
+                                   P4-I excessive criteria rejected before
+                                   execution / P4-J decompression bomb rejected
+                                   before load）
+TESTS_AGENT                      = 565 passed（tests/agent 全目录一次）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1847 passed / 0 failed / 15 warnings（仅一次；
+                                   15 warnings 全部来自非 16F 既有套件——16F
+                                   targeted 158 passed 且 -W error::UserWarning
+                                   零 warnings 零 skipped）
 C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
                                    git diff 仅 16F 自有五源文件 + 1 测试文件
                                    + 本 closeout）
@@ -545,6 +689,90 @@ READY_FOR_REVIEW                 = YES
   判据 fail-closed NOT_EVALUABLE → INCONCLUSIVE/零 seal，绝不 best-effort
   PASS、绝不 skip；证明可用（win32 Job Object）时真实评估 exit 0 → VERIFIED。
 
+## 0.95 Reviewer Patch 4 — 6 组 blocker 修复摘要（P4-A..P4-F）
+
+### P4-A — PDF 对象图 / Root 图 / trailer 尾全封闭
+
+- `_validate_pdf_structure`（models.py）在 Patch 3 封闭结构（header/xref/
+  startxref/trailer/EOF 偏移关系）之上补全对象图：每个 `n` 条目对象必须匹配
+  `obj ... endobj`（缺 `endobj` → `pdf_obj_missing_endobj`；对象之间出现非
+  空白内容 / 最后一个 endobj 与 xref 之间非空白 / 文件里定义的对象号 ≠ xref
+  `n` 条目对象号 → `pdf_obj_graph`——任意文本对象与多余对象定义全部拒绝）；
+  对象体必须是完整平衡字典（文本/流对象体 → `pdf_obj_not_dict`）；
+- Root 图：Root 的 xref 条目必须是 `n`（free Root → `pdf_root_free`）、
+  Root 字典必须含 `/Type /Catalog`（伪 Catalog → `pdf_root_not_catalog`）、
+  Catalog 必须引用有效 `/Pages` 对象（`n` 条目 + 字典 + `/Type /Pages` →
+  `pdf_root_no_pages` / `pdf_pages_*`）；`/Size` 必须等于 xref 覆盖最高对象
+  号 + 1（`pdf_size_mismatch`）；trailer 之后只允许 `startxref` + 十进制偏移
+  + 空白 + `%%EOF`（文本对象/多余 token → `pdf_trailer_tail` /
+  `pdf_eof_after_startxref`）；`startxref` 偏移必须再次等于 trailer 之后的
+  数字（双路径一致，多重 startxref fail-closed）。P4-A（伪 Root 文本对象 +
+  伪 Catalog）与 P4-B（缺 endobj / free Root / Size 失配 / trailer 尾文本）
+  否证锁定；合法最小 PDF 正对照与 P3-A/P3-B/P2-F/P2-G 全部保留。
+
+### P4-B — 空文件判据统一拒绝
+
+- `check_criterion` 在文件类判据（artifact_file_exists / artifact_sha256 /
+  text_contains / regex_matches）的 kind 分支分流**之前**统一执行
+  `size == 0 → artifact_empty FAIL`——空文件 SHA（即使等于空串 e3b0c… 哈希）
+  与空文件 `^$` regex 都不得 PASS；P4-C 四判据否证锁定（全部 required FAIL、
+  绝不 VERIFIED）。
+
+### P4-C — 物理文件单快照（OS 身份锚定）
+
+- `FileSnapshot` 新增 `physical_id`（POSIX `st_dev`+`st_ino`；Windows
+  `os.stat` 同形为 volume-serial + file-index，来自已证明句柄的 fstat）与
+  `mtime_ns`；`_PathSnapshotCache` 按物理身份去重——symlink / junction /
+  hardlink 别名指向同一物理文件时只允许**一个事实快照**：第二别名与首快照
+  的 (size, sha256, mtime_ns) 一致则复用首快照（零版本组合）；不一致（验证
+  期间经任一别名改写同一 inode）→ 全局 required `snapshot_alias_mutated`
+  FAIL，expectation / declared / criterion 绝不组合不同版本、最终绝不
+  VERIFIED。P4-D 否证：hardlink JSON→文本复现攻击（第二别名捕获同一 inode
+  的不同事实）→ FAILED / 零 seal；未改写别名正对照 → 复用首快照 VERIFIED。
+
+### P4-D — 原子最终边界（BoundarySnapshot）
+
+- `run()` 在 `_accept_verified_report` 完成后**原子取得一次**权威
+  `BoundarySnapshot`（contract hash → cancelled → cost → 新鲜 now）——
+  判定（`_decide_final_boundary`）只依据该快照（成本超限 / 取消 / now 越过
+  deadline / 契约 hash 漂移 → final_report=None），RepairOutcome 直接用
+  `snapshot.now` 构造 finished_at_epoch，此后**零回调**（cost/cancel/now/
+  verifier 一律不再调用）；回调异常 → `UNSTABLE_BOUNDARY` fail-closed。
+  读取次序 cancelled→cost→now 使 cancellation 回调改写 cost 的副作用被其后
+  的 cost 读取捕获（P3-G(a) 变体保持拦截）。**移除** `_FINAL_BOUNDARY_
+  SCAN_LIMIT` 三轮扫描——禁止"再多扫一轮"的轮次递增修复。legacy 分散回调
+  仍用于前置停止，但不得单独授权最终 VERIFIED。P4-E 四变体否证（最后一次
+  cost 回调 0→6 / 最后一次 cancel 回调翻转 / 最终边界 now 越过 deadline /
+  快照内回调异常）全部 final_report=None；P4-F 断言最终边界 cost 读取后只
+  允许边界自身唯一一次 now 读取且 finished_at_epoch == 快照 now；P3-G/P3-H
+  /P2-Q/P2-R 既有边界否证全部保留。
+
+### P4-E — 完整秘密边界
+
+- `_SECRET_KV_RE` / `_SECRET_SCHEME_RE` 的值量词从 `{0,512}` 改为 `+`/`*`
+  ——秘密值**匹配至真实分隔符**整体脱敏（600 字符秘密尾部零泄漏），输出限
+  长由调用方（`_bounded_text` / `[:N]`）完成（P4-G 三种形态 + 端到端路径
+  异常回显否证）；
+- `TerminalObservation.kind` 走 16E `EventKind` 封闭词表、`ArtifactObservation.
+  source` 类型封闭（expectation | declared）——词表外值（含秘密形态）构造面
+  直接拒绝；`rejection` / `name_mime` / `content_rejection` / 路径面统一脱敏
+  限长；`VerificationReport.verifier_id` 走 canonical `validate_identity`
+  （P4-H 断言任意 to_dict()/to_digest_dict()/to_json() 导出不含 raw secret）。
+
+### P4-F — 执行前资源门 + 图像解码上界
+
+- `verify()` 在 `_collect_bundle` / `_run_checks` 之前执行
+  `_preflight_resource_gates`：artifact expectations ≤ 32、declared artifacts
+  ≤ 32、criteria/check 估计 ≤ MAX_REPORT_CHECKS（保守上界）、快照总字节上界
+  （唯一路径 × 8 MiB）≤ 64 MiB（新常量 `MAX_SNAPSHOT_TOTAL_BYTES`）——超限
+  立即 `VerificationInputError`，**零文件读取、零进程启动**（P4-I 断言
+  open/Popen 计数为 0）；
+- `_validate_image_structure` 在 `load()` 前增加 width/height ≤
+  `MAX_IMAGE_DIMENSION`（4096）、解码像素 ≤ `MAX_IMAGE_PIXELS`（4096²）上界
+  ——头部声明超大尺寸的 PNG 解压炸弹拒绝于解码前（`image_dimension` /
+  `image_pixels`），load() 期间 `DecompressionBombWarning` 升级为异常 →
+  `image_structure` fail-closed（P4-J 三变体否证）。
+
 ## 1. 权威模型（关键锁定 1/2/3）
 
 - **VERIFIED 只能由 16F 独立验证成功产生**：`IndependentVerifier.verify()` 在
@@ -629,7 +857,7 @@ READY_FOR_REVIEW                 = YES
 - approval-gated 契约（approval_required_each_step / on_risk_level）构造期
   强制要求 approval_authority，缺失即拒绝构造（fail-closed）。
 
-## 4. 测试覆盖（tests/agent/integration/test_phase16f_…py，136 项）
+## 4. 测试覆盖（tests/agent/integration/test_phase16f_…py，158 项）
 
 - 原 109 项（§7.1–§7.12 + exact-schema/冻结/导出/身份 + Patch 1 的
   B1–B8 否证正例）全部保留并通过；Patch 2 仅做语义保持的夹具适配：
@@ -679,7 +907,9 @@ READY_FOR_REVIEW                 = YES
    提供；Windows 路径为 Job Object 硬约束全量可用。
 4. **图像结构验证依赖 Pillow**：PNG/JPEG 结构验证使用现有 Pillow
    （verify+load）；decoder 缺失/无法确认 → fail-closed（`malformed_content:
-   image_verifier_unavailable`），绝不误通过。
+   image_verifier_unavailable`），绝不误通过；Patch 4（P4-J）另加
+   width/height/解码像素上界——头部声明超大尺寸的 PNG 解压炸弹在 load()
+   前拒绝，DecompressionBombWarning/Error 路径同样 fail-closed。
 5. **symlink 本体测试宿主依赖**：本宿主无 symlink 特权（WinError 1314），
    逃逸/交换测试以 junction 等价执行并通过；`os.symlink` 专属语义需在 Dev
    Mode/POSIX 宿主复跑（测试在链接机制完全不可用的宿主自动 skip）。
@@ -697,6 +927,10 @@ READY_FOR_REVIEW                 = YES
    复核（16G 持久化后重验）需要组合根持有同一实例或引入可持久化密钥——
    留给 16G/16I 的装配决策，16F 不擅自引入密钥存储。
 9. **受支持 PDF 结构为封闭确定性子集**：偏移 0 header + 版本号 + 尾部
-   `%%EOF`——满足该封闭结构的 PDF 通过，其余 fail-closed（不做任意 PDF
-   语法完整解析；这是显式的、确定的受支持结构声明）。
+   `%%EOF` + 经典 xref + trailer——Patch 3 已验证 header/xref/startxref/
+   trailer/EOF 与偏移关系，Patch 4（P4-A）再补对象图（obj...endobj 匹配、
+   对象体必须为平衡字典）、Root 图（n 非 free、/Type /Catalog、/Pages 引用）
+   与 trailer 尾（只允许 startxref/EOF/空白）——满足该封闭结构的 PDF 通过，
+   其余 fail-closed（不做任意 PDF 语法完整解析；这是显式的、确定的受支持
+   结构声明）。
 ```
