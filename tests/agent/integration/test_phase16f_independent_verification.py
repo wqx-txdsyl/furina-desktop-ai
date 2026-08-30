@@ -3634,3 +3634,540 @@ def test_p4_j_decompression_bomb_rejected_before_load(env):
         assert any(ch.result is CheckResult.FAIL
                    and ch.explanation.startswith("malformed_content:image_")
                    for ch in rep.checks), tag
+
+
+# ================================================================
+# Reviewer Patch 5 — P5-A: 真正封闭最终边界（版本一致性协议）
+# ================================================================
+
+def test_p5_a_final_now_callback_mutating_cost_cannot_verify(env):
+    """P5-A 锁定 1：最终边界内的 now 回调把 cost 0→6 —— 旧单次顺序读取
+    （cancel→cost→now）下最后的 now_fn 改写已读取的 cost 会让越界 VERIFIED
+    逃逸；版本一致性协议下必须不得 VERIFIED（final_report=None）。"""
+    tmp, work, work_real, outside, outside_real = env
+    # (a) 改写发生在权威采集的 now₂（夹逼起点）——其后的 cost₂ 读取捕获
+    clock = FakeClock(0.0)
+    (work_real / "summary.md").write_bytes(b"ok")
+    c = _contract(work_real, contract_id="wc_16f_p5a_a_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    box = {"used": 0.0}
+    nows = {"n": 0}
+
+    def now_mutates_at_now2():
+        nows["n"] += 1
+        if nows["n"] == 10:           # acq2 的 now₂（权威采集夹逼起点）
+            box["used"] = 6.0
+        return clock.t
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c, now_fn=now_mutates_at_now2),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cost_used=lambda: box["used"], now_fn=now_mutates_at_now2).run()
+    assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert out.final_report is None
+
+    # (b) 改写发生在见证采集的 now₁——权威采集的 cost₂ 读取捕获
+    clock2 = FakeClock(0.0)
+    c2 = _contract(work_real, contract_id="wc_16f_p5a_b_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    box2 = {"used": 0.0}
+    nows2 = {"n": 0}
+
+    def now_mutates_at_now1():
+        nows2["n"] += 1
+        if nows2["n"] == 9:           # acq1 的 now₁（见证采集最后读取项）
+            box2["used"] = 6.0
+        return clock2.t
+
+    out2 = BoundedRepairLoop(
+        contract=c2, verifier=IndependentVerifier(c2, now_fn=now_mutates_at_now1),
+        collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+        cost_used=lambda: box2["used"], now_fn=now_mutates_at_now1).run()
+    assert out2.attempts[0].verdict == "VERIFIED"
+    assert out2.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert out2.final_report is None
+
+
+def test_p5_a_last_read_rewrite_cannot_verify(env):
+    """P5-A 锁定 2：最终边界采集内**任意读取项**改写其它边界状态 → 不得
+    VERIFIED（worst-wins 聚合 + now 夹逼 cost/cancel 读取 + 尾随 cancel 见证
+    全部拦截；越界后的 VERIFIED report 绝不成为成功结果）。"""
+    tmp, work, work_real, outside, outside_real = env
+    # (a) cost 回调（见证采集）改写取消标志 → 权威采集 cancel 捕获 → CANCELLED
+    c = _verified_summary_contract(work_real, "wc_16f_p5a_c_0001")
+    flags = {"cancel": False}
+    cost_calls = {"n": 0}
+
+    def cost_rewrites_cancel():
+        cost_calls["n"] += 1
+        if cost_calls["n"] == 3:      # 见证采集的 cost₁
+            flags["cancel"] = True
+        return 0.0
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            cost_used=cost_rewrites_cancel,
+                            cancel_requested=lambda: flags["cancel"]).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.CANCELLED
+    assert out.final_report is None
+
+    # (b) cost 回调（权威采集 cost₂）推进时钟 → 其后的 now₃ 捕获 → TIMEOUT
+    clock = FakeClock(0.0)
+    (work_real / "summary.md").write_bytes(b"ok")
+    c2 = _contract(work_real, contract_id="wc_16f_p5a_d_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    adv = {"n": 0}
+
+    def cost_advances_at_cost2():
+        adv["n"] += 1
+        if adv["n"] == 4:             # 权威采集的 cost₂
+            clock.advance(20.0)       # 0 → 20 > deadline 15
+        return 0.0
+
+    out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2, now_fn=clock),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+                             cost_used=cost_advances_at_cost2, now_fn=clock).run()
+    assert out2.attempts[0].verdict == "VERIFIED"
+    assert out2.stop_reason is RepairStopReason.TIMEOUT
+    assert out2.final_report is None
+    assert clock.t == 20.0
+
+    # (c) cancel 回调（权威采集 cancel₂）改写 cost → 其后的 cost₂ 捕获 →
+    #     BUDGET_EXHAUSTED
+    c3 = _verified_summary_contract(work_real, "wc_16f_p5a_e_0001")
+    box3 = {"used": 0.0}
+    cancels = {"n": 0}
+
+    def cancel_rewrites_cost():
+        cancels["n"] += 1
+        if cancels["n"] == 4:         # 权威采集的 cancel₂
+            box3["used"] = 6.0
+        return False
+
+    out3 = BoundedRepairLoop(contract=c3, verifier=IndependentVerifier(c3),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
+                             cost_used=lambda: box3["used"],
+                             cancel_requested=cancel_rewrites_cost).run()
+    assert out3.attempts[0].verdict == "VERIFIED"
+    assert out3.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert out3.final_report is None
+
+    # (d) now 回调（权威采集 now₃）改写取消标志 → 尾随 cancel 见证捕获 →
+    #     CANCELLED（"最后读取项改写其它状态"不再不可见）
+    clock4 = FakeClock(0.0)
+    (work_real / "summary.md").write_bytes(b"ok")
+    c4 = _contract(work_real, contract_id="wc_16f_p5a_f_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    flags4 = {"cancel": False}
+    nows4 = {"n": 0}
+
+    def now_rewrites_cancel():
+        nows4["n"] += 1
+        if nows4["n"] == 11:          # 权威采集的 now₃（最后的 now 读取）
+            flags4["cancel"] = True
+        return clock4.t
+
+    out4 = BoundedRepairLoop(contract=c4,
+                             verifier=IndependentVerifier(c4, now_fn=now_rewrites_cancel),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c4, r),
+                             cancel_requested=lambda: flags4["cancel"],
+                             now_fn=now_rewrites_cancel).run()
+    assert out4.attempts[0].verdict == "VERIFIED"
+    assert out4.stop_reason is RepairStopReason.CANCELLED
+    assert out4.final_report is None
+
+
+def test_p5_a_unprovable_snapshot_fail_closed(env):
+    """P5-A 锁定 3：快照异常 / 版本变化（重入 → epoch 记账失配）/ 无法证明
+    一致（时钟回拨 / 采集中途契约漂移）→ UNSTABLE_BOUNDARY fail-closed，
+    final_report=None，VERIFIED 绝不成为成功结果。"""
+    tmp, work, work_real, outside, outside_real = env
+    # (a) 权威采集内 now 回调抛异常 → 传播 → UNSTABLE_BOUNDARY
+    clock = FakeClock(0.0)
+    (work_real / "summary.md").write_bytes(b"ok")
+    c = _contract(work_real, contract_id="wc_16f_p5a_g_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    nows = {"n": 0}
+
+    def now_boom():
+        nows["n"] += 1
+        if nows["n"] == 10:           # 权威采集的 now₂
+            raise RuntimeError("now callback exploded")
+        return clock.t
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c, now_fn=now_boom),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            now_fn=now_boom).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert "final_boundary_unstable" in out.diagnostic
+
+    # (b) 版本变化：now 回调经仪表通道重入 cost 回调 → epoch 记账失配 →
+    #     无法证明一致 → UNSTABLE_BOUNDARY
+    c2 = _verified_summary_contract(work_real, "wc_16f_p5a_h_0001")
+    nows2 = {"n": 0}
+    loop2 = BoundedRepairLoop(
+        contract=c2, verifier=IndependentVerifier(c2),
+        collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+        cost_used=lambda: 0.0)
+
+    def now_reenters():
+        nows2["n"] += 1
+        if nows2["n"] == 10:          # 最终边界采集内的 now 读取
+            loop2._w_cost_used()      # 经仪表通道重入 → epoch 多记一次
+        return 1000.0
+
+    loop2._w_now = now_reenters       # 注入重入型 now 回调（同一仪表层）
+    out2 = loop2.run()
+    assert out2.attempts[0].verdict == "VERIFIED"
+    assert out2.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out2.final_report is None
+    assert "final_boundary_unstable" in out2.diagnostic
+
+    # (c) 时钟回拨：权威采集 now₂=5.0 → now₃=1.0（非单调）→ 无法证明一致
+    clock3 = FakeClock(0.0)
+    (work_real / "summary.md").write_bytes(b"ok")
+    c3 = _contract(work_real, contract_id="wc_16f_p5a_i_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    nows3 = {"n": 0}
+
+    def now_backwards():
+        nows3["n"] += 1
+        if nows3["n"] == 10:          # 权威采集 now₂
+            return 5.0
+        if nows3["n"] == 11:          # 权威采集 now₃ —— 回拨
+            return 1.0
+        return clock3.t
+
+    out3 = BoundedRepairLoop(contract=c3,
+                             verifier=IndependentVerifier(c3, now_fn=now_backwards),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
+                             now_fn=now_backwards).run()
+    assert out3.attempts[0].verdict == "VERIFIED"
+    assert out3.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out3.final_report is None
+
+    # (d) 采集中途契约漂移（两次采集 hash 不一致）→ 无法证明一致
+    c4 = _verified_summary_contract(work_real, "wc_16f_p5a_j_0001")
+    c_other = _contract(work_real, contract_id="wc_16f_p5a_j_other_0001")
+    nows4 = {"n": 0}
+    loop4 = BoundedRepairLoop(
+        contract=c4, verifier=IndependentVerifier(c4),
+        collect_evidence=lambda a, r: _ok_summary_submission(c4, r))
+
+    def now_swaps_contract():
+        nows4["n"] += 1
+        if nows4["n"] == 10:          # 权威采集 now₂ 时改写契约
+            loop4._contract = c_other
+        return 1000.0
+
+    loop4._w_now = now_swaps_contract
+    out4 = loop4.run()
+    assert out4.attempts[0].verdict == "VERIFIED"
+    assert out4.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out4.final_report is None
+    assert "final_boundary_unstable" in out4.diagnostic
+
+
+def test_p5_a_stable_snapshot_verifies_with_snapshot_now(env, monkeypatch):
+    """P5-A 锁定 4：正常稳定快照仍 VERIFIED，finished_at_epoch ==
+    snapshot.now；成功边界之后零 cost/cancel/now/verifier 回调（P4-F 语义
+    在新协议下保持：cost 恰 4 次、最终 cost 读取后恰一次 now 读取）。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    c = _verified_summary_contract(work_real, "wc_16f_p5a_k_0001")
+    now_calls: list = []
+    clock = {"t": 0.0}
+
+    def now_fn():
+        now_calls.append(clock["t"])
+        return clock["t"]
+
+    cost_calls = {"n": 0}
+    boundary_cost_idx = {"n": None}
+
+    def cost_used():
+        cost_calls["n"] += 1
+        if cost_calls["n"] == 4:      # 权威采集的 cost₂（最终边界内 cost 读取）
+            boundary_cost_idx["n"] = len(now_calls)
+        return 0.0
+
+    captured: list = []
+    orig_take = BoundedRepairLoop._take_final_boundary
+
+    def spy_take(self):
+        result = orig_take(self)
+        captured.append(result)
+        return result
+
+    monkeypatch.setattr(BoundedRepairLoop, "_take_final_boundary", spy_take)
+    loop = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c, now_fn=now_fn),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                             cost_used=cost_used, now_fn=now_fn)
+    out = loop.run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.final_report is not None
+    assert loop._verifier.seal_is_authentic(out.final_report) is True
+    # 快照权威：finished_at_epoch == snapshot.now（最新权威 now 读数）
+    bsnap, pre_reason, pre_diag = captured[0]
+    assert pre_reason is None
+    assert out.finished_at_epoch == bsnap.now
+    assert bsnap.version > 0
+    # 成功边界之后零回调：cost 恰 4 次；最终 cost 读取之后恰一次 now 读取
+    assert cost_calls["n"] == 4
+    assert len(now_calls) == boundary_cost_idx["n"] + 1
+    assert out.finished_at_epoch == now_calls[-1]
+
+
+# ================================================================
+# Reviewer Patch 5 — P5-B: PDF 结构化字典键（去正则认定 Catalog/Pages）
+# ================================================================
+
+def _p5_pdf(root_body: bytes,
+            pages_body: bytes = b"<</Type/Pages/Kids[3 0 R]/Count 1>>\n",
+            page_body: bytes = b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>\n",
+            trailer: bytes = b"trailer\n<</Size 4/Root 1 0 R>>\n") -> bytes:
+    """程序化自洽最小 PDF（对象体可任意构造，偏移关系零手算漂移）。"""
+    parts = [b"%PDF-1.4\n"]
+    offsets: dict = {}
+    for i, body in enumerate((root_body, pages_body, page_body), start=1):
+        offsets[i] = sum(len(p) for p in parts)
+        parts.append(b"%d 0 obj\n" % i)
+        parts.append(body)
+        parts.append(b"endobj\n")
+    xref_pos = sum(len(p) for p in parts)
+    parts.append(b"xref\n0 4\n")
+    parts.append(b"0000000000 65535 f \n")
+    for i in (1, 2, 3):
+        parts.append(b"%010d 00000 n \n" % offsets[i])
+    parts.append(trailer)
+    parts.append(b"startxref\n%d\n" % xref_pos)
+    parts.append(b"%%EOF\n")
+    return b"".join(parts)
+
+
+def test_p5_b_structured_dict_keys_reject_pseudo_keys(env):
+    """P5-B 锁定：literal string / 注释 / 嵌套字典 / hex string 中的
+    `/Type /Catalog`、`/Pages`、`/Type /Pages` token 不构成当前对象直接键；
+    字典括号必须真实平衡；Root 直接 /Type 必须为 /Catalog、直接 /Pages 必须
+    引用有效 Pages 对象、Pages 直接 /Type 必须为 /Pages；合法最小 PDF 正例
+    与含嵌套字典值的合法 PDF 仍 PASS。"""
+    tmp, work, work_real, outside, outside_real = env
+    from furina.agent.verification import full_content_verdict
+    # 正对照：合法最小 PDF
+    assert full_content_verdict(_p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n")) \
+        == ("application/pdf", "")
+    # 正对照：Root 含嵌套字典值（括号真实平衡）仍 PASS——嵌套值不参与直接键
+    assert full_content_verdict(_p5_pdf(b"<</Type/Catalog/Pages 2 0 R/Ext<</A 1>>>>\n")) \
+        == ("application/pdf", "")
+    cases = {
+        # literal string 伪 /Type /Catalog（无直接 /Type 键）
+        "string_pseudo_type":
+            (b"<</X(/Type /Catalog)/Pages 2 0 R>>\n", "pdf_root_not_catalog"),
+        # literal string 伪 /Pages（有直接 /Type /Catalog，无直接 /Pages 键）
+        "string_pseudo_pages":
+            (b"<</Type/Catalog/X(/Pages 2 0 R)>>\n", "pdf_root_no_pages"),
+        # 注释伪键（注释内 token 绝不进入 token 流）
+        "comment_pseudo_keys":
+            (b"<</X 1% /Type /Catalog % /Pages 2 0 R\n>>\n", "pdf_root_not_catalog"),
+        # 嵌套字典伪键
+        "nested_pseudo_type":
+            (b"<</X<</Type/Catalog/Pages 2 0 R>>>>\n", "pdf_root_not_catalog"),
+        # /Type 的值是 literal string 而非 name
+        "type_string_value":
+            (b"<</Type(/Catalog)/Pages 2 0 R>>\n", "pdf_root_not_catalog"),
+        # hex string 伪 name 值
+        "type_hex_value":
+            (b"<</Type<2F436174616C6F673E>/Pages 2 0 R>>\n", "pdf_root_not_catalog"),
+        # 字典括号不平衡
+        "unbalanced_dict":
+            (b"<</Type/Catalog/Pages 2 0 R>\n", "pdf_obj_not_dict"),
+    }
+    for tag, (root_body, expect_rej) in cases.items():
+        blob = _p5_pdf(root_body)
+        mime, rejection = full_content_verdict(blob)
+        assert mime == "application/pdf", tag
+        assert rejection == f"malformed_content:{expect_rej}", (tag, rejection)
+    # Pages 对象的 /Type 藏在嵌套字典里（无直接 /Type /Pages）→ fail-closed
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n",
+                   pages_body=b"<</X<</Type/Pages>>/Count 1>>\n")
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_pages_not_pages")
+    # trailer 的 /Root 藏在 literal string 里（无直接 /Root 键）→ fail-closed
+    bad_trailer = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n",
+                          trailer=b"trailer\n<</Size 4/(Root 1 0 R)>>\n")
+    assert full_content_verdict(bad_trailer) == ("application/pdf",
+                                                 "malformed_content:pdf_trailer_dict")
+    # 端到端：string 伪键 PDF 作为 pdf_document 期望验证 → required FAIL
+    art = work_real / "doc.pdf"
+    art.write_bytes(_p5_pdf(b"<</X(/Type /Catalog)/Pages 2 0 R>>\n"))
+    exp = ArtifactExpectation(artifact_id="prod_doc", artifact_type="pdf_document",
+                              expected_path=str(art), required=True)
+    c = _content_contract(work_real, "wc_16f_p5b_0001", expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_p5b_0001",
+        declared=[_declared(art, sha_hex=_sha(art.read_bytes()),
+                            mime="application/pdf", artifact_id="prod_doc")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any(ch.result is CheckResult.FAIL
+               and ch.explanation.startswith("malformed_content:pdf_root")
+               for ch in rep.checks), [(ch.check_id, ch.explanation) for ch in rep.checks]
+
+
+# ================================================================
+# Reviewer Patch 5 — P5-C: 封闭全部公开导出字符串（逐字段审计）
+# ================================================================
+
+_P5_SHORT_SECRET = "password:hunter2"
+_P5_LONG_SECRET = "api_key=" + "B" * 600
+
+_P5_BUNDLE_KW = dict(contract_id="wc_16f_p5c_0001", contract_hash="0" * 64,
+                     run_id="run_p5c_0001", backend_id="native_agent",
+                     terminal=(), artifacts=())
+_P5_REPORT_KW = dict(report_id="vrp_" + "a" * 32, verifier_id=VERIFIER_ID,
+                     contract_id="wc_16f_p5c_0001", contract_hash="0" * 64,
+                     standard_hash="0" * 64, run_id="run_p5c_0001",
+                     backend_id="native_agent", verdict=VerificationVerdict.FAILED,
+                     checks=(), diagnostics=(), started_at_epoch=1.0,
+                     finished_at_epoch=2.0)
+
+
+def _p5_export_blob(obj) -> str:
+    """模型的全部导出面序列化（to_dict / to_digest_dict / digest_payload /
+    to_json）——审计 raw secret 的唯一判定面。"""
+    import json as _json
+    chunks = []
+    if hasattr(obj, "to_dict"):
+        chunks.append(_json.dumps(obj.to_dict(), default=str))
+    if hasattr(obj, "to_digest_dict"):
+        chunks.append(_json.dumps(obj.to_digest_dict(), default=str))
+    if hasattr(obj, "digest_payload"):
+        chunks.append(str(obj.digest_payload()))
+    if hasattr(obj, "to_json"):
+        chunks.append(str(obj.to_json()))
+    return "\n".join(chunks)
+
+
+@pytest.mark.parametrize("secret", [_P5_SHORT_SECRET, _P5_LONG_SECRET])
+def test_p5_c_public_export_surfaces_sealed(env, secret):
+    """P5-C 锁定：五个公开模型的**每个可写字符串面**注入短/600 字符秘密——
+    构造必须拒绝，或所有 to_dict()/to_digest_dict()/digest_payload()/to_json()
+    导出均无 raw secret（每字段恰好属于：封闭词表 / canonical identity /
+    严格格式值 / 存储前完整脱敏并限长）。"""
+    from furina.agent.verification import (
+        ArtifactObservation,
+        EvidenceBundle,
+        TerminalObservation,
+        VerificationCheck,
+    )
+
+    def expect_reject(factory):
+        with pytest.raises(VerificationError):
+            factory()
+
+    def expect_scrubbed(factory):
+        obj = factory()
+        # 观察模型的导出面在 EvidenceBundle 树上——单独构造时嵌入 bundle 审计
+        if isinstance(obj, (TerminalObservation, ArtifactObservation)):
+            container = "terminal" if isinstance(obj, TerminalObservation)                 else "artifacts"
+            obj = EvidenceBundle(**{**_P5_BUNDLE_KW, container: (obj,)})
+        blob = _p5_export_blob(obj)
+        assert secret not in blob, blob[:400]
+        assert "[REDACTED]" in blob
+
+    # -- TerminalObservation：event_id=identity（拒）；kind=封闭词表（拒）
+    expect_reject(lambda: TerminalObservation(event_id=secret, kind="backend.completed",
+                                              observed_at_epoch=1.0, bound=True))
+    expect_reject(lambda: TerminalObservation(event_id="evt_0001", kind=secret,
+                                              observed_at_epoch=1.0, bound=True))
+
+    # -- ArtifactObservation：source=封闭词表（拒）；artifact_id=identity（拒）；
+    #    observed_mime=封闭 MIME 词表（拒）；observed_sha256=严格格式（拒）；
+    #    路径/rejection/name_mime/content_rejection=脱敏限长
+    expect_reject(lambda: ArtifactObservation(secret, "doc", "/p/a.md", "/p/a.md",
+                                              True, True, True, 3, "text/plain",
+                                              "0" * 64, ""))
+    expect_reject(lambda: ArtifactObservation("expectation", secret, "/p/a.md",
+                                              "/p/a.md", True, True, True, 3,
+                                              "text/plain", "0" * 64, ""))
+    expect_reject(lambda: ArtifactObservation("expectation", "doc", "/p/a.md",
+                                              "/p/a.md", True, True, True, 3,
+                                              secret, "0" * 64, ""))
+    expect_reject(lambda: ArtifactObservation("expectation", "doc", "/p/a.md",
+                                              "/p/a.md", True, True, True, 3,
+                                              "text/plain", secret, ""))
+    expect_scrubbed(lambda: ArtifactObservation(
+        "expectation", "doc", "/p/" + secret + ".md", "/p/a.md", True, True,
+        True, 3, "text/plain", "0" * 64, ""))
+    expect_scrubbed(lambda: ArtifactObservation(
+        "expectation", "doc", "/p/a.md", "/p/" + secret + ".md", True, True,
+        True, 3, "text/plain", "0" * 64, ""))
+    expect_scrubbed(lambda: ArtifactObservation(
+        "expectation", "doc", "/p/a.md", "/p/a.md", True, True, True, 3,
+        "text/plain", "0" * 64, rejection=secret))
+    expect_scrubbed(lambda: ArtifactObservation(
+        "expectation", "doc", "/p/a.md", "/p/a.md", True, True, True, 3,
+        "text/plain", "0" * 64, rejection="", name_mime=secret))
+    expect_scrubbed(lambda: ArtifactObservation(
+        "expectation", "doc", "/p/a.md", "/p/a.md", True, True, True, 3,
+        "text/plain", "0" * 64, rejection="", content_rejection=secret))
+
+    # -- EvidenceBundle：身份（拒）/ contract_hash=严格格式（拒）/ 诊断（脱敏）
+    expect_reject(lambda: EvidenceBundle(**{**_P5_BUNDLE_KW, "contract_id": secret}))
+    expect_reject(lambda: EvidenceBundle(**{**_P5_BUNDLE_KW, "contract_hash": secret}))
+    expect_reject(lambda: EvidenceBundle(**{**_P5_BUNDLE_KW, "run_id": secret}))
+    expect_reject(lambda: EvidenceBundle(**{**_P5_BUNDLE_KW, "backend_id": secret}))
+    expect_scrubbed(lambda: EvidenceBundle(
+        **{**_P5_BUNDLE_KW, "diagnostics": (f"collect failed: {secret}",)}))
+
+    # -- VerificationCheck：check_id/kind=identity（拒）；input 键（拒）；
+    #    explanation/input 值（脱敏）
+    expect_reject(lambda: VerificationCheck(check_id=secret, kind="artifact_mime",
+                                            required=True, result=CheckResult.FAIL))
+    expect_reject(lambda: VerificationCheck(check_id="criterion:x_0001", kind=secret,
+                                            required=True, result=CheckResult.FAIL))
+    expect_reject(lambda: VerificationCheck(
+        check_id="criterion:x_0001", kind="artifact_mime", required=True,
+        result=CheckResult.FAIL, inputs=((secret, "v"),)))
+    expect_scrubbed(lambda: VerificationCheck(
+        check_id="criterion:x_0001", kind="artifact_mime", required=True,
+        result=CheckResult.FAIL, explanation=f"needle {secret} leaked"))
+    expect_scrubbed(lambda: VerificationCheck(
+        check_id="criterion:x_0001", kind="artifact_mime", required=True,
+        result=CheckResult.FAIL, inputs=(("path", secret),)))
+
+    # -- VerificationReport：身份/hash/seal（拒）；诊断（脱敏）
+    def _report(**over):
+        ev = EvidenceBundle(**_P5_BUNDLE_KW)
+        return VerificationReport(**{**_P5_REPORT_KW, "evidence": ev, **over})
+
+    expect_reject(lambda: _report(report_id=secret))
+    expect_reject(lambda: _report(verifier_id=secret))
+    expect_reject(lambda: _report(contract_id=secret))
+    expect_reject(lambda: _report(contract_hash=secret))
+    expect_reject(lambda: _report(standard_hash=secret))
+    expect_reject(lambda: _report(run_id=secret))
+    expect_reject(lambda: _report(backend_id=secret))
+    expect_reject(lambda: _report(authority_seal=secret))   # 非 VERIFIED 不得携带 seal
+    expect_scrubbed(lambda: _report(diagnostics=(f"boom: {secret}",)))
+
+
+def test_p5_c_secret_rejection_messages_redacted(env):
+    """P5-C 纵深：拒绝面的异常消息同样不得回显 raw secret（canonical
+    rejector 与 scrubber 共享同一秘密边界）。"""
+    from furina.agent.verification import VerificationCheck
+    check_id_secret = "password:" + "S" * 600
+    with pytest.raises(VerificationError) as ei:
+        VerificationCheck(check_id=check_id_secret, kind="artifact_mime",
+                          required=True, result=CheckResult.FAIL)
+    assert "SSSS" not in str(ei.value)
+    key_secret = "api_key=" + "K" * 600
+    with pytest.raises(VerificationError) as ei2:
+        VerificationCheck(check_id="criterion:x_0001", kind="artifact_mime",
+                          required=True, result=CheckResult.FAIL,
+                          inputs=((key_secret, "v"),))
+    assert "KKKK" not in str(ei2.value)

@@ -80,7 +80,6 @@ ARTIFACT_SOURCE_VALUES = frozenset({"expectation", "declared"})
 _REPORT_ID_PATTERN = re.compile(r"^vrp_[0-9a-f]{32}$")
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}$")   # 与 16B run_id 同形
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-_CHECK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}$")
 
 
 class VerificationError(FurinaError):
@@ -242,16 +241,25 @@ def sniff_content_mime(head: bytes) -> str:
 
 _PDF_HEADER_RE = re.compile(rb"%PDF-[0-9]+\.[0-9]+(?!\d)")
 _PDF_XREF_ENTRY_RE = re.compile(rb"\d{10} \d{5} [nf][ \r][\n]")
-_PDF_TRAILER_ROOT_RE = re.compile(rb"/Root\s+(\d+)\s+0\s+R")
-_PDF_TRAILER_SIZE_RE = re.compile(rb"/Size\s+(\d+)")
 _PDF_OBJ_DEFINED_RE = re.compile(rb"(?m)^(\d+)\s+0\s+obj\b")
-# P4-A：Root 字典必须是 /Type /Catalog（字典键紧跟分隔符；\b 拒绝 /CatalogFoo 冒充）
-_PDF_CATALOG_TYPE_RE = re.compile(rb"/Type\s*/Catalog\b")
-_PDF_PAGES_TYPE_RE = re.compile(rb"/Type\s*/Pages\b")
-_PDF_PAGES_REF_RE = re.compile(rb"/Pages\s+(\d+)\s+0\s+R")
 
 #: 受支持 PDF 封闭子集的确定性验证界限（任何超界即 fail-closed）。
 _MAX_PDF_XREF_ENTRIES = 8192
+
+# ---------------------------------------------------------------------------
+# P5-B：PDF 结构化 token 解析——Catalog/Pages/trailer 键认定一律基于
+# **结构化字典直接键**，绝不在对象原始字节上用正则认定（literal string /
+# hex string / 注释 / 嵌套字典中的 `/Type /Catalog`、`/Pages` token 不得
+# 充当当前对象的直接键；字典括号必须真实平衡）。
+# ---------------------------------------------------------------------------
+
+_PDF_WS_BYTES = b" \t\r\n\x00\f"
+_PDF_DELIM_BYTES = b"()<>[]{}/%"
+#: 字典/数组嵌套深度上界（病态深嵌套 → 解析失败 fail-closed）。
+_MAX_PDF_DICT_DEPTH = 16
+_INT_TOKEN_RE = re.compile(rb"\A[0-9]+\Z")
+_REAL_TOKEN_RE = re.compile(rb"\A[+-]?([0-9]+|[0-9]*\.[0-9]+|[0-9]+\.[0-9]*)\Z")
+_PDF_VALUE_KINDS = ("name", "ref", "int", "dict", "other")
 
 
 def _skip_pdf_ws(full: bytes, pos: int) -> int:
@@ -259,6 +267,170 @@ def _skip_pdf_ws(full: bytes, pos: int) -> int:
     while pos < n and full[pos:pos + 1] in b" \t\r\n":
         pos += 1
     return pos
+
+
+def _pdf_skip_ws_comment(full: bytes, pos: int) -> int:
+    """跳过空白与注释（``%`` 至行尾）——注释内 token 绝不出现在 token 流。"""
+    n = len(full)
+    while pos < n:
+        c = full[pos:pos + 1]
+        if c in _PDF_WS_BYTES:
+            pos += 1
+        elif c == b"%":
+            while pos < n and full[pos:pos + 1] not in b"\r\n":
+                pos += 1
+        else:
+            break
+    return pos
+
+
+def _pdf_scan_token(full: bytes, pos: int) -> Tuple[Optional[bytes], int]:
+    """扫描一个 regular token（至空白/分隔符止）；返回 ``(token, next_pos)``。"""
+    n = len(full)
+    start = pos
+    while pos < n:
+        c = full[pos:pos + 1]
+        if c in _PDF_WS_BYTES or c in _PDF_DELIM_BYTES:
+            break
+        pos += 1
+    if pos == start:
+        return None, pos
+    return full[start:pos], pos
+
+
+def _pdf_scan_literal_string(full: bytes, pos: int) -> Optional[int]:
+    """literal string（平衡括号 + 反斜杠转义）；返回结束位置或 ``None``。"""
+    n = len(full)
+    depth = 0
+    i = pos
+    while i < n:
+        c = full[i:i + 1]
+        if c == b"\\":
+            i += 2
+            continue
+        if c == b"(":
+            depth += 1
+        elif c == b")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _pdf_scan_hex_string(full: bytes, pos: int) -> Optional[int]:
+    """hex string（``<...>``，内部只允许 hex 数字与空白）；返回结束位置。"""
+    n = len(full)
+    i = pos + 1
+    while i < n:
+        c = full[i:i + 1]
+        if c == b">":
+            return i + 1
+        if c not in b"0123456789abcdefABCDEF" and c not in _PDF_WS_BYTES:
+            return None
+        i += 1
+    return None
+
+
+def _parse_pdf_value(full: bytes, pos: int,
+                     depth: int) -> Tuple[Optional[Tuple[str, Any]], int]:
+    """解析一个 PDF 对象值；返回 ``((kind, value), next_pos)`` 或 ``(None, pos)``。
+
+    kind ∈ {"name", "ref", "int", "dict", "other"}——受支持子集只需要区分：
+    name（``/Type`` 值）、indirect ref（``n g R``）、整数（``/Size``）、字典
+    （结构化直接键表）；literal/hex string、数组、布尔等整体视为不透明
+    "other"，但其括号/字典必须真实平衡，注释绝不进入 token 流。
+    """
+    if depth > _MAX_PDF_DICT_DEPTH:
+        return None, pos
+    pos = _pdf_skip_ws_comment(full, pos)
+    n = len(full)
+    if pos >= n:
+        return None, pos
+    c = full[pos:pos + 1]
+    if full[pos:pos + 2] == b"<<":
+        return _parse_pdf_dict_at(full, pos, depth + 1)
+    if c == b"<":
+        end = _pdf_scan_hex_string(full, pos)
+        if end is None:
+            return None, pos
+        return ("other", None), end
+    if c == b"(":
+        end = _pdf_scan_literal_string(full, pos)
+        if end is None:
+            return None, pos
+        return ("other", None), end
+    if c == b"[":
+        pos = _pdf_skip_ws_comment(full, pos + 1)
+        while True:
+            if pos >= n:
+                return None, pos
+            if full[pos:pos + 1] == b"]":
+                return ("other", None), pos + 1
+            item, pos = _parse_pdf_value(full, pos, depth + 1)
+            if item is None:
+                return None, pos
+    if c == b"/":
+        tok, pos2 = _pdf_scan_token(full, pos + 1)
+        if tok is None:
+            return None, pos
+        return ("name", tok), pos2
+    tok, pos2 = _pdf_scan_token(full, pos)
+    if tok is None:
+        return None, pos
+    if _INT_TOKEN_RE.match(tok):
+        value = int(tok)
+        # indirect ref 形态：``int int R``（前瞻第三个 token，不匹配则回退）
+        g, pos3 = _pdf_scan_token(full, _pdf_skip_ws_comment(full, pos2))
+        if g is not None and _INT_TOKEN_RE.match(g):
+            r, pos4 = _pdf_scan_token(full, _pdf_skip_ws_comment(full, pos3))
+            if r == b"R":
+                return ("ref", value), pos4
+        return ("int", value), pos2
+    if tok in (b"true", b"false", b"null", b"R") or _REAL_TOKEN_RE.match(tok):
+        return ("other", None), pos2
+    return None, pos
+
+
+def _parse_pdf_dict_at(full: bytes, pos: int,
+                       depth: int) -> Tuple[Optional[Tuple[str, Any]], int]:
+    """解析 ``<< ... >>`` 字典（顶层**直接键** → 值）；重复直接键、键非 name、
+    括号不平衡、嵌套超深一律解析失败（fail-closed）。"""
+    if depth > _MAX_PDF_DICT_DEPTH:
+        return None, pos
+    n = len(full)
+    pos += 2
+    out: Dict[bytes, Tuple[str, Any]] = {}
+    while True:
+        pos = _pdf_skip_ws_comment(full, pos)
+        if pos >= n:
+            return None, pos
+        if full[pos:pos + 2] == b">>":
+            return ("dict", out), pos + 2
+        kv, pos = _parse_pdf_value(full, pos, depth + 1)
+        if kv is None or kv[0] != "name":
+            return None, pos
+        key = kv[1]
+        if key in out:
+            return None, pos          # 重复直接键 → 结构歧义 → fail-closed
+        vv, pos = _parse_pdf_value(full, pos, depth + 1)
+        if vv is None:
+            return None, pos
+        out[key] = vv
+
+
+def _parse_pdf_dict_strict(body: bytes) -> Optional[Dict[bytes, Tuple[str, Any]]]:
+    """body 必须是**恰好一个**完整平衡字典（前后仅空白/注释）——返回顶层
+    直接键表；否则 ``None``（fail-closed）。"""
+    start = _pdf_skip_ws_comment(body, 0)
+    if body[start:start + 2] != b"<<":
+        return None
+    val, end = _parse_pdf_value(body, start, 0)
+    if val is None or val[0] != "dict":
+        return None
+    if _pdf_skip_ws_comment(body, end) != len(body):
+        return None
+    return val[1]
 
 
 def _parse_pdf_int(full: bytes, pos: int) -> Tuple[Optional[int], Optional[int]]:
@@ -287,9 +459,11 @@ def _validate_pdf_structure(full: bytes) -> str:
       （缺 ``endobj`` 或对象间存在非空白内容一律 fail-closed），对象体必须是
       完整平衡字典 ``<<...>>``（任意文本/流对象体不被受支持子集接受）；定义
       于文件中的对象号必须恰为 ``n`` 条目对象号（多余对象定义 fail-closed）；
-    - **Root 图（P4-A）**：Root 的 xref 条目必须是 ``n``（不得是 free）、
-      Root 对象体必须是字典且含 ``/Type /Catalog``（伪 Catalog fail-closed）、
-      Catalog 必须引用有效 ``/Pages`` 对象（``n`` 条目 + 字典 + ``/Type /Pages``）；
+    - **Root 图（P4-A + P5-B）**：Root 的 xref 条目必须是 ``n``（不得是 free）、
+      Root 对象体必须是字典且**直接键** ``/Type`` 为 ``/Catalog``（结构化
+      token 解析——literal/hex string、注释、嵌套字典中的同名 token 绝不
+      充当直接键，伪 Catalog fail-closed）、Catalog 的直接键 ``/Pages`` 必须
+      引用有效 ``/Pages`` 对象（``n`` 条目 + 字典 + 直接键 ``/Type /Pages``）；
     - **/Size 一致性（P4-A）**：``/Size`` 必须等于 xref 覆盖的最高对象号 + 1；
     - **trailer 尾（P4-A）**：trailer 字典 ``>>`` 之后只允许合法 ``startxref``
       + 十进制偏移 + 空白 + ``%%EOF``——任何文本对象/多余内容即 fail-closed；
@@ -356,22 +530,23 @@ def _validate_pdf_structure(full: bytes) -> str:
     if not covered:
         return "malformed_content:pdf_xref_subsection"
     xref_end = pos
-    # trailer（/Size + /Root 及对象覆盖关系）
+    # trailer（/Size + /Root 及对象覆盖关系）——P5-B：结构化字典直接键认定，
+    # literal/hex string、注释、嵌套字典中的 /Root //Size token 不构成直接键。
     if full[xref_end:xref_end + 7] != b"trailer":
         return "malformed_content:pdf_trailer_missing"
     pos = _skip_pdf_ws(full, xref_end + 7)
-    if full[pos:pos + 2] != b"<<":
+    tval, dpos = _parse_pdf_value(full, pos, 0)
+    if tval is None or tval[0] != "dict":
         return "malformed_content:pdf_trailer_dict"
-    end = full.find(b">>", pos + 2)
-    if end < 0:
+    tmap = tval[1]
+    end = dpos - 2                      # `>>` 起始（tail 检查基准）
+    root_val = tmap.get(b"Root")
+    size_val = tmap.get(b"Size")
+    if root_val is None or root_val[0] != "ref" \
+            or size_val is None or size_val[0] != "int":
         return "malformed_content:pdf_trailer_dict"
-    dict_body = full[pos + 2:end]
-    m_root = _PDF_TRAILER_ROOT_RE.search(dict_body)
-    m_size = _PDF_TRAILER_SIZE_RE.search(dict_body)
-    if not m_root or not m_size:
-        return "malformed_content:pdf_trailer_dict"
-    root_num = int(m_root.group(1))
-    size = int(m_size.group(1))
+    root_num = root_val[1]
+    size = size_val[1]
     if size < 1 or root_num <= 0 or root_num >= size:
         return "malformed_content:pdf_trailer_dict"
     # P4-A：/Size 必须与 xref 覆盖一致（最高对象号 + 1）。
@@ -392,7 +567,7 @@ def _validate_pdf_structure(full: bytes) -> str:
         # 都意味着对象图与 xref 不一致（含任意文本对象）→ fail-closed。
         return "malformed_content:pdf_obj_graph"
     positions = sorted(p for p, _ in markers)
-    obj_dict_bodies: dict = {}
+    obj_dict_maps: dict = {}
     prev_end: Optional[int] = None
     for i, (p, num) in enumerate(sorted(markers)):
         nl = full.find(b"\n", p)
@@ -405,31 +580,34 @@ def _validate_pdf_structure(full: bytes) -> str:
         if prev_end is not None and full[prev_end:p].strip(b" \t\r\n"):
             # 对象之间出现非空白内容（文本对象/垃圾）→ 对象图不封闭。
             return "malformed_content:pdf_obj_graph"
-        body = full[nl + 1:e]
-        b0 = _skip_pdf_ws(body, 0)
-        if body[b0:b0 + 2] != b"<<":
-            # 任意文本对象体（非字典）不被受支持子集接受。
+        # P5-B：对象体必须是**结构化解析成功**的完整平衡字典（支持嵌套字典/
+        # 数组/literal+hex string/注释 token；括号必须真实平衡）——任意文本
+        # 对象体或结构破损不被受支持子集接受。
+        parsed = _parse_pdf_dict_strict(full[nl + 1:e])
+        if parsed is None:
             return "malformed_content:pdf_obj_not_dict"
-        be = body.find(b">>", b0 + 2)
-        if be < 0 or body[be + 2:].strip(b" \t\r\n"):
-            return "malformed_content:pdf_obj_not_dict"
-        obj_dict_bodies[num] = body[b0 + 2:be]
+        obj_dict_maps[num] = parsed
         prev_end = e + len(b"endobj")
     # 最后一个对象的 endobj 与 xref 表之间只允许空白。
     if full[prev_end:xref_pos].strip(b" \t\r\n"):
         return "malformed_content:pdf_obj_graph"
-    # P4-A：Root 必须是字典且含 /Type /Catalog；Catalog 必须引用有效 /Pages。
-    root_dict = obj_dict_bodies.get(root_num, b"")
-    if not _PDF_CATALOG_TYPE_RE.search(root_dict):
+    # P4-A/P5-B：Root 必须是字典且**直接键** /Type == /Catalog（literal
+    # string、hex string、注释、嵌套字典中的同名 token 不构成直接键）；
+    # Catalog 的**直接键** /Pages 必须引用有效 Pages 对象；Pages 的直接键
+    # /Type 必须为 /Pages。
+    root_map = obj_dict_maps.get(root_num)
+    if root_map is None:
+        return "malformed_content:pdf_obj_not_dict"
+    if root_map.get(b"Type") != ("name", b"Catalog"):
         return "malformed_content:pdf_root_not_catalog"
-    m_pages = _PDF_PAGES_REF_RE.search(root_dict)
-    if not m_pages:
+    pages_val = root_map.get(b"Pages")
+    if pages_val is None or pages_val[0] != "ref":
         return "malformed_content:pdf_root_no_pages"
-    pages_num = int(m_pages.group(1))
+    pages_num = pages_val[1]
     if pages_num not in n_offsets:
         return "malformed_content:pdf_pages_missing"
-    pages_dict = obj_dict_bodies.get(pages_num, b"")
-    if not _PDF_PAGES_TYPE_RE.search(pages_dict):
+    pages_map = obj_dict_maps.get(pages_num)
+    if pages_map is None or pages_map.get(b"Type") != ("name", b"Pages"):
         return "malformed_content:pdf_pages_not_pages"
     # P4-A：trailer 之后只允许合法 startxref + 偏移 + 空白 + EOF——任何文本
     # 对象/多余内容（startxref 与 trailer 之间出现其它 token）一律 fail-closed。
@@ -697,8 +875,24 @@ class ArtifactObservation:
         # 路径——纵深防御）。
         object.__setattr__(self, "artifact_id",
                            validate_identity(self.artifact_id, "artifact_id"))
-        object.__setattr__(self, "claimed_path", scrub_secrets(self.claimed_path))
-        object.__setattr__(self, "resolved_path", scrub_secrets(self.resolved_path))
+        # P5-C：observed_mime 是严格格式值——封闭 MIME 词表（完整内容识别
+        # 真值只可能来自 full_content_verdict 的封闭输出集），词表外值（含
+        # 秘密形态）构造面直接拒绝，绝不脱敏后继续导出。
+        if self.observed_mime != "" and self.observed_mime not in SUPPORTED_MIME_TYPES:
+            raise VerificationError(
+                f"observed_mime 必须是封闭 MIME 词表值或空，得到 "
+                f"{scrub_secrets(str(self.observed_mime))[:64]!r}")
+        # P5-C：observed_sha256 是严格格式值——空或 64 位小写 hex。
+        if self.observed_sha256 != "" \
+                and (not isinstance(self.observed_sha256, str)
+                     or not _SHA256_PATTERN.match(self.observed_sha256)):
+            raise VerificationError(
+                f"observed_sha256 必须是空或 64 位小写 hex，得到 "
+                f"{scrub_secrets(str(self.observed_sha256))[:64]!r}")
+        object.__setattr__(self, "claimed_path",
+                           scrub_secrets(self.claimed_path)[:MAX_PATH_CHARS])
+        object.__setattr__(self, "resolved_path",
+                           scrub_secrets(self.resolved_path)[:MAX_PATH_CHARS])
         # P4-E：公开导出字符串类型封闭或脱敏——source 是封闭取值（expectation|
         # declared，词表外值直接拒绝）；rejection / name_mime / content_rejection
         # 统一脱敏后限长（raw secret 绝不进入 to_dict()/to_digest_dict() 导出）。
@@ -733,6 +927,17 @@ class EvidenceBundle:
             raise VerificationError("evidence artifact 观察数量超界")
         if len(self.diagnostics) > MAX_DIAGNOSTICS:
             raise VerificationError("evidence 诊断数量超界")
+        # P5-C：封闭导出树——contract_hash 是严格格式值（64 位小写 hex），
+        # 元素类型封闭（TerminalObservation/ArtifactObservation），诊断面
+        # 必须全为 str；任何词表外/格式外值构造面直接拒绝。
+        if not isinstance(self.contract_hash, str) \
+                or not _SHA256_PATTERN.match(self.contract_hash):
+            raise VerificationError("contract_hash 必须是 64 位小写 hex")
+        if not all(isinstance(t, TerminalObservation) for t in self.terminal) \
+                or not all(isinstance(a, ArtifactObservation) for a in self.artifacts):
+            raise VerificationError("evidence 元素类型非法（封闭导出树）")
+        if not all(isinstance(d, str) for d in self.diagnostics):
+            raise VerificationError("diagnostics 必须全为 str（封闭导出树）")
         # Patch 3 B5：公开模型身份字段走 canonical validate_identity——秘密
         # 形态/词法非法直接拒绝（绝不清洗后继续作为身份），raw secret 不可能
         # 进入 evidence digest payload / 报告导出。
@@ -832,13 +1037,16 @@ class VerificationCheck:
     inputs: Tuple[Tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
-        cid = self.check_id
-        if not isinstance(cid, str) or not cid.strip() or len(cid) > MAX_ID_CHARS \
-                or not _CHECK_ID_PATTERN.match(cid):
-            raise VerificationError(f"check_id 词法非法: {cid!r}")
-        kind = self.kind
-        if not isinstance(kind, str) or not kind.strip() or len(kind) > 64:
-            raise VerificationError(f"check kind 非法: {kind!r}")
+        # P5-C：check_id 与 kind 都是公开导出字符串——canonical identity 词法
+        # contract + 秘密形态拒绝（构造面直接拒绝，绝不脱敏后继续导出）。
+        cid = validate_identity(self.check_id, "check_id")
+        if len(cid) > MAX_ID_CHARS:
+            raise VerificationError(f"check_id 超界 {MAX_ID_CHARS}")
+        object.__setattr__(self, "check_id", cid)
+        kind = validate_identity(self.kind, "check kind")
+        if len(kind) > 64:
+            raise VerificationError("check kind 超界 64")
+        object.__setattr__(self, "kind", kind)
         if not isinstance(self.required, bool):
             raise VerificationError(f"check {cid} required 必须是严格 bool")
         result = self.result
@@ -853,7 +1061,12 @@ class VerificationCheck:
         for pair in self.inputs:
             k, v = pair
             if not isinstance(k, str) or not k.strip() or len(k) > 64:
-                raise VerificationError(f"check {cid} input 键非法: {k!r}")
+                # P5-C：异常回显一律先脱敏——raw secret 绝不进入异常消息。
+                raise VerificationError(
+                    f"check {cid} input 键非法: {scrub_secrets(str(k))[:64]!r}")
+            # P5-C：input 键同样是公开导出字符串——canonical 词法 + 秘密形态
+            # 拒绝（值面经 _bounded_text 脱敏限长）。
+            validate_identity(k, f"check {cid} input 键")
             if not isinstance(v, str):
                 v = str(v)
             frozen_inputs.append((k, _bounded_text(v, MAX_INPUT_VALUE_CHARS)))

@@ -230,6 +230,138 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.000 Patch 5 回执（Reviewer Patch 5 专用）
+
+```text
+BASE_SHA                         = bd18eac07fdb8a5183d08aa035bce1b163585045
+                                   （PATCH4_FINAL_SHA；Patch 5 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–4 惯例）
+CHANGED_FILES                    = furina/agent/verification/models.py, repair.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（P5 全部修复内联于既有源文件——
+                                   verifier.py/checks.py/__init__.py 零改动）
+FINAL_BOUNDARY_CLOSED            = true（P5-A：接受 VERIFIED 前的最终边界由
+                                   "单次顺序读取（cancel→cost→now）"升级为
+                                   **单一权威快照接口 _take_final_boundary
+                                   下的版本一致性协议双重采集**——
+                                   (1) 见证采集 acq1（cancel→cost→now）后先做
+                                   前置越界判定，见证已暴露的越界立即以该原因
+                                   停止（拒绝路径零逃逸面，且不触发第二采集的
+                                   额外回调——P2-R "cost 从第 3 次调用起推时钟"
+                                   在此被捕获且 clock.t==20 断言保持）；
+                                   (2) 仅当见证干净时进行权威采集 acq2
+                                   （now→cancel→cost→now→cancel）——now 夹逼
+                                   取消/成本读取（now 改写 cost 被其后的 cost₂
+                                   捕获；cost 推时钟被其后的 now₃ 捕获），尾随
+                                   cancel 见证封闭 now 改写取消的通道；
+                                   (3) 一致性证明任一不成立 → 异常 →
+                                   UNSTABLE_BOUNDARY fail-closed：epoch ledger
+                                   精确记账（边界回调仪表化包装——采集窗口内
+                                   每次调用恰 +1，重入/隐藏调用 → 记账失配）、
+                                   两次采集契约 hash 一致（采集中途漂移）、
+                                   时钟单调 n1≤n2≤n3（回拨）、回调零异常；
+                                   (4) 值聚合一律 fail-closed worst-wins：
+                                   cancelled=c1∨c2∨c3、cost=max(有读数者)、
+                                   now=n3（最新权威读数）——两次采集间值差异
+                                   绝不取较乐观值。最终 now 回调把 cost 0→6 →
+                                   BUDGET_EXHAUSTED（P5-A 锁定 1 双变体：
+                                   改写发生在见证 now₁ / 权威 now₂ 均被捕获）；
+                                   任意读取项改写其它边界状态（cost→cancel/
+                                   cost→时钟/cancel→cost/now→cancel）全部
+                                   不得 VERIFIED（P5-A 锁定 2 四变体）；
+                                   快照异常/重入版本失配/时钟回拨/采集中途
+                                   契约漂移 → 全部 UNSTABLE_BOUNDARY
+                                   （P5-A 锁定 3 四变体）；正常稳定快照仍
+                                   VERIFIED 且 finished_at_epoch==snapshot.now
+                                   （P5-A 锁定 4，snapshot 携带 version>0）。
+                                   禁止"调整顺序/有限轮重复扫描"修复：任何有限
+                                   读取序列都有最后一个读取项——本协议把"最后
+                                   回调改写其它边界状态"从不可见副作用转为
+                                   可证明的不一致（fail-closed）或可捕获的
+                                   越界（worst-wins 停止），成功边界之后零
+                                   cost/cancel/now/verifier 回调（P4-F 语义
+                                   保持：cost 恰 4 次、最终 cost 读取后恰一次
+                                   now 读取——VERIFIED 路径不再单独跑 legacy
+                                   后置复核，最终边界双采集严格覆盖其全部
+                                   判定面；P2-Q/P2-R/P3-G/P3-H/P4-E/P4-F
+                                   既有边界否证全保留且逐字节断言不变）
+PDF_STRUCTURED_DICT_KEYS         = true（P5-B：Catalog/Pages/trailer 认定不再
+                                   在对象原始字节上用正则——新增结构化 token
+                                   解析器 _parse_pdf_value/_parse_pdf_dict_at/
+                                   _parse_pdf_dict_strict：字典只接受顶层
+                                   **直接键**，literal string（平衡括号+转义）/
+                                   hex string/注释（% 至行尾）/嵌套字典/数组中
+                                   的 /Type /Catalog、/Pages、/Type /Pages
+                                   token 绝不充当当前对象直接键；字典括号必须
+                                   真实平衡（不平衡/重复直接键/键非 name/嵌套
+                                   超深 → pdf_obj_not_dict fail-closed）；
+                                   Root 直接 /Type 必须为 name /Catalog、直接
+                                   /Pages 必须为 n g R 引用有效 Pages 对象、
+                                   Pages 直接 /Type 必须为 /Pages、trailer
+                                   直接 /Root //Size 同样结构化认定（字符串伪
+                                   Root → pdf_trailer_dict）；字符串伪键/
+                                   注释伪键/嵌套字典伪键//Type 字符串值/hex
+                                   伪 name/括号不平衡/Pages 嵌套伪 /Type 全部
+                                   拒绝，合法最小 PDF 与含嵌套字典值的合法
+                                   PDF 正例仍 PASS（P5-B 否证+正例，端到端
+                                   pdf_document 期望 FAILED））
+PUBLIC_EXPORT_SURFACES_SEALED    = true（P5-C：五个公开模型完整导出树逐字段
+                                   审计，每字段恰好属于：封闭词表 / canonical
+                                   identity / 严格格式值 / 存储前完整脱敏并
+                                   限长——本轮修复 VerificationCheck.check_id
+                                   与 kind 升级 canonical validate_identity
+                                   （秘密形态/词法非法构造面拒绝，_CHECK_ID_
+                                   PATTERN 移除）、input 键同样 canonical
+                                   拒绝且异常回显先脱敏；ArtifactObservation.
+                                   observed_mime 封闭 MIME 词表（SUPPORTED_
+                                   MIME_TYPES ∪ {""}）、observed_sha256 严格
+                                   格式（空或 64 位小写 hex）、claimed/resolved
+                                   路径脱敏后限长 MAX_PATH_CHARS；
+                                   EvidenceBundle.contract_hash 严格格式
+                                   （64 位小写 hex）+ 元素类型封闭（terminal/
+                                   artifacts 元素必须是对应观察模型）+
+                                   diagnostics 全 str；短秘密与 600 字符秘密
+                                   注入五个公开模型每个可写字符串面（
+                                   TerminalObservation.event_id/kind、
+                                   ArtifactObservation.source/artifact_id/
+                                   claimed·resolved_path/observed_mime/
+                                   observed_sha256/rejection/name_mime/
+                                   content_rejection、EvidenceBundle.contract_
+                                   id/contract_hash/run_id/backend_id/
+                                   diagnostics、VerificationCheck.check_id/
+                                   kind/explanation/input 键·值、
+                                   VerificationReport.report_id/verifier_id/
+                                   contract_id/contract_hash/standard_hash/
+                                   run_id/backend_id/authority_seal/
+                                   diagnostics）→ 构造必须拒绝或所有 to_dict()/
+                                   to_digest_dict()/digest_payload()/to_json()
+                                   导出均无 raw secret 且含 [REDACTED]（P5-C
+                                   双参数化否证；拒绝面异常消息同样零 raw
+                                   secret 回显——纵深否证）
+TARGETED                         = 166 passed / 0 failed / 0 skipped（原 158 全
+                                   保留 + Patch 5 新增 8：P5-A 锁定 1–4 四项
+                                   （其中锁定 2/3 各为四/四变体内联）+ P5-B
+                                   结构化字典键否证+正例 + P5-C 五模型逐字段
+                                   审计（short/600-char 双参数化）+ P5-C 拒绝
+                                   面异常回显纵深；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 573 passed（tests/agent 全目录一次）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1855 passed / 0 failed / 15 warnings（仅一次；
+                                   15 warnings 全部来自非 16F 既有套件——16F
+                                   targeted 166 passed 且 -W error::UserWarning
+                                   零 warnings 零 skipped）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 models.py + repair.py + 1 测试
+                                   文件 + 本 closeout——16A–16E frozen contracts
+                                   与 C1–C7 零改动，16F 其余源文件零改动）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+READY_FOR_REVIEW                 = YES
+```
+
 ## 0.0 Patch 3 回执（Reviewer Patch 3 专用）
 
 ```text
