@@ -121,4 +121,6 @@ furina/presentation/
 ```
 
 > 现有 `persona/` `memory/` `relationship/` `agent/` `embodiment/` `runtime/` 全部原地保留，
-> 不迁移到上述命名空间。Character Body / Renderer 未实现（ROADMAP：Phase 18 pending）。
+> 不迁移到上述命名空间。Character Body / Renderer 未实现（canonical ROADMAP：
+> Phase 20 — Desktop Embodiment & Visible Action，pending）。Phase 18 已锁定为
+> Computer Control & Office Automation，不再承载 Character Body。
