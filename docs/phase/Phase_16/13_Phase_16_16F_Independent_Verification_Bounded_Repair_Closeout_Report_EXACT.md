@@ -230,6 +230,171 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.0000 Patch 6 回执（Reviewer Patch 6 专用）
+
+```text
+BASE_SHA                         = 3605ebe76484ccd3802631cc187a713b2e71f81c
+                                   （PATCH5_FINAL_SHA；Patch 6 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–5 惯例）
+CHANGED_FILES                    = furina/agent/verification/models.py, repair.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（verifier.py/checks.py/
+                                   __init__.py 零改动）
+PSEUDO_ATOMIC_PROTOCOL_REMOVED   = true（P6-A：移除伪原子有限回调协议——
+                                   (0) 删除 _wrap_boundary_callback 仪表包装、
+                                   epoch ledger 计数（_bepoch/_w_depth/
+                                   _boundary_reentrant）与 P5-A 双重采集
+                                   （acq1/acq2 + worst-wins 聚合）：任何由
+                                   独立 effectful 回调组成的有限读取序列都有
+                                   **最后一个读取项**，其内部对其它边界状态的
+                                   改写对更早读取的值不可见——wrapper 记账
+                                   只能证明"每个回调被调用几次"，证明不了
+                                   "最后一个回调没有改写其它状态"，有限排列
+                                   与 epoch 调用计数因此都是伪原子；
+                                   (1) 新增**单一权威边界快照源**构造参数
+                                   boundary_snapshot：一次调用原子返回
+                                   {contract_hash, cancelled, cost_used, now,
+                                   version}——exact-schema 五键（缺键/多键
+                                   拒绝）+ 严格类型（cancelled 严格 bool、
+                                   cost_used None 或非负有限数值且 bool 拒绝、
+                                   now 有限数值且 bool 拒绝、version 非负 int
+                                   且 bool 拒绝），schema/类型/源异常一律
+                                   VerificationError → UNSTABLE_BOUNDARY
+                                   fail-closed，绝不补默认值/强转；
+                                   (2) _take_final_boundary 协议：见证读取
+                                   （s1）→ 越界判定（拒绝路径零第二读取）→
+                                   权威读取（s2）→ **同一状态版本证明**：
+                                   version 一致 + contract hash/cancelled/
+                                   cost 逐值一致（源违反"状态任何变更必须
+                                   递增 version"协议义务的值漂移被捕获）+
+                                   now 单调不减——无法取得同一状态版本 →
+                                   UNSTABLE_BOUNDARY、final_report=None；
+                                   (3) 未提供快照源 →
+                                   boundary_snapshot_source_unavailable →
+                                   VERIFIED **绝不被接受**（UNSTABLE_BOUNDARY/
+                                   final_report=None）——独立的 effectful
+                                   cost/cancel/now 回调绝不被包装后宣称为
+                                   原子快照（attempt 生命周期内的顺序复核
+                                   保留独立回调——那些位置每个回调副作用都被
+                                   其后的读取捕获且从不宣称为原子快照）；
+                                   (4) 最终权威快照后零回调：快照源恰两次
+                                   读取（见证+权威），权威快照之后零
+                                   cost/cancel/now/verifier 回调、零快照读取；
+                                   finished_at_epoch == snapshot.now（锁定 4：
+                                   完成时间取快照时间）；锁定 1：最后 cancel
+                                   返回 False 同时 cost 0→6 → 快照源内部回调
+                                   改写在值读取前完成、随快照整体可见 →
+                                   BUDGET_EXHAUSTED 不得 VERIFIED；锁定 2：
+                                   最后读取项推进 deadline → 快照时间原子
+                                   越界 → TIMEOUT 不得 VERIFIED；锁定 3：
+                                   快照源异常/schema 违约/类型违约/版本不一致
+                                   → 全部 fail-closed UNSTABLE_BOUNDARY；
+                                   (5) 诊断增强：final_boundary_unstable:
+                                   {内部失败码}——自产 VerificationError 静态
+                                   失败码安全进入诊断，外部异常仅类型名（零
+                                   raw secret 回显）；(6) 保留旧边界测试：
+                                   P2-R/P3-G/P3-H/P4-E/P4-F/P5-A×4 + B4 三项
+                                   + fresh-evidence 共 **13 项**边界测试在
+                                   **语义断言逐字保留**（stop reason/
+                                   final_report=None/clock.t==20/finished==
+                                   snapshot.now/恰两次快照读取）前提下适配新
+                                   协议——对抗载荷从独立回调迁移至快照源内部
+                                   回调（改写随快照整体可见，这正是新协议的
+                                   可观察性来源），P2-Q 等非 VERIFIED 路径
+                                   边界否证零改动）
+PDF_GENERATION_BOUND             = true（P6-B：PDF generation 精确绑定——
+                                   _parse_pdf_value 的 indirect ref 从
+                                   ("ref", obj_num) 升级为
+                                   ("ref", (object_number, generation))，
+                                   generation 绝不丢弃；当前封闭子集只支持
+                                   ``n 0 obj`` 对象定义 → 所有 n-entry 与
+                                   Root/Pages 引用都必须 generation 0：
+                                   xref n-entry generation 字段必须为 00000
+                                   （非零 → pdf_xref_generation；free 头条目
+                                   65535 惯例不受影响）、trailer /Root 引用
+                                   generation 必须 0（/Root 1 9 R 指向
+                                   1 0 obj → pdf_root_generation FAIL）、
+                                   Catalog /Pages 引用 generation 必须 0
+                                   （/Pages 2 9 R 指向 2 0 obj →
+                                   pdf_pages_generation FAIL）、对象定义
+                                   n 9 obj 与 xref 00000 偏移指向的
+                                   ``n 0 obj`` marker 不一致 →
+                                   pdf_xref_offset fail-closed；
+                                   generation-0 合法 PDF 保持 PASS，端到端
+                                   pdf_document 期望 FAILED
+                                   （malformed_content:pdf_root_generation））
+RUNTIME_TYPE_CLOSURE             = true（P6-C：公开模型按**真实运行时类型**
+                                   逐字段封闭——TerminalObservation.
+                                   observed_at_epoch 有限数值（bool/NaN/Inf/
+                                   str/None 拒绝）、bound 严格 bool；
+                                   ArtifactObservation.target_exists/
+                                   is_regular_file/within_workspace 严格
+                                   bool、size_bytes None 或非负 int（bool/
+                                   负数/浮点/str 拒绝）、claimed_path/
+                                   resolved_path/rejection/name_mime/
+                                   content_rejection/observed_mime 先验证
+                                   确为 str（非 str 拒绝——旧实现
+                                   scrub_secrets(非 str) 静默返回 "" 的通道
+                                   被关闭；observed_mime 先 isinstance 再入
+                                   封闭词表，非可哈希值不再 TypeError 逃逸）；
+                                   EvidenceBundle.terminal/artifacts/
+                                   diagnostics 容器必须 tuple（标量/字符串
+                                   注入绝不静默拆解）；VerificationCheck.
+                                   required 严格 bool、explanation 确为 str、
+                                   inputs 必须 tuple 且元素为 (键, 值) 二元组；
+                                   VerificationReport.checks/diagnostics
+                                   容器类型封闭 + diagnostics 元素全 str
+                                   （非 str 不再静默丢弃）；全部构造拒绝异常
+                                   脱敏复核：report_id 词法非法回显先脱敏
+                                   （{report_id!r} raw 回显通道关闭）、
+                                   verdict/CheckResult 枚举字符串转换
+                                   ValueError 捕获并脱敏（[REDACTED]，绝不
+                                   裸 ValueError 回显 raw value）、result
+                                   非法对象回显脱敏——锁定测试：遍历五模型
+                                   **全部 45 个 dataclass 字段**（不只"声明为
+                                   字符串"的字段）注入短秘密与 600 字符秘密
+                                   （90 次注入）→ 构造拒绝（异常消息零
+                                   raw secret）或所有 to_dict()/to_digest_
+                                   dict()/digest_payload()/to_json() 导出
+                                   零 raw secret（双参数化逐字段否证；
+                                   TerminalObservation/ArtifactObservation
+                                   嵌入 EvidenceBundle 树、VerificationCheck
+                                   嵌入 VerificationReport 树后审计全部导出
+                                   面）+ observed_at_epoch/bound/严格 bool
+                                   三元组/size_bytes/字符串字段非 str 逐字段
+                                   最小集 + enum/report_id 拒绝面异常回显
+                                   脱敏纵深）
+TARGETED                         = 176 passed / 0 failed / 0 skipped（原 166
+                                   全保留——其中 13 项边界测试在旧语义断言
+                                   逐字保留前提下适配 P6-A 协议 + 新增 10 项
+                                   P6 reviewer-locked 测试（P6-A 锁定 1–4 +
+                                   无源绝不 VERIFIED + P6-B generation 绑定 +
+                                   P6-C 全字段注入 short/600-char 双参数化 +
+                                   严格类型最小集 + enum/report_id 异常脱敏）；
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped）
+TESTS_AGENT                      = 583 passed（tests/agent 全目录一次）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1865 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 176 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；首轮 full suite 曾出现 3 项
+                                   test_gui_integration 线程断言失败，隔离
+                                   复跑与全套复跑均通过——负载型 flaky，与
+                                   16F 零交互，非本补丁引入）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 models.py + repair.py + 1 测试
+                                   文件 + 本 closeout——16A–16E frozen
+                                   contracts 与 C1–C7 零改动，16F 其余源文件
+                                   verifier.py/checks.py/__init__.py 零改动）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+READY_FOR_REVIEW                 = YES
+```
+
 ## 0.000 Patch 5 回执（Reviewer Patch 5 专用）
 
 ```text

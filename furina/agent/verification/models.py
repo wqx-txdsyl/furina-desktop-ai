@@ -380,12 +380,14 @@ def _parse_pdf_value(full: bytes, pos: int,
         return None, pos
     if _INT_TOKEN_RE.match(tok):
         value = int(tok)
-        # indirect ref 形态：``int int R``（前瞻第三个 token，不匹配则回退）
+        # indirect ref 形态：``int int R``（前瞻第三个 token，不匹配则回退）。
+        # P6-B：indirect ref 必须保存 (object_number, generation) 二元组——
+        # generation 绝不丢弃（消费方据此与对象定义 generation 精确核对）。
         g, pos3 = _pdf_scan_token(full, _pdf_skip_ws_comment(full, pos2))
         if g is not None and _INT_TOKEN_RE.match(g):
             r, pos4 = _pdf_scan_token(full, _pdf_skip_ws_comment(full, pos3))
             if r == b"R":
-                return ("ref", value), pos4
+                return ("ref", (value, int(g))), pos4
         return ("int", value), pos2
     if tok in (b"true", b"false", b"null", b"R") or _REAL_TOKEN_RE.match(tok):
         return ("other", None), pos2
@@ -455,6 +457,10 @@ def _validate_pdf_structure(full: bytes) -> str:
     - xref：该偏移处必须是经典 ``xref`` 表——子段（start/count）+ 定长 20 字节
       条目（``nnnnnnnnnn ggggg n|f``），``n`` 条目记录的字节偏移必须精确指向
       文件中对应 ``<num> 0 obj`` 的位置（偏移关系，非仅对象存在）；
+    - **generation 精确绑定（P6-B）**：indirect ref 一律保存
+      ``(object_number, generation)``——本封闭子集只支持 ``n 0 obj`` 对象定义，
+      因此 xref ``n`` 条目、trailer ``/Root``、Catalog ``/Pages`` 引用的
+      generation 都必须为 0，非零即引用与定义不一致 → fail-closed；
     - **对象图（P4-A）**：每个 ``n`` 条目对象必须有匹配的 ``obj ... endobj``
       （缺 ``endobj`` 或对象间存在非空白内容一律 fail-closed），对象体必须是
       完整平衡字典 ``<<...>>``（任意文本/流对象体不被受支持子集接受）；定义
@@ -513,6 +519,12 @@ def _validate_pdf_structure(full: bytes) -> str:
                 total_entries += 1
                 if total_entries > _MAX_PDF_XREF_ENTRIES:
                     return "malformed_content:pdf_xref_too_large"
+                # P6-B：xref n-entry 的 generation 字段必须为 00000——本封闭
+                # 子集只支持 ``n 0 obj`` 对象定义，非零 generation 条目指向
+                # 本子集不存在的对象版本 → fail-closed（free 条目的 65535
+                # 惯例头不受影响）。
+                if entry[11:16] != b"00000":
+                    return "malformed_content:pdf_xref_generation"
                 offset10 = int(entry[:10])
                 marker = b"%d 0 obj" % obj_num
                 # 对象偏移必须位于文件内且落在 xref 表之前（经典布局：对象 →
@@ -545,10 +557,15 @@ def _validate_pdf_structure(full: bytes) -> str:
     if root_val is None or root_val[0] != "ref" \
             or size_val is None or size_val[0] != "int":
         return "malformed_content:pdf_trailer_dict"
-    root_num = root_val[1]
+    # P6-B：indirect ref 携带 (object_number, generation)——trailer /Root 的
+    # generation 必须为 0（封闭子集只支持 n 0 obj；``/Root 1 9 R`` 指向
+    # ``1 0 obj`` 即引用与定义 generation 不一致 → fail-closed）。
+    root_num, root_gen = root_val[1]
     size = size_val[1]
     if size < 1 or root_num <= 0 or root_num >= size:
         return "malformed_content:pdf_trailer_dict"
+    if root_gen != 0:
+        return "malformed_content:pdf_root_generation"
     # P4-A：/Size 必须与 xref 覆盖一致（最高对象号 + 1）。
     if size != max(covered) + 1:
         return "malformed_content:pdf_size_mismatch"
@@ -603,7 +620,11 @@ def _validate_pdf_structure(full: bytes) -> str:
     pages_val = root_map.get(b"Pages")
     if pages_val is None or pages_val[0] != "ref":
         return "malformed_content:pdf_root_no_pages"
-    pages_num = pages_val[1]
+    # P6-B：Catalog /Pages 引用同样必须 generation 0（``/Pages 2 9 R`` 指向
+    # ``2 0 obj`` → 引用与定义 generation 不一致 → fail-closed）。
+    pages_num, pages_gen = pages_val[1]
+    if pages_gen != 0:
+        return "malformed_content:pdf_pages_generation"
     if pages_num not in n_offsets:
         return "malformed_content:pdf_pages_missing"
     pages_map = obj_dict_maps.get(pages_num)
@@ -831,6 +852,14 @@ class TerminalObservation:
     bound: bool
 
     def __post_init__(self) -> None:
+        # P6-C：公开模型按**真实运行时类型**逐字段封闭——observed_at_epoch 必须
+        # 是有限数值（bool 拒绝）、bound 必须是严格 bool。
+        if isinstance(self.observed_at_epoch, bool) \
+                or not isinstance(self.observed_at_epoch, (int, float)) \
+                or not math.isfinite(float(self.observed_at_epoch)):
+            raise VerificationError("observed_at_epoch 必须是有限数值（bool 拒绝）")
+        if not isinstance(self.bound, bool):
+            raise VerificationError("bound 必须是严格 bool")
         # Patch 3 B5：公开模型身份字段同样走 canonical validate_identity——
         # 秘密形态/词法非法直接拒绝，绝不清洗后继续作为身份。
         object.__setattr__(self, "event_id",
@@ -870,6 +899,27 @@ class ArtifactObservation:
     content_rejection: str = ""      # 完整内容结构验证拒绝（""=通过）
 
     def __post_init__(self) -> None:
+        # P6-C：公开模型按**真实运行时类型**逐字段封闭——声明为字符串的字段
+        # 先验证确为 str（绝不把非 str 静默变成 ""）；bool 字段严格 bool；
+        # size_bytes 必须是 None 或非负 int（bool 拒绝）。异常回显只带类型名，
+        # 绝不回显字段值（raw secret 零回显）。
+        for _name in ("claimed_path", "resolved_path", "rejection", "name_mime",
+                      "content_rejection"):
+            if not isinstance(getattr(self, _name), str):
+                raise VerificationError(
+                    f"{_name} 必须是 str，得到 {type(getattr(self, _name)).__name__}")
+        if not isinstance(self.observed_mime, str):
+            raise VerificationError(
+                f"observed_mime 必须是 str，得到 {type(self.observed_mime).__name__}")
+        if not isinstance(self.target_exists, bool) \
+                or not isinstance(self.is_regular_file, bool) \
+                or not isinstance(self.within_workspace, bool):
+            raise VerificationError(
+                "target_exists/is_regular_file/within_workspace 必须是严格 bool")
+        if self.size_bytes is not None \
+                and (isinstance(self.size_bytes, bool)
+                     or not isinstance(self.size_bytes, int) or self.size_bytes < 0):
+            raise VerificationError("size_bytes 必须是 None 或非负 int（bool 拒绝）")
         # Patch 3 B5：artifact_id 也是公开身份字段——canonical 拒绝秘密形态，
         # 绝不清洗后继续作为身份；路径记录面统一脱敏（解析层已拒绝秘密形态
         # 路径——纵深防御）。
@@ -921,6 +971,11 @@ class EvidenceBundle:
     diagnostics: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        # P6-C：公开模型按**真实运行时类型**逐字段封闭——容器字段必须是
+        # tuple（向容器字段注入标量/字符串绝不静默拆解或通过）。
+        if not isinstance(self.terminal, tuple) or not isinstance(self.artifacts, tuple) \
+                or not isinstance(self.diagnostics, tuple):
+            raise VerificationError("evidence 容器字段必须是 tuple（封闭导出树）")
         if len(self.terminal) > MAX_EVIDENCE_EVENTS:
             raise VerificationError("evidence 终态事件数量超界")
         if len(self.artifacts) > MAX_DECLARED_ARTIFACTS:
@@ -1047,18 +1102,36 @@ class VerificationCheck:
         if len(kind) > 64:
             raise VerificationError("check kind 超界 64")
         object.__setattr__(self, "kind", kind)
+        # P6-C：真实运行时类型逐字段封闭——required 严格 bool、explanation
+        # 确为 str、inputs 是 (str, str) 二元组的 tuple；result 的枚举字符串
+        # 转换错误（ValueError 回显 raw value）必须捕获并脱敏。
         if not isinstance(self.required, bool):
             raise VerificationError(f"check {cid} required 必须是严格 bool")
+        if not isinstance(self.explanation, str):
+            raise VerificationError(
+                f"check {cid} explanation 必须是 str，得到 "
+                f"{type(self.explanation).__name__}")
         result = self.result
         if isinstance(result, str):
-            result = CheckResult(result)
+            try:
+                result = CheckResult(result)
+            except ValueError:
+                raise VerificationError(
+                    f"check {cid} result 非法: "
+                    f"{scrub_secrets(str(self.result))[:64]!r}") from None
         if not isinstance(result, CheckResult):
-            raise VerificationError(f"check {cid} result 非法: {self.result!r}")
+            raise VerificationError(
+                f"check {cid} result 非法: {scrub_secrets(str(self.result))[:64]!r}")
         object.__setattr__(self, "result", result)
         object.__setattr__(self, "explanation", _bounded_text(self.explanation or "",
                                                               MAX_EXPLANATION_CHARS))
+        if not isinstance(self.inputs, tuple):
+            raise VerificationError(f"check {cid} inputs 必须是 tuple")
         frozen_inputs = []
         for pair in self.inputs:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise VerificationError(
+                    f"check {cid} input 必须是 (键, 值) 二元组")
             k, v = pair
             if not isinstance(k, str) or not k.strip() or len(k) > 64:
                 # P5-C：异常回显一律先脱敏——raw secret 绝不进入异常消息。
@@ -1146,8 +1219,11 @@ class VerificationReport:
 
     # -------------------------------------------------- 校验
     def __post_init__(self) -> None:
-        if not isinstance(self.report_id, str) or not _REPORT_ID_PATTERN.match(self.report_id):
-            raise VerificationError(f"report_id 词法非法: {self.report_id!r}")
+        # P6-C：report_id 拒绝异常回显先脱敏——raw secret 绝不进入异常消息。
+        if not isinstance(self.report_id, str) \
+                or not _REPORT_ID_PATTERN.match(self.report_id):
+            raise VerificationError(
+                f"report_id 词法非法: {scrub_secrets(str(self.report_id))[:64]!r}")
         # P4-E：verifier_id 同样走 canonical validate_identity——秘密形态/
         # 词法非法（含 600 字符长秘密值）构造面直接拒绝，绝不脱敏后继续导出。
         if not isinstance(self.verifier_id, str):
@@ -1167,19 +1243,34 @@ class VerificationReport:
                 raise VerificationError(f"{name} 必须是 64 位小写 hex")
         verdict = self.verdict
         if isinstance(verdict, str):
-            verdict = VerificationVerdict(verdict)
+            # P6-C：枚举字符串转换错误（ValueError 回显 raw value）必须捕获
+            # 并脱敏——raw secret 绝不进入异常消息。
+            try:
+                verdict = VerificationVerdict(verdict)
+            except ValueError:
+                raise VerificationError(
+                    f"verdict 非法: {scrub_secrets(str(self.verdict))[:64]!r}") from None
         if not isinstance(verdict, VerificationVerdict):
-            raise VerificationError(f"verdict 非法: {self.verdict!r}")
+            raise VerificationError(
+                f"verdict 非法: {scrub_secrets(str(self.verdict))[:64]!r}")
         object.__setattr__(self, "verdict", verdict)
 
+        # P6-C：真实运行时类型逐字段封闭——checks/diagnostics 容器类型与元素
+        # 类型构造面拒绝（绝不静默丢弃或拆解非 str 诊断）。
+        if not isinstance(self.checks, (tuple, list)):
+            raise VerificationError("checks 必须是 tuple/list（封闭导出树）")
         checks = tuple(self.checks)
         if not all(isinstance(c, VerificationCheck) for c in checks):
             raise VerificationError("checks 必须全部是 VerificationCheck")
         if len(checks) > MAX_REPORT_CHECKS:
             raise VerificationError("报告检查数量超界")
         object.__setattr__(self, "checks", checks)
+        if not isinstance(self.diagnostics, (tuple, list)):
+            raise VerificationError("diagnostics 必须是 tuple/list（封闭导出树）")
+        if not all(isinstance(d, str) for d in self.diagnostics):
+            raise VerificationError("diagnostics 必须全为 str（封闭导出树）")
         diags = tuple(_bounded_text(d, MAX_DIAGNOSTIC_CHARS) for d in self.diagnostics
-                      if isinstance(d, str) and d.strip())
+                      if d.strip())
         if len(diags) > MAX_DIAGNOSTICS:
             diags = diags[:MAX_DIAGNOSTICS]
         object.__setattr__(self, "diagnostics", diags)

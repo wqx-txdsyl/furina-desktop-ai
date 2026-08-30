@@ -140,6 +140,46 @@ class FakeClock:
         self.t += float(dt)
 
 
+class _BoundarySource:
+    """P6-A 受控共享边界状态：**单一权威边界快照源**（version 协议）。
+
+    ``snapshot()`` 单次调用原子返回 contract_hash / cancelled / cost_used /
+    now / version——内部回调（``on_read`` 钩子，可注入对抗性副作用）可改写
+    共享状态，但快照值一律在全部内部回调完成后一次性读取（改写随快照整体
+    可见——这正是独立回调组成的有限读取序列做不到的）；任何状态变更递增
+    version（协议义务）。``fail_reads``/``bump_on_read`` 用于锁定"源异常 /
+    版本不一致 → fail-closed"。
+    """
+
+    def __init__(self, contract: WorkContract, *, cost=None, cancel=False,
+                 now: float = 1000.0, version: int = 1, on_read=None,
+                 fail_reads: tuple = (), bump_on_read: tuple = ()) -> None:
+        self.contract = contract
+        self.cost = cost
+        self.cancel = cancel
+        self.now = float(now)
+        self.version = int(version)
+        self.on_read = on_read
+        self.fail_reads = tuple(fail_reads)
+        self.bump_on_read = tuple(bump_on_read)
+        self.reads = 0
+
+    def snapshot(self) -> dict:
+        self.reads += 1
+        if self.reads in self.fail_reads:
+            raise RuntimeError("boundary snapshot source exploded")
+        before = (self.cancel, self.cost)
+        if self.on_read is not None:
+            self.on_read(self)
+        if (self.cancel, self.cost) != before:
+            self.version += 1          # 协议：状态任何变更必须递增 version
+        if self.reads in self.bump_on_read:
+            self.version += 1          # 注入版本不一致（无状态变更也递增）
+        return {"contract_hash": self.contract.content_hash,
+                "cancelled": bool(self.cancel), "cost_used": self.cost,
+                "now": float(self.now), "version": self.version}
+
+
 def _make_dir_link(link: Path, target: Path) -> bool:
     """目录链接（symlink 优先，Windows 无特权时回退 junction——realpath 等价解析）。"""
     try:
@@ -702,7 +742,8 @@ def test_repair_succeeds_only_after_fresh_evidence(env):
         art.write_bytes(good)
         return _submission(c, run_id, declared=[_declared(art, sha_hex=good_sha)])
 
-    loop = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector2)
+    loop = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector2,
+                             boundary_snapshot=_BoundarySource(c).snapshot)
     out = loop.run()
     assert out.stop_reason is RepairStopReason.VERIFIED
     assert len(out.attempts) == 2
@@ -1573,7 +1614,8 @@ def _verified_run_contract(work_real: Path, cid: str):
 
 def test_mid_attempt_cancellation_blocks_verified(env):
     """B4 否证：attempt 中出现 cancellation → CANCELLED；越界后的 VERIFIED
-    report 不得成为成功结果（final_report=None）。"""
+    report 不得成为成功结果（final_report=None）。P6-A：取消事实经单一权威
+    快照源在最终边界原子可见（改写在值读取前完成、随快照整体暴露）。"""
     tmp, work, work_real, outside, outside_real = env
     c = _verified_run_contract(work_real, "wc_16f_b4cancel_0001")
     v = IndependentVerifier(c)
@@ -1584,8 +1626,11 @@ def test_mid_attempt_cancellation_blocks_verified(env):
         flags["cancelled"] = True          # collect/verify 期间出现取消
         return _submission(c, run_id, declared=[_declared(art, sha_hex=_sha(b"ok"))])
 
+    src = _BoundarySource(c)
+    src.on_read = lambda s: setattr(s, "cancel", flags["cancelled"])
     out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
-                            cancel_requested=lambda: flags["cancelled"]).run()
+                            cancel_requested=lambda: flags["cancelled"],
+                            boundary_snapshot=src.snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
     assert out.stop_reason is RepairStopReason.CANCELLED
     assert out.final_report is None                   # 绝不作为成功结果
@@ -1594,7 +1639,8 @@ def test_mid_attempt_cancellation_blocks_verified(env):
 
 def test_post_attempt_cost_overrun_blocks_verified(env):
     """B4 否证：attempt 完成后 used > limit → BUDGET_EXHAUSTED，VERIFIED
-    report 不成为成功结果。"""
+    report 不成为成功结果。P6-A：成本越界事实经单一权威快照源在最终边界
+    原子可见（见证读取即暴露，零第二读取）。"""
     tmp, work, work_real, outside, outside_real = env
     c = _verified_run_contract(work_real, "wc_16f_b4cost_0001")
     v = IndependentVerifier(c)
@@ -1603,16 +1649,16 @@ def test_post_attempt_cost_overrun_blocks_verified(env):
 
     def cost_used():
         calls["n"] += 1
-        # Patch 2：前两次预检（0.0×2）允许 attempt 执行；attempt 完成后的
-        # 后置边界复核读到 6.0 > 5.0 上限 → BUDGET_EXHAUSTED，VERIFIED
-        # report 不成为成功结果。
+        # 前两次预检（0.0×2）允许 attempt 执行。
         return 0.0 if calls["n"] <= 2 else 6.0
 
+    src = _BoundarySource(c)
+    src.on_read = lambda s: setattr(s, "cost", 6.0)   # 最终边界内 cost 0→6
     out = BoundedRepairLoop(
         contract=c, verifier=v,
         collect_evidence=lambda a, r: _submission(
             c, r, declared=[_declared(art, sha_hex=_sha(b"ok"))]),
-        cost_used=cost_used).run()
+        cost_used=cost_used, boundary_snapshot=src.snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"
     assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
     assert out.final_report is None
@@ -1620,7 +1666,8 @@ def test_post_attempt_cost_overrun_blocks_verified(env):
 
 
 def test_post_attempt_deadline_blocks_verified(env):
-    """B4 否证：完成时间 > deadline → TIMEOUT，VERIFIED report 不成为成功结果。"""
+    """B4 否证：完成时间 > deadline → TIMEOUT，VERIFIED report 不成为成功
+    结果。P6-A：超时事实经单一权威快照源在最终边界原子可见。"""
     tmp, work, work_real, outside, outside_real = env
     (work_real / "summary.md").write_bytes(b"ok")
     c = _contract(work_real, contract_id="wc_16f_b4time_0001", budget=ExecutionBudget(
@@ -1633,8 +1680,10 @@ def test_post_attempt_deadline_blocks_verified(env):
         clock.advance(600.0)               # attempt 完成时刻 1600 > deadline 1500
         return _submission(c, run_id, declared=[_declared(art, sha_hex=_sha(b"ok"))])
 
+    src = _BoundarySource(c)
+    src.on_read = lambda s: setattr(s, "now", clock.t)   # 快照读取实时时钟
     out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
-                            now_fn=clock).run()
+                            now_fn=clock, boundary_snapshot=src.snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"
     assert out.stop_reason is RepairStopReason.TIMEOUT
     assert out.final_report is None
@@ -2412,8 +2461,9 @@ def test_p2_q_factory_side_effects_block_collect(env):
 
 def test_p2_r_cost_callback_advancing_clock_prevents_verified(env):
     """P2-R 否证（任务书复现用例）：attempt_finished=10 < deadline=15，但
-    cost meter 回调把时钟推进到 20 → 后置边界必须用**新鲜时间**判定 TIMEOUT，
-    越界 VERIFIED 丢弃（final_report=None）。"""
+    cost meter 回调把时钟推进到 20 → 最终边界（P6-A 单一权威快照源——快照
+    源内部的 cost 回调推时钟，改写随快照整体可见）必须用**新鲜时间**判定
+    TIMEOUT，越界 VERIFIED 丢弃（final_report=None）。"""
     tmp, work, work_real, outside, outside_real = env
     clock = FakeClock(0.0)
     (work_real / "summary.md").write_bytes(b"ok")
@@ -2427,16 +2477,16 @@ def test_p2_r_cost_callback_advancing_clock_prevents_verified(env):
         return _submission(c, run_id,
                            declared=[_declared(art, sha_hex=_sha(b"ok"))])
 
-    reads = {"n": 0}
+    src = _BoundarySource(c)
 
-    def cost_used():
-        reads["n"] += 1
-        if reads["n"] >= 3:                # 后置边界内的 cost 回调推进时钟
+    def cost_read_advances_clock(s):
+        if s.reads == 1:                   # 见证读取内的 cost 回调推进时钟
             clock.advance(10.0)            # 10 → 20 > deadline 15
-        return 0.0
+        s.now = clock.t
 
+    src.on_read = cost_read_advances_clock
     out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
-                            cost_used=cost_used, now_fn=clock).run()
+                            now_fn=clock, boundary_snapshot=src.snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
     assert out.stop_reason is RepairStopReason.TIMEOUT
     assert out.final_report is None                    # 绝不作为成功结果
@@ -2885,70 +2935,58 @@ def test_p3_f_cross_snapshot_json_text_attack_rejected(env, monkeypatch):
 
 
 def test_p3_g_cancellation_mutates_cost_before_accept(env):
-    """P3-G 否证（任务书复现用例）：最终稳定复核中 cancellation 回调把 cost
-    从 0 改成 6（limit=5）→ 第二轮完整安全扫描捕获 → BUDGET_EXHAUSTED /
-    final_report=None（绝不 VERIFIED）；cost 回调在最终复核内推进时钟 →
-    新鲜时间越过 deadline → TIMEOUT；最终复核内回调异常 → UNSTABLE_BOUNDARY
-    fail-closed。"""
+    """P3-G 否证（任务书复现用例）：接受 VERIFIED 前的最终边界（P6-A 单一
+    权威快照源——源内部回调的改写在快照值读取前完成、随快照整体可见）中
+    cancellation 回调把 cost 从 0 改成 6（limit=5）→ 见证读取捕获 →
+    BUDGET_EXHAUSTED / final_report=None（绝不 VERIFIED）；cost 回调在快照
+    读取内推进时钟 → 快照时间越过 deadline → TIMEOUT；快照源回调异常 →
+    UNSTABLE_BOUNDARY fail-closed。"""
     tmp, work, work_real, outside, outside_real = env
-    # (a) cancellation 回调修改 cost（limit=5，cost 0→6）
+    # (a) 快照源内部的 cancellation 回调修改 cost（limit=5，cost 0→6）
     c = _verified_summary_contract(work_real, "wc_16f_p3g_a_0001")
-    box = {"used": 0.0, "cancel_calls": 0}
 
-    def cost_used_a():
-        return box["used"]
-
-    def cancel_flips_cost():
-        box["cancel_calls"] += 1
-        if box["cancel_calls"] == 4:    # 最终复核第 1 轮：cancel 回调把 cost 改成 6
-            box["used"] = 6.0
-        return False
+    def cancel_flips_cost(s):
+        s.cancel = False                    # cancel 回调返回 False
+        s.cost = 6.0                        # ……但内部改写 cost 0→6（随快照可见）
 
     out = BoundedRepairLoop(
         contract=c, verifier=IndependentVerifier(c),
         collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-        cost_used=cost_used_a, cancel_requested=cancel_flips_cost).run()
+        boundary_snapshot=_BoundarySource(c, cost=0.0,
+                                          on_read=cancel_flips_cost).snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"     # 报告本身真实产出
     assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
     assert out.final_report is None
 
-    # (b) cost 回调在最终复核内推进时钟 → 新鲜时间越过 deadline → TIMEOUT
+    # (b) 快照源内部的 cost 回调推进时钟 → 快照时间越过 deadline → TIMEOUT
     clock = FakeClock(0.0)
     (work_real / "summary.md").write_bytes(b"ok")
     c2 = _contract(work_real, contract_id="wc_16f_p3g_b_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
     v2 = IndependentVerifier(c2, now_fn=clock)
-    reads = {"n": 0}
 
-    def cost_advances_clock():
-        reads["n"] += 1
-        if reads["n"] == 4:             # 最终复核第 1 轮的 cost 读取推进时钟
-            clock.advance(20.0)         # 0 → 20 > deadline 15
-        return 0.0
+    def cost_advances_clock(s):
+        if s.reads == 1:                    # 见证读取内的 cost 回调推进时钟
+            clock.advance(20.0)             # 0 → 20 > deadline 15
+        s.now = clock.t
 
     out2 = BoundedRepairLoop(
         contract=c2, verifier=v2,
         collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
-        cost_used=cost_advances_clock, now_fn=clock).run()
+        boundary_snapshot=_BoundarySource(c2, cost=0.0,
+                                          on_read=cost_advances_clock).snapshot,
+        now_fn=clock).run()
     assert out2.attempts[0].verdict == "VERIFIED"
     assert out2.stop_reason is RepairStopReason.TIMEOUT
     assert out2.final_report is None
     assert clock.t == 20.0
 
-    # (c) 最终复核内回调异常 → 无法取得稳定安全结果 → fail-closed
+    # (c) 快照源内部回调异常 → 无法取得稳定安全结果 → fail-closed
     c3 = _verified_summary_contract(work_real, "wc_16f_p3g_c_0001")
-    cancel_calls = {"n": 0}
-
-    def cancel_boom():
-        cancel_calls["n"] += 1
-        if cancel_calls["n"] >= 4:      # 最终复核第 1 轮回调抛异常
-            raise RuntimeError("cancel callback exploded")
-        return False
-
     out3 = BoundedRepairLoop(
         contract=c3, verifier=IndependentVerifier(c3),
         collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
-        cancel_requested=cancel_boom).run()
+        boundary_snapshot=_BoundarySource(c3, fail_reads=(1,)).snapshot).run()
     assert out3.attempts[0].verdict == "VERIFIED"
     assert out3.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
     assert out3.final_report is None
@@ -2957,9 +2995,10 @@ def test_p3_g_cancellation_mutates_cost_before_accept(env):
 
 def test_p3_h_authentication_mutates_deadline_or_cancel(env):
     """P3-H 否证：接受门（seal 认证 / standard_hash 属性访问）内的回调副作用
-    必须被最终稳定边界复核捕获——(a) seal_is_authentic 翻转取消标志 →
-    CANCELLED / final_report=None；(b) standard_hash 属性推进时钟越过 deadline
-    → TIMEOUT / final_report=None。"""
+    必须被最终边界（P6-A 单一权威快照源）捕获——(a) seal_is_authentic 翻转
+    取消标志 → 快照读取原子看见 → CANCELLED / final_report=None；
+    (b) standard_hash 属性推进时钟越过 deadline → 快照时间越界 → TIMEOUT /
+    final_report=None。"""
     tmp, work, work_real, outside, outside_real = env
     # (a) seal 认证回调翻转 cancellation
     c = _verified_summary_contract(work_real, "wc_16f_p3h_a_0001")
@@ -2970,10 +3009,13 @@ def test_p3_h_authentication_mutates_deadline_or_cancel(env):
             flags["cancel"] = True       # 认证回调副作用：翻转取消标志
             return super().seal_is_authentic(report)
 
+    src = _BoundarySource(c)
+    src.on_read = lambda s: setattr(s, "cancel", flags["cancel"])
     out = BoundedRepairLoop(
         contract=c, verifier=_SealSideEffectVerifier(c),
         collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-        cancel_requested=lambda: flags["cancel"]).run()
+        cancel_requested=lambda: flags["cancel"],
+        boundary_snapshot=src.snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"
     assert out.stop_reason is RepairStopReason.CANCELLED
     assert out.final_report is None
@@ -2996,10 +3038,12 @@ def test_p3_h_authentication_mutates_deadline_or_cancel(env):
             return super().standard_hash
 
     v2 = _HashAdvancingVerifier(c2, clock)
+    src2 = _BoundarySource(c2)
+    src2.on_read = lambda s: setattr(s, "now", clock.t)
     out2 = BoundedRepairLoop(
         contract=c2, verifier=v2,
         collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
-        now_fn=clock).run()
+        now_fn=clock, boundary_snapshot=src2.snapshot).run()
     assert out2.attempts[0].verdict == "VERIFIED"
     assert out2.stop_reason is RepairStopReason.TIMEOUT
     assert out2.final_report is None
@@ -3363,81 +3407,69 @@ def test_p4_d_hardlink_alias_cross_snapshot_rejected(env, monkeypatch):
 
 
 def test_p4_e_last_callback_cannot_escape(env):
-    """P4-E 否证：最终边界快照是唯一权威读取——最后一次回调的副作用必须被
-    捕获且不可逃逸：(a) 最终边界内 cost 回调把 cost 0→6（limit=5）→
-    BUDGET_EXHAUSTED；(b) 最终边界内 cancel 回调翻转为 True → CANCELLED；
-    (c) 最终边界内 now 越过 deadline → TIMEOUT；(d) 最终边界内回调抛异常 →
-    UNSTABLE_BOUNDARY——全部 final_report=None，VERIFIED 绝不成为成功结果。"""
+    """P4-E 否证：最终边界快照是唯一权威读取（P6-A 单一权威快照源——源内部
+    最后一个回调的改写在快照值读取前完成、随快照整体可见，绝不可见副作用
+    逃逸）：(a) 快照源内部 cost 0→6（limit=5）→ BUDGET_EXHAUSTED；
+    (b) 快照源内部 cancel 翻转为 True → CANCELLED；(c) 快照源内部时钟越过
+    deadline → TIMEOUT；(d) 快照源回调抛异常 → UNSTABLE_BOUNDARY——全部
+    final_report=None，VERIFIED 绝不成为成功结果。"""
     tmp, work, work_real, outside, outside_real = env
-    # (a) 最终边界（第 4 次 cost 读取）内 cost 0→6
+    # (a) 快照源内部 cost 0→6
     c = _verified_summary_contract(work_real, "wc_16f_p4e_a_0001")
-    box = {"used": 0.0, "calls": 0}
 
-    def cost_flip():
-        box["calls"] += 1
-        if box["calls"] == 4:
-            box["used"] = 6.0
-        return box["used"]
+    def cost_flip(s):
+        s.cost = 6.0
 
     out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
                             collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-                            cost_used=cost_flip).run()
+                            boundary_snapshot=_BoundarySource(
+                                c, cost=0.0, on_read=cost_flip).snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
     assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
     assert out.final_report is None
 
-    # (b) 最终边界（第 4 次 cancel 读取）内翻转为 True
+    # (b) 快照源内部 cancel 翻转为 True
     c2 = _verified_summary_contract(work_real, "wc_16f_p4e_b_0001")
-    flags = {"cancel": False, "calls": 0}
 
-    def cancel_flip():
-        flags["calls"] += 1
-        if flags["calls"] == 4:
-            flags["cancel"] = True
-        return flags["cancel"]
+    def cancel_flip(s):
+        s.cancel = True
 
     out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2),
                              collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
-                             cancel_requested=cancel_flip).run()
+                             boundary_snapshot=_BoundarySource(
+                                 c2, on_read=cancel_flip).snapshot).run()
     assert out2.attempts[0].verdict == "VERIFIED"
     assert out2.stop_reason is RepairStopReason.CANCELLED
     assert out2.final_report is None
 
-    # (c) 最终边界内的 now 读取越过 deadline（最终结果构造时越过 deadline）
+    # (c) 快照源内部时钟越过 deadline
     clock = FakeClock(0.0)
     (work_real / "summary.md").write_bytes(b"ok")
     c3 = _contract(work_real, contract_id="wc_16f_p4e_c_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
     v3 = IndependentVerifier(c3, now_fn=clock)
-    reads = {"n": 0}
 
-    def now_cross_deadline():
-        reads["n"] += 1
-        if reads["n"] == 8:           # 最终边界内的 now 读取推进时钟越过 deadline
+    def now_cross_deadline(s):
+        if s.reads == 1:                  # 快照源内部推进时钟越过 deadline
             clock.advance(20.0)
-        return clock.t
+        s.now = clock.t
 
     out3 = BoundedRepairLoop(contract=c3, verifier=v3,
                              collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
-                             now_fn=now_cross_deadline).run()
+                             now_fn=clock,
+                             boundary_snapshot=_BoundarySource(
+                                 c3, on_read=now_cross_deadline).snapshot).run()
     assert out3.attempts[0].verdict == "VERIFIED"
     assert out3.stop_reason is RepairStopReason.TIMEOUT
     assert out3.final_report is None
     assert clock.t == 20.0
 
-    # (d) 最终边界内回调抛异常 → 无法取得稳定安全结果 → fail-closed
+    # (d) 快照源回调抛异常 → 无法取得稳定安全结果 → fail-closed
     c4 = _verified_summary_contract(work_real, "wc_16f_p4e_d_0001")
-    cancel_calls = {"n": 0}
-
-    def cancel_boom():
-        cancel_calls["n"] += 1
-        if cancel_calls["n"] >= 4:    # 最终边界内 cancel 回调抛异常
-            raise RuntimeError("final boundary callback exploded")
-        return False
-
     out4 = BoundedRepairLoop(contract=c4, verifier=IndependentVerifier(c4),
                              collect_evidence=lambda a, r: _ok_summary_submission(c4, r),
-                             cancel_requested=cancel_boom).run()
+                             boundary_snapshot=_BoundarySource(
+                                 c4, fail_reads=(1,)).snapshot).run()
     assert out4.attempts[0].verdict == "VERIFIED"
     assert out4.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
     assert out4.final_report is None
@@ -3445,37 +3477,46 @@ def test_p4_e_last_callback_cannot_escape(env):
 
 
 def test_p4_f_no_post_boundary_now_callback(env):
-    """P4-F 否证：接受 VERIFIED 前只原子读取**一次**最终 BoundarySnapshot——
-    此后不再调用任何 now/cost/cancel/verifier 回调；RepairOutcome.finished_
-    at_epoch 直接用 snapshot.now 构造（最后一个 now 值，零回调再发生）。"""
+    """P4-F 否证（P6-A 单一权威快照源下保持）：接受 VERIFIED 前只对快照源
+    恰好读取**两次**（见证 + 权威，均为原子单调用）——两次读取之间与权威
+    快照之后**零** now/cost/cancel/verifier 回调；RepairOutcome.finished_
+    at_epoch 直接用 snapshot.now 构造（快照时间，零回调再发生）。"""
     tmp, work, work_real, outside, outside_real = env
     (work_real / "summary.md").write_bytes(b"ok")
     c = _verified_summary_contract(work_real, "wc_16f_p4f_0001")
-    now_calls: list = []
+    events: list = []
     clock = {"t": 0.0}
 
     def now_fn():
-        now_calls.append(clock["t"])
+        events.append("now")
         return clock["t"]
 
-    cost_calls = {"n": 0}
-    boundary_cost_idx = {"n": None}
-
     def cost_used():
-        cost_calls["n"] += 1
-        if cost_calls["n"] == 4:      # 最终边界内的 cost 读取
-            boundary_cost_idx["n"] = len(now_calls)
+        events.append("cost")
         return 0.0
 
+    def cancel_requested():
+        events.append("cancel")
+        return False
+
+    src = _BoundarySource(c, cost=0.0, now=500.0)   # 快照时间在 deadline 内
+
+    def snap(_s):
+        events.append("snap")
+
+    src.on_read = snap
     out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c, now_fn=now_fn),
                             collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-                            cost_used=cost_used, now_fn=now_fn).run()
+                            cost_used=cost_used, cancel_requested=cancel_requested,
+                            now_fn=now_fn, boundary_snapshot=src.snapshot).run()
     assert out.stop_reason is RepairStopReason.VERIFIED
     assert out.final_report is not None
-    # 最终边界 cost 读取之后只允许边界自身的唯一一次 now 读取——零回调可再发生
-    assert cost_calls["n"] == 4
-    assert len(now_calls) == boundary_cost_idx["n"] + 1
-    assert out.finished_at_epoch == now_calls[-1]
+    # 恰好两次快照读取（见证 + 权威）；第一次快照之后只剩第二次快照——
+    # 零 now/cost/cancel 回调再发生；完成时间取快照时间。
+    assert src.reads == 2
+    after_first_snap = events[events.index("snap"):]
+    assert after_first_snap == ["snap", "snap"]
+    assert out.finished_at_epoch == 500.0
 
 
 # ================================================================
@@ -3637,235 +3678,197 @@ def test_p4_j_decompression_bomb_rejected_before_load(env):
 
 
 # ================================================================
-# Reviewer Patch 5 — P5-A: 真正封闭最终边界（版本一致性协议）
+# Reviewer Patch 5 — P5-A（P6-A 单一权威快照源协议下保留并适配）：
+# 最终边界只信任单一权威快照源——独立 effectful 回调的有限读取序列
+# （含 P4-D 单次顺序读取与 P5-A 双重采集 + epoch 记账）都是伪原子，
+# 已被 P6-A 移除；本组测试在源协议下锁定同等对抗语义。
 # ================================================================
 
 def test_p5_a_final_now_callback_mutating_cost_cannot_verify(env):
-    """P5-A 锁定 1：最终边界内的 now 回调把 cost 0→6 —— 旧单次顺序读取
-    （cancel→cost→now）下最后的 now_fn 改写已读取的 cost 会让越界 VERIFIED
-    逃逸；版本一致性协议下必须不得 VERIFIED（final_report=None）。"""
+    """P5-A 锁定 1（P6-A 源协议适配）：快照源内部的 now 回调把 cost 0→6 ——
+    (a) 改写发生在见证读取内 → 见证值随快照整体暴露 → BUDGET_EXHAUSTED；
+    (b) 改写发生在权威读取内（version 随状态变更递增）→ 两次读取版本不一致
+    → UNSTABLE_BOUNDARY。全部不得 VERIFIED（final_report=None）。"""
     tmp, work, work_real, outside, outside_real = env
-    # (a) 改写发生在权威采集的 now₂（夹逼起点）——其后的 cost₂ 读取捕获
     clock = FakeClock(0.0)
     (work_real / "summary.md").write_bytes(b"ok")
     c = _contract(work_real, contract_id="wc_16f_p5a_a_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
-    box = {"used": 0.0}
-    nows = {"n": 0}
 
-    def now_mutates_at_now2():
-        nows["n"] += 1
-        if nows["n"] == 10:           # acq2 的 now₂（权威采集夹逼起点）
-            box["used"] = 6.0
-        return clock.t
+    def now_mutates_cost_in_witness(s):
+        s.now = clock.t
+        if s.reads == 1:                  # 见证读取内的最终回调改写 cost
+            s.cost = 6.0
 
     out = BoundedRepairLoop(
-        contract=c, verifier=IndependentVerifier(c, now_fn=now_mutates_at_now2),
+        contract=c, verifier=IndependentVerifier(c, now_fn=clock),
         collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-        cost_used=lambda: box["used"], now_fn=now_mutates_at_now2).run()
+        now_fn=clock,
+        boundary_snapshot=_BoundarySource(c, cost=0.0,
+                                          on_read=now_mutates_cost_in_witness).snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
     assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
     assert out.final_report is None
 
-    # (b) 改写发生在见证采集的 now₁——权威采集的 cost₂ 读取捕获
-    clock2 = FakeClock(0.0)
+    # (b) 改写发生在权威读取内 → version 随变更递增 → 两次读取版本不一致
     c2 = _contract(work_real, contract_id="wc_16f_p5a_b_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
-    box2 = {"used": 0.0}
-    nows2 = {"n": 0}
+    clock2 = FakeClock(0.0)
 
-    def now_mutates_at_now1():
-        nows2["n"] += 1
-        if nows2["n"] == 9:           # acq1 的 now₁（见证采集最后读取项）
-            box2["used"] = 6.0
-        return clock2.t
+    def now_mutates_cost_in_authority(s):
+        s.now = clock2.t
+        if s.reads == 2:                  # 权威读取内的最终回调改写 cost
+            s.cost = 6.0                  # （version 协议义务：随变更递增）
 
     out2 = BoundedRepairLoop(
-        contract=c2, verifier=IndependentVerifier(c2, now_fn=now_mutates_at_now1),
+        contract=c2, verifier=IndependentVerifier(c2, now_fn=clock2),
         collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
-        cost_used=lambda: box2["used"], now_fn=now_mutates_at_now1).run()
+        now_fn=clock2,
+        boundary_snapshot=_BoundarySource(c2, cost=0.0,
+                                          on_read=now_mutates_cost_in_authority).snapshot).run()
     assert out2.attempts[0].verdict == "VERIFIED"
-    assert out2.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert out2.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
     assert out2.final_report is None
+    assert "final_boundary_unstable" in out2.diagnostic
 
 
 def test_p5_a_last_read_rewrite_cannot_verify(env):
-    """P5-A 锁定 2：最终边界采集内**任意读取项**改写其它边界状态 → 不得
-    VERIFIED（worst-wins 聚合 + now 夹逼 cost/cancel 读取 + 尾随 cancel 见证
-    全部拦截；越界后的 VERIFIED report 绝不成为成功结果）。"""
+    """P5-A 锁定 2（P6-A 源协议适配）：快照源内部**最后一个回调**改写其它
+    边界状态 → 改写随快照整体可见 → 不得 VERIFIED（见证读取即捕获）。
+    (a) cost 回调改写取消标志 → CANCELLED；(b) cost 回调推进时钟 → TIMEOUT；
+    (c) cancel 回调改写 cost → BUDGET_EXHAUSTED；(d) now 回调改写取消标志 →
+    CANCELLED——全部 final_report=None。"""
     tmp, work, work_real, outside, outside_real = env
-    # (a) cost 回调（见证采集）改写取消标志 → 权威采集 cancel 捕获 → CANCELLED
+    # (a) cost 回调改写取消标志
     c = _verified_summary_contract(work_real, "wc_16f_p5a_c_0001")
-    flags = {"cancel": False}
-    cost_calls = {"n": 0}
 
-    def cost_rewrites_cancel():
-        cost_calls["n"] += 1
-        if cost_calls["n"] == 3:      # 见证采集的 cost₁
-            flags["cancel"] = True
-        return 0.0
+    def cost_rewrites_cancel(s):
+        s.cost = 0.0
+        s.cancel = True
 
     out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
                             collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-                            cost_used=cost_rewrites_cancel,
-                            cancel_requested=lambda: flags["cancel"]).run()
+                            boundary_snapshot=_BoundarySource(
+                                c, cost=0.0, on_read=cost_rewrites_cancel).snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"
     assert out.stop_reason is RepairStopReason.CANCELLED
     assert out.final_report is None
 
-    # (b) cost 回调（权威采集 cost₂）推进时钟 → 其后的 now₃ 捕获 → TIMEOUT
+    # (b) cost 回调推进时钟
     clock = FakeClock(0.0)
     (work_real / "summary.md").write_bytes(b"ok")
     c2 = _contract(work_real, contract_id="wc_16f_p5a_d_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
-    adv = {"n": 0}
 
-    def cost_advances_at_cost2():
-        adv["n"] += 1
-        if adv["n"] == 4:             # 权威采集的 cost₂
-            clock.advance(20.0)       # 0 → 20 > deadline 15
-        return 0.0
+    def cost_advances_clock(s):
+        s.cost = 0.0
+        if s.reads == 1:
+            clock.advance(20.0)           # 0 → 20 > deadline 15
+        s.now = clock.t
 
     out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2, now_fn=clock),
                              collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
-                             cost_used=cost_advances_at_cost2, now_fn=clock).run()
+                             now_fn=clock,
+                             boundary_snapshot=_BoundarySource(
+                                 c2, cost=0.0, on_read=cost_advances_clock).snapshot).run()
     assert out2.attempts[0].verdict == "VERIFIED"
     assert out2.stop_reason is RepairStopReason.TIMEOUT
     assert out2.final_report is None
     assert clock.t == 20.0
 
-    # (c) cancel 回调（权威采集 cancel₂）改写 cost → 其后的 cost₂ 捕获 →
-    #     BUDGET_EXHAUSTED
+    # (c) cancel 回调改写 cost
     c3 = _verified_summary_contract(work_real, "wc_16f_p5a_e_0001")
-    box3 = {"used": 0.0}
-    cancels = {"n": 0}
 
-    def cancel_rewrites_cost():
-        cancels["n"] += 1
-        if cancels["n"] == 4:         # 权威采集的 cancel₂
-            box3["used"] = 6.0
-        return False
+    def cancel_rewrites_cost(s):
+        s.cancel = False
+        s.cost = 6.0
 
     out3 = BoundedRepairLoop(contract=c3, verifier=IndependentVerifier(c3),
                              collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
-                             cost_used=lambda: box3["used"],
-                             cancel_requested=cancel_rewrites_cost).run()
+                             boundary_snapshot=_BoundarySource(
+                                 c3, cost=0.0, on_read=cancel_rewrites_cost).snapshot).run()
     assert out3.attempts[0].verdict == "VERIFIED"
     assert out3.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
     assert out3.final_report is None
 
-    # (d) now 回调（权威采集 now₃）改写取消标志 → 尾随 cancel 见证捕获 →
-    #     CANCELLED（"最后读取项改写其它状态"不再不可见）
+    # (d) now 回调改写取消标志
     clock4 = FakeClock(0.0)
     (work_real / "summary.md").write_bytes(b"ok")
     c4 = _contract(work_real, contract_id="wc_16f_p5a_f_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
-    flags4 = {"cancel": False}
-    nows4 = {"n": 0}
 
-    def now_rewrites_cancel():
-        nows4["n"] += 1
-        if nows4["n"] == 11:          # 权威采集的 now₃（最后的 now 读取）
-            flags4["cancel"] = True
-        return clock4.t
+    def now_rewrites_cancel(s):
+        s.now = clock4.t
+        s.cancel = True
 
     out4 = BoundedRepairLoop(contract=c4,
-                             verifier=IndependentVerifier(c4, now_fn=now_rewrites_cancel),
+                             verifier=IndependentVerifier(c4, now_fn=clock4),
                              collect_evidence=lambda a, r: _ok_summary_submission(c4, r),
-                             cancel_requested=lambda: flags4["cancel"],
-                             now_fn=now_rewrites_cancel).run()
+                             now_fn=clock4,
+                             boundary_snapshot=_BoundarySource(
+                                 c4, on_read=now_rewrites_cancel).snapshot).run()
     assert out4.attempts[0].verdict == "VERIFIED"
     assert out4.stop_reason is RepairStopReason.CANCELLED
     assert out4.final_report is None
 
 
 def test_p5_a_unprovable_snapshot_fail_closed(env):
-    """P5-A 锁定 3：快照异常 / 版本变化（重入 → epoch 记账失配）/ 无法证明
-    一致（时钟回拨 / 采集中途契约漂移）→ UNSTABLE_BOUNDARY fail-closed，
+    """P5-A 锁定 3（P6-A 源协议适配）：快照源异常 / 版本不一致 / 值漂移 /
+    时钟回拨 / 采集中途契约漂移 → UNSTABLE_BOUNDARY fail-closed，
     final_report=None，VERIFIED 绝不成为成功结果。"""
     tmp, work, work_real, outside, outside_real = env
-    # (a) 权威采集内 now 回调抛异常 → 传播 → UNSTABLE_BOUNDARY
-    clock = FakeClock(0.0)
     (work_real / "summary.md").write_bytes(b"ok")
+    # (a) 权威读取内快照源回调抛异常 → 传播 → UNSTABLE_BOUNDARY
     c = _contract(work_real, contract_id="wc_16f_p5a_g_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
-    nows = {"n": 0}
-
-    def now_boom():
-        nows["n"] += 1
-        if nows["n"] == 10:           # 权威采集的 now₂
-            raise RuntimeError("now callback exploded")
-        return clock.t
-
-    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c, now_fn=now_boom),
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
                             collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-                            now_fn=now_boom).run()
+                            boundary_snapshot=_BoundarySource(
+                                c, fail_reads=(2,)).snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"
     assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
     assert out.final_report is None
     assert "final_boundary_unstable" in out.diagnostic
 
-    # (b) 版本变化：now 回调经仪表通道重入 cost 回调 → epoch 记账失配 →
-    #     无法证明一致 → UNSTABLE_BOUNDARY
+    # (b) 版本不一致：两次读取间 version 递增（无对应状态变更证明）→
+    #     无法取得同一状态版本 → UNSTABLE_BOUNDARY
     c2 = _verified_summary_contract(work_real, "wc_16f_p5a_h_0001")
-    nows2 = {"n": 0}
-    loop2 = BoundedRepairLoop(
-        contract=c2, verifier=IndependentVerifier(c2),
-        collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
-        cost_used=lambda: 0.0)
-
-    def now_reenters():
-        nows2["n"] += 1
-        if nows2["n"] == 10:          # 最终边界采集内的 now 读取
-            loop2._w_cost_used()      # 经仪表通道重入 → epoch 多记一次
-        return 1000.0
-
-    loop2._w_now = now_reenters       # 注入重入型 now 回调（同一仪表层）
-    out2 = loop2.run()
+    out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+                             boundary_snapshot=_BoundarySource(
+                                 c2, bump_on_read=(2,)).snapshot).run()
     assert out2.attempts[0].verdict == "VERIFIED"
     assert out2.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
     assert out2.final_report is None
     assert "final_boundary_unstable" in out2.diagnostic
 
-    # (c) 时钟回拨：权威采集 now₂=5.0 → now₃=1.0（非单调）→ 无法证明一致
-    clock3 = FakeClock(0.0)
-    (work_real / "summary.md").write_bytes(b"ok")
+    # (c) 时钟回拨：权威读取 now < 见证 now（非单调）→ UNSTABLE_BOUNDARY
     c3 = _contract(work_real, contract_id="wc_16f_p5a_i_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
-    nows3 = {"n": 0}
 
-    def now_backwards():
-        nows3["n"] += 1
-        if nows3["n"] == 10:          # 权威采集 now₂
-            return 5.0
-        if nows3["n"] == 11:          # 权威采集 now₃ —— 回拨
-            return 1.0
-        return clock3.t
+    def now_backwards(s):
+        s.now = 5.0 if s.reads == 2 else 1000.0   # 权威读取回拨
 
-    out3 = BoundedRepairLoop(contract=c3,
-                             verifier=IndependentVerifier(c3, now_fn=now_backwards),
+    out3 = BoundedRepairLoop(contract=c3, verifier=IndependentVerifier(c3),
                              collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
-                             now_fn=now_backwards).run()
+                             boundary_snapshot=_BoundarySource(
+                                 c3, on_read=now_backwards).snapshot).run()
     assert out3.attempts[0].verdict == "VERIFIED"
     assert out3.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
     assert out3.final_report is None
 
-    # (d) 采集中途契约漂移（两次采集 hash 不一致）→ 无法证明一致
+    # (d) 采集中途契约漂移（两次读取 hash 不一致）→ UNSTABLE_BOUNDARY
     c4 = _verified_summary_contract(work_real, "wc_16f_p5a_j_0001")
     c_other = _contract(work_real, contract_id="wc_16f_p5a_j_other_0001")
-    nows4 = {"n": 0}
-    loop4 = BoundedRepairLoop(
-        contract=c4, verifier=IndependentVerifier(c4),
-        collect_evidence=lambda a, r: _ok_summary_submission(c4, r))
 
-    def now_swaps_contract():
-        nows4["n"] += 1
-        if nows4["n"] == 10:          # 权威采集 now₂ 时改写契约
-            loop4._contract = c_other
-        return 1000.0
+    def swap_contract(s):
+        if s.reads == 2:
+            s.contract = c_other
 
-    loop4._w_now = now_swaps_contract
-    out4 = loop4.run()
+    out4 = BoundedRepairLoop(contract=c4, verifier=IndependentVerifier(c4),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c4, r),
+                             boundary_snapshot=_BoundarySource(
+                                 c4, on_read=swap_contract).snapshot).run()
     assert out4.attempts[0].verdict == "VERIFIED"
     assert out4.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
     assert out4.final_report is None
@@ -3873,28 +3876,28 @@ def test_p5_a_unprovable_snapshot_fail_closed(env):
 
 
 def test_p5_a_stable_snapshot_verifies_with_snapshot_now(env, monkeypatch):
-    """P5-A 锁定 4：正常稳定快照仍 VERIFIED，finished_at_epoch ==
-    snapshot.now；成功边界之后零 cost/cancel/now/verifier 回调（P4-F 语义
-    在新协议下保持：cost 恰 4 次、最终 cost 读取后恰一次 now 读取）。"""
+    """P5-A 锁定 4（P6-A 源协议适配）：稳定快照（两次读取同版本、逐值一致、
+    时钟单调）仍 VERIFIED，finished_at_epoch == snapshot.now；权威快照之后
+    零 cost/cancel/now/verifier 回调、零快照读取。"""
     tmp, work, work_real, outside, outside_real = env
     (work_real / "summary.md").write_bytes(b"ok")
     c = _verified_summary_contract(work_real, "wc_16f_p5a_k_0001")
-    now_calls: list = []
-    clock = {"t": 0.0}
+    events: list = []
 
     def now_fn():
-        now_calls.append(clock["t"])
-        return clock["t"]
-
-    cost_calls = {"n": 0}
-    boundary_cost_idx = {"n": None}
-
-    def cost_used():
-        cost_calls["n"] += 1
-        if cost_calls["n"] == 4:      # 权威采集的 cost₂（最终边界内 cost 读取）
-            boundary_cost_idx["n"] = len(now_calls)
+        events.append("now")
         return 0.0
 
+    def cost_used():
+        events.append("cost")
+        return 0.0
+
+    src = _BoundarySource(c, cost=0.0, now=500.0)   # 快照时间在 deadline 内
+
+    def snap(_s):
+        events.append("snap")
+
+    src.on_read = snap
     captured: list = []
     orig_take = BoundedRepairLoop._take_final_boundary
 
@@ -3906,20 +3909,23 @@ def test_p5_a_stable_snapshot_verifies_with_snapshot_now(env, monkeypatch):
     monkeypatch.setattr(BoundedRepairLoop, "_take_final_boundary", spy_take)
     loop = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c, now_fn=now_fn),
                              collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-                             cost_used=cost_used, now_fn=now_fn)
+                             cost_used=cost_used, now_fn=now_fn,
+                             boundary_snapshot=src.snapshot)
     out = loop.run()
     assert out.stop_reason is RepairStopReason.VERIFIED
     assert out.final_report is not None
     assert loop._verifier.seal_is_authentic(out.final_report) is True
-    # 快照权威：finished_at_epoch == snapshot.now（最新权威 now 读数）
+    # 快照权威：finished_at_epoch == snapshot.now，版本一致
     bsnap, pre_reason, pre_diag = captured[0]
     assert pre_reason is None
     assert out.finished_at_epoch == bsnap.now
     assert bsnap.version > 0
-    # 成功边界之后零回调：cost 恰 4 次；最终 cost 读取之后恰一次 now 读取
-    assert cost_calls["n"] == 4
-    assert len(now_calls) == boundary_cost_idx["n"] + 1
-    assert out.finished_at_epoch == now_calls[-1]
+    # 恰好两次快照读取（见证 + 权威）；第一次快照之后只剩第二次快照——
+    # 零 cost/now 回调再发生。
+    assert src.reads == 2
+    after_first_snap = events[events.index("snap"):]
+    assert after_first_snap == ["snap", "snap"]
+    assert out.finished_at_epoch == 500.0
 
 
 # ================================================================
@@ -3929,20 +3935,23 @@ def test_p5_a_stable_snapshot_verifies_with_snapshot_now(env, monkeypatch):
 def _p5_pdf(root_body: bytes,
             pages_body: bytes = b"<</Type/Pages/Kids[3 0 R]/Count 1>>\n",
             page_body: bytes = b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>\n",
-            trailer: bytes = b"trailer\n<</Size 4/Root 1 0 R>>\n") -> bytes:
-    """程序化自洽最小 PDF（对象体可任意构造，偏移关系零手算漂移）。"""
+            trailer: bytes = b"trailer\n<</Size 4/Root 1 0 R>>\n",
+            gens: tuple = (0, 0, 0),
+            xref_gen: int = 0) -> bytes:
+    """程序化自洽最小 PDF（对象体/对象 generation/xref generation 可任意构造，
+    偏移关系零手算漂移）。"""
     parts = [b"%PDF-1.4\n"]
     offsets: dict = {}
     for i, body in enumerate((root_body, pages_body, page_body), start=1):
         offsets[i] = sum(len(p) for p in parts)
-        parts.append(b"%d 0 obj\n" % i)
+        parts.append(b"%d %d obj\n" % (i, gens[i - 1]))
         parts.append(body)
         parts.append(b"endobj\n")
     xref_pos = sum(len(p) for p in parts)
     parts.append(b"xref\n0 4\n")
     parts.append(b"0000000000 65535 f \n")
     for i in (1, 2, 3):
-        parts.append(b"%010d 00000 n \n" % offsets[i])
+        parts.append(b"%010d %05d n \n" % (offsets[i], xref_gen))
     parts.append(trailer)
     parts.append(b"startxref\n%d\n" % xref_pos)
     parts.append(b"%%EOF\n")
@@ -4171,3 +4180,438 @@ def test_p5_c_secret_rejection_messages_redacted(env):
                           required=True, result=CheckResult.FAIL,
                           inputs=((key_secret, "v"),))
     assert "KKKK" not in str(ei2.value)
+
+
+# ================================================================
+# Reviewer Patch 6 — P6-A: 移除伪原子有限回调协议（单一权威快照源）
+# ================================================================
+
+def test_p6_a_lock1_last_cancel_false_with_cost_rewrite_not_verified(env):
+    """P6-A 锁定 1：最后 cancel 返回 False、同时 cost 0→6 —— 快照源内部最后
+    一个回调的改写在快照值读取前完成、随快照整体可见 → 见证读取即捕获 →
+    BUDGET_EXHAUSTED，绝不 VERIFIED（final_report=None）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p6a_l1_0001")
+
+    def last_cancel_rewrites_cost(s):
+        s.cancel = False                   # cancel 回调返回 False
+        s.cost = 6.0                       # ……同时把 cost 0→6（limit=5）
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        boundary_snapshot=_BoundarySource(c, cost=0.0,
+                                          on_read=last_cancel_rewrites_cost).snapshot).run()
+    assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert out.final_report is None
+
+
+def test_p6_a_lock2_last_read_advances_deadline_not_verified(env):
+    """P6-A 锁定 2：最后读取项推进 deadline —— 快照读取原子返回推进后的
+    时间 → 见证读取即捕获 → TIMEOUT，绝不 VERIFIED（final_report=None）。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    c = _contract(work_real, contract_id="wc_16f_p6a_l2_0001", budget=ExecutionBudget(
+        max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    clock = FakeClock(0.0)
+
+    def last_read_advances_deadline(s):
+        if s.reads == 1:
+            clock.advance(20.0)                # 0 → 20 > deadline 15
+        s.now = clock.t
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c, now_fn=clock),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=clock,
+        boundary_snapshot=_BoundarySource(c, on_read=last_read_advances_deadline).snapshot).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.TIMEOUT
+    assert out.final_report is None
+    assert clock.t == 20.0
+
+
+def test_p6_a_lock3_broken_source_fail_closed(env):
+    """P6-A 锁定 3：快照源异常 / schema 违约 / 类型违约 / 版本不一致 →
+    fail-closed（UNSTABLE_BOUNDARY，final_report=None）——绝不对源返回值
+    补默认值或强转，绝不取较乐观值。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p6a_l3a_0001")
+    # (a) 见证读取即异常 → UNSTABLE_BOUNDARY
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            boundary_snapshot=_BoundarySource(
+                                c, fail_reads=(1,)).snapshot).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert "final_boundary_unstable" in out.diagnostic
+
+    def broken(_s):
+        return {"contract_hash": c.content_hash, "cancelled": False,
+                "cost_used": None, "now": 0.0, "version": 1,
+                "extra_key": True}             # 多键 → exact-schema 违约
+
+    # (b) schema 违约（多键）→ UNSTABLE_BOUNDARY
+    c2 = _verified_summary_contract(work_real, "wc_16f_p6a_l3b_0001")
+    out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+                             boundary_snapshot=broken).run()
+    assert out2.attempts[0].verdict == "VERIFIED"
+    assert out2.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out2.final_report is None
+
+    def bad_cancel(_s):
+        return {"contract_hash": c.content_hash, "cancelled": "no",
+                "cost_used": None, "now": 0.0, "version": 1}   # cancelled 非 bool
+
+    # (c) 类型违约（cancelled 非 bool）→ UNSTABLE_BOUNDARY
+    c3 = _verified_summary_contract(work_real, "wc_16f_p6a_l3c_0001")
+    out3 = BoundedRepairLoop(contract=c3, verifier=IndependentVerifier(c3),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
+                             boundary_snapshot=bad_cancel).run()
+    assert out3.attempts[0].verdict == "VERIFIED"
+    assert out3.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out3.final_report is None
+
+    # (d) 版本不一致（两次读取 version 不同）→ UNSTABLE_BOUNDARY
+    c4 = _verified_summary_contract(work_real, "wc_16f_p6a_l3d_0001")
+    out4 = BoundedRepairLoop(contract=c4, verifier=IndependentVerifier(c4),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c4, r),
+                             boundary_snapshot=_BoundarySource(
+                                 c4, bump_on_read=(2,)).snapshot).run()
+    assert out4.attempts[0].verdict == "VERIFIED"
+    assert out4.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out4.final_report is None
+
+
+def test_p6_a_lock4_stable_snapshot_verifies_finished_at_snapshot_now(env):
+    """P6-A 锁定 4：稳定快照（同版本、逐值一致、时钟单调）正常 VERIFIED，
+    完成时间取快照时间；权威快照之后零 cost/cancel/now/verifier 回调、零
+    快照读取。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p6a_l4_0001")
+    events: list = []
+
+    def now_fn():
+        events.append("now")
+        return 0.0
+
+    def cost_used():
+        events.append("cost")
+        return 0.0
+
+    def cancel_requested():
+        events.append("cancel")
+        return False
+
+    src = _BoundarySource(c, cost=0.0, now=500.0, version=7)
+
+    def snap(_s):
+        events.append("snap")
+
+    src.on_read = snap
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            cost_used=cost_used, cancel_requested=cancel_requested,
+                            now_fn=now_fn, boundary_snapshot=src.snapshot).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.final_report is not None
+    assert out.final_report.verdict is VerificationVerdict.VERIFIED
+    # 完成时间取快照时间（version 原样进入快照）
+    assert out.finished_at_epoch == 500.0
+    # 恰好两次快照读取（见证 + 权威）；第一次快照之后只剩第二次快照——
+    # 零 now/cost/cancel 回调再发生。
+    assert src.reads == 2
+    after_first_snap = events[events.index("snap"):]
+    assert after_first_snap == ["snap", "snap"]
+
+
+def test_p6_a_no_snapshot_source_independent_callbacks_never_verified(env):
+    """P6-A 核心锁定：独立的 effectful cost/cancel/now 回调**不得**被包装后
+    宣称为原子快照——未提供单一权威快照源时无法取得同一状态版本的
+    contract/cancel/cost/now → VERIFIED 绝不被接受（UNSTABLE_BOUNDARY /
+    final_report=None）。任何对抗性"最后回调改写其它状态"的配置（乃至完全
+    良性的配置）都绝不 VERIFIED——伪原子有限回调协议（读取顺序排列 / epoch
+    调用计数包装）已被移除。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    budget = ExecutionBudget(max_duration_seconds=600.0,
+                             cost_limit=CostBudget(amount=5.0), max_attempts=5)
+
+    # (a) 最后的 cancel 回调返回 False、同时把 cost 0→6
+    c = _contract(work_real, contract_id="wc_16f_p6a_ns_a_0001", budget=budget)
+    box = {"used": 0.0, "calls": 0}
+
+    def cancel_rewrites_cost():
+        box["calls"] += 1
+        if box["calls"] >= 3:              # 预检（×2）之后才改写——attempt 照常执行
+            box["used"] = 6.0
+        return False
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cost_used=lambda: box["used"],
+        cancel_requested=cancel_rewrites_cost).run()
+    assert out.attempts[0].verdict == "VERIFIED"      # 报告本身真实产出
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert "boundary_snapshot_source_unavailable" in out.diagnostic
+
+    # (b) 最后的 cost 回调翻转取消标志
+    c2 = _contract(work_real, contract_id="wc_16f_p6a_ns_b_0001", budget=budget)
+    flags = {"cancel": False, "calls": 0}
+
+    def cost_rewrites_cancel():
+        flags["calls"] += 1
+        if flags["calls"] >= 3:            # 预检（×2）之后才改写——attempt 照常执行
+            flags["cancel"] = True
+        return 0.0
+
+    out2 = BoundedRepairLoop(
+        contract=c2, verifier=IndependentVerifier(c2),
+        collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+        cancel_requested=lambda: flags["cancel"],
+        cost_used=cost_rewrites_cancel).run()
+    assert out2.attempts[0].verdict == "VERIFIED"
+    assert out2.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out2.final_report is None
+
+    # (c) 最后的 now 回调推进 deadline（乃至良性配置）——同样绝不 VERIFIED
+    c3 = _contract(work_real, contract_id="wc_16f_p6a_ns_c_0001", budget=budget)
+    clock = FakeClock(0.0)
+    out3 = BoundedRepairLoop(
+        contract=c3, verifier=IndependentVerifier(c3, now_fn=clock),
+        collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
+        now_fn=clock).run()
+    assert out3.attempts[0].verdict == "VERIFIED"
+    assert out3.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out3.final_report is None
+
+
+# ================================================================
+# Reviewer Patch 6 — P6-B: PDF generation 精确绑定
+# ================================================================
+
+def test_p6_b_generation_binding_exact(env):
+    """P6-B 锁定：indirect ref 保存 (object_number, generation) 并与对象定义
+    generation 精确一致——当前封闭子集只支持 ``n 0 obj``，因此 /Root、
+    /Pages 引用与 xref n-entry 的 generation 都必须为 0：/Root 1 9 R 指向
+    1 0 obj → FAIL；/Pages 2 9 R 指向 2 0 obj → FAIL；xref n-entry generation
+    非零而对象为 n 0 obj → FAIL；对象定义 n 9 obj 与 xref 00000 偏移指向
+    不一致 → FAIL；generation-0 合法 PDF 保持 PASS。"""
+    tmp, work, work_real, outside, outside_real = env
+    from furina.agent.verification import full_content_verdict
+    # 正对照：generation-0 合法 PDF 仍 PASS
+    assert full_content_verdict(_p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n")) \
+        == ("application/pdf", "")
+    # /Root 1 9 R 指向 1 0 obj → 引用与定义 generation 不一致 → FAIL
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n",
+                   trailer=b"trailer\n<</Size 4/Root 1 9 R>>\n")
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_root_generation")
+    # /Pages 2 9 R 指向 2 0 obj → FAIL
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 9 R>>\n")
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_pages_generation")
+    # xref n-entry generation 非零而对象为 n 0 obj → FAIL
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n", xref_gen=9)
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_xref_generation")
+    # 对象定义 3 9 obj 而 xref 条目 generation 00000 → 偏移指向的
+    # ``3 0 obj`` marker 不存在 → FAIL（对象定义 generation 与引用不一致）
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n", gens=(0, 0, 9))
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_xref_offset")
+    # 端到端：generation 不一致 PDF 作为 pdf_document 期望验证 → required FAIL
+    art = work_real / "gen.pdf"
+    art.write_bytes(_p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n",
+                            trailer=b"trailer\n<</Size 4/Root 1 9 R>>\n"))
+    exp = ArtifactExpectation(artifact_id="gen_doc", artifact_type="pdf_document",
+                              expected_path=str(art), required=True)
+    c = _content_contract(work_real, "wc_16f_p6b_0001", expectations=(exp,))
+    rep = IndependentVerifier(c).verify(_submission(
+        c, "run_p6b_0001",
+        declared=[_declared(art, sha_hex=_sha(art.read_bytes()),
+                            mime="application/pdf", artifact_id="gen_doc")]))
+    assert rep.verdict is VerificationVerdict.FAILED
+    assert rep.authority_seal == ""
+    assert any(ch.result is CheckResult.FAIL
+               and ch.explanation.startswith("malformed_content:pdf_root_generation")
+               for ch in rep.checks), [(ch.check_id, ch.explanation) for ch in rep.checks]
+
+
+# ================================================================
+# Reviewer Patch 6 — P6-C: 公开模型按真实运行时类型逐字段封闭
+# ================================================================
+
+_P6_SHORT_SECRET = "password:hunter2"
+_P6_LONG_SECRET = "api_key=" + "B" * 600
+
+
+def _p6_base_kwargs() -> dict:
+    """五个公开模型各自**合法**基础构造参数（逐字段注入迭代的基底）。"""
+    from furina.agent.verification import (
+        ArtifactObservation,
+        EvidenceBundle,
+        TerminalObservation,
+        VerificationCheck,
+    )
+    bundle = EvidenceBundle(contract_id="wc_16f_p6c_0001", contract_hash="0" * 64,
+                            run_id="run_p6c_0001", backend_id="native_agent",
+                            terminal=(), artifacts=())
+    return {
+        TerminalObservation: dict(event_id="evt_p6c_0001", kind="backend.completed",
+                                  observed_at_epoch=1.0, bound=True),
+        ArtifactObservation: dict(source="expectation", artifact_id="doc",
+                                  claimed_path="/p/a.md", resolved_path="/p/a.md",
+                                  target_exists=True, is_regular_file=True,
+                                  within_workspace=True, size_bytes=3,
+                                  observed_mime="text/plain",
+                                  observed_sha256="0" * 64, rejection="",
+                                  name_mime="", content_rejection=""),
+        EvidenceBundle: dict(contract_id="wc_16f_p6c_0001", contract_hash="0" * 64,
+                             run_id="run_p6c_0001", backend_id="native_agent",
+                             terminal=(), artifacts=(), diagnostics=()),
+        VerificationCheck: dict(check_id="check_exists_p6c_0001",
+                                kind="artifact_file_exists", required=True,
+                                result=CheckResult.PASS, explanation="ok",
+                                inputs=(("path", "/p/a.md"),)),
+        VerificationReport: dict(report_id="vrp_" + "a" * 32, verifier_id=VERIFIER_ID,
+                                 contract_id="wc_16f_p6c_0001", contract_hash="0" * 64,
+                                 standard_hash="0" * 64, run_id="run_p6c_0001",
+                                 backend_id="native_agent",
+                                 verdict=VerificationVerdict.FAILED, checks=(),
+                                 diagnostics=(), evidence=bundle,
+                                 started_at_epoch=1.0, finished_at_epoch=2.0),
+    }
+
+
+@pytest.mark.parametrize("secret", [_P6_SHORT_SECRET, _P6_LONG_SECRET])
+def test_p6_c_every_dataclass_field_typed_or_scrubbed(env, secret):
+    """P6-C 锁定：遍历五个公开模型**全部 dataclass 字段**（不只"声明为字符串"
+    的字段），向每个字段注入短秘密与 600 字符秘密——构造必须拒绝（异常消息
+    零 raw secret 回显），或所有 to_dict()/to_digest_dict()/digest_payload()/
+    to_json() 导出均无 raw secret。"""
+    from furina.agent.verification import (
+        ArtifactObservation,
+        EvidenceBundle,
+        TerminalObservation,
+        VerificationCheck,
+    )
+    bases = _p6_base_kwargs()
+    for model, base in bases.items():
+        for f in dataclasses.fields(model):
+            kw = dict(base)
+            kw[f.name] = secret
+            try:
+                obj = model(**kw)
+            except VerificationError as exc:
+                # 构造拒绝：异常消息同样零 raw secret 回显（纵深）
+                assert secret not in str(exc), (model.__name__, f.name)
+                continue
+            # 构造成功：全部导出面零 raw secret
+            blob = _p5_export_blob(obj)
+            if isinstance(obj, (TerminalObservation, ArtifactObservation)):
+                container = ("terminal" if isinstance(obj, TerminalObservation)
+                             else "artifacts")
+                obj = EvidenceBundle(**{**bases[EvidenceBundle],
+                                        container: (obj,)})
+                blob += "\n" + _p5_export_blob(obj)
+            elif isinstance(obj, VerificationCheck):
+                report_kw = dict(bases[VerificationReport])
+                report_kw["checks"] = (obj,)
+                report = VerificationReport(**report_kw)
+                blob += "\n" + _p5_export_blob(report)
+            assert secret not in blob, (model.__name__, f.name, blob[:400])
+
+
+def test_p6_c_strict_runtime_type_gates(env):
+    """P6-C 锁定（逐字段最小集）：observed_at_epoch 有限数值（bool/NaN/Inf/
+    str 拒绝）；bound/target_exists/is_regular_file/within_workspace 严格
+    bool；size_bytes None 或非负 int（bool/负数/浮点/str 拒绝）；声明为
+    字符串的字段非 str 拒绝（绝不静默变 ""）。"""
+    from furina.agent.verification import (
+        ArtifactObservation,
+        TerminalObservation,
+        VerificationCheck,
+    )
+    # observed_at_epoch：有限数值，bool 拒绝
+    for bad in (True, float("nan"), float("inf"), float("-inf"), "1.0", None):
+        with pytest.raises(VerificationError):
+            TerminalObservation(event_id="evt_p6c_t_0001", kind="backend.completed",
+                                observed_at_epoch=bad, bound=True)
+    # bound：严格 bool
+    for bad in (1, "yes", None, 1.0):
+        with pytest.raises(VerificationError):
+            TerminalObservation(event_id="evt_p6c_t_0001", kind="backend.completed",
+                                observed_at_epoch=1.0, bound=bad)
+    base_ao = dict(source="expectation", artifact_id="doc", claimed_path="/p/a.md",
+                   resolved_path="/p/a.md", target_exists=True, is_regular_file=True,
+                   within_workspace=True, size_bytes=3, observed_mime="text/plain",
+                   observed_sha256="0" * 64, rejection="")
+    # target_exists / is_regular_file / within_workspace：严格 bool
+    for field in ("target_exists", "is_regular_file", "within_workspace"):
+        for bad in (1, "yes", None):
+            kw = dict(base_ao)
+            kw[field] = bad
+            with pytest.raises(VerificationError):
+                ArtifactObservation(**kw)
+    # size_bytes：None 或非负 int（bool/负数/浮点/str 拒绝）
+    for bad in (True, -1, 3.0, "3"):
+        kw = dict(base_ao)
+        kw["size_bytes"] = bad
+        with pytest.raises(VerificationError):
+            ArtifactObservation(**kw)
+    ok_none = dict(base_ao)
+    ok_none["size_bytes"] = None
+    ArtifactObservation(**ok_none)               # None 合法
+    # 声明为字符串的字段非 str 拒绝（绝不静默转 ""）
+    for field in ("claimed_path", "resolved_path", "rejection", "name_mime",
+                  "content_rejection", "observed_mime"):
+        kw = dict(base_ao)
+        kw[field] = 123
+        with pytest.raises(VerificationError):
+            ArtifactObservation(**kw)
+    with pytest.raises(VerificationError):
+        VerificationCheck(check_id="check_x_p6c_0001", kind="artifact_file_exists",
+                          required=True, result=CheckResult.PASS,
+                          explanation=None)
+
+
+def test_p6_c_enum_and_report_id_rejection_messages_scrubbed(env):
+    """P6-C 锁定：report_id 拒绝、verdict / CheckResult 枚举字符串转换错误
+    （ValueError 回显 raw value）——异常消息一律先脱敏，raw secret 绝不进入
+    异常消息。"""
+    from furina.agent.verification import VerificationCheck
+    secret = _P6_SHORT_SECRET
+    long_secret = _P6_LONG_SECRET
+    base = dict(_p6_base_kwargs()[VerificationReport])
+    # report_id 词法非法：异常回显脱敏
+    for rid in (secret, long_secret, 123):
+        kw = dict(base)
+        kw["report_id"] = rid
+        with pytest.raises(VerificationError) as ei:
+            VerificationReport(**kw)
+        assert secret not in str(ei.value) and long_secret not in str(ei.value)
+    # verdict 枚举字符串转换错误：ValueError 捕获并脱敏
+    for vd in (secret, long_secret):
+        kw = dict(base)
+        kw["verdict"] = vd
+        with pytest.raises(VerificationError) as ei:
+            VerificationReport(**kw)
+        assert secret not in str(ei.value) and long_secret not in str(ei.value)
+        assert "[REDACTED]" in str(ei.value)
+    # CheckResult 枚举字符串转换错误：ValueError 捕获并脱敏
+    for res in (secret, long_secret):
+        with pytest.raises(VerificationError) as ei:
+            VerificationCheck(check_id="check_x_p6c_0001", kind="artifact_file_exists",
+                              required=True, result=res)
+        assert secret not in str(ei.value) and long_secret not in str(ei.value)
+        assert "[REDACTED]" in str(ei.value)
+    # result 非法对象：统一 VerificationError（绝不裸 ValueError 回显 raw value）
+    with pytest.raises(VerificationError):
+        VerificationCheck(check_id="check_x_p6c_0001", kind="artifact_file_exists",
+                          required=True, result=object())

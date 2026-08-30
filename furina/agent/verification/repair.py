@@ -1,26 +1,33 @@
 """Phase 16F — BoundedRepairLoop：严格有界修复循环（16F 任务书 §5 + 关键锁定 9–12
-+ Reviewer Patch 1 blocker 4/6 + Reviewer Patch 3（blocker B3）+ Patch 4（P4-D）。
++ Reviewer Patch 1 blocker 4/6 + Reviewer Patch 3（blocker B3）+ Patch 4（P4-D）
++ Patch 6（P6-A）。
 
-- **接受 VERIFIED 前的真正封闭最终边界（P4-D + P5-A）**：``_accept_verified_
-  report``（seal 认证 / standard·hash 属性访问——都可能携带调用方回调副作用）
-  **完成后**，经**单一权威快照接口** ``_take_final_boundary`` 以**版本一致性
-  协议**取得权威 :class:`BoundarySnapshot`：见证采集（cancel→cost→now）暴露
-  的越界立即停止（拒绝路径零逃逸面）；仅当见证干净时进行权威采集
-  （now→cancel→cost→now→cancel——now 夹逼取消/成本读取），并**证明两次采集
-  一致**（epoch ledger 精确记账 / 契约 hash 一致 / 时钟单调 / 回调零异常），
-  无法证明一致 → ``UNSTABLE_BOUNDARY`` fail-closed；值聚合一律 fail-closed
-  worst-wins（cancelled 取 OR、cost 取 max、now 取最新）。判定与 RepairOutcome
-  构造**只依据该快照**（``snapshot.now`` 直接作为 finished_at_epoch），此后零
-  回调（cost/cancel/now/verifier 一律不再调用）。越界（成本超限/取消/超时/
-  契约漂移）→ 立即停止且 ``final_report=None``（VERIFIED 绝不成为成功结果）。
-  P4-D 的单次顺序读取不是原子快照——最后的 now_fn 回调可改写已读取的
-  cost/cancel 让越界 VERIFIED 逃逸；"调整顺序"或"有限轮重复扫描"同样无法
-  封闭（任意有限读取序列都有最后一个读取项）——版本一致性协议把"最后一次
-  回调改写其它边界状态"从不可见副作用转为可证明的不一致/可捕获的越界。
-  ——cancellation 回调把 cost 从 0 改成 6（读取次序 cancel→cost 暴露其副作用）、
-  cost 回调推进时钟（cost→now 暴露其副作用）、seal 认证回调翻转取消 /
-  standard_hash 属性推进 deadline、**最终 now 回调改写 cost/cancel** 全部被
-  该协议拦截。
+- **接受 VERIFIED 前的真正封闭最终边界（P6-A：单一权威快照源）**：
+  ``_accept_verified_report``（seal 认证 / standard·hash 属性访问——都可能携带
+  调用方回调副作用）**完成后**，最终边界**只**从调用方提供的**单一权威边界
+  快照源**（``boundary_snapshot``——一次调用原子返回 contract hash /
+  cancellation / cost / now / version 的受控共享状态）取得权威
+  :class:`BoundarySnapshot`：见证读取暴露的越界立即停止（拒绝路径零逃逸面，
+  零第二读取）；仅当见证干净时做第二次读取并**证明同一状态版本**（version
+  一致 + 契约 hash / cancelled / cost 逐值一致 + now 单调不减），无法取得
+  同一状态版本 → ``UNSTABLE_BOUNDARY`` fail-closed（final_report=None）。
+  判定与 RepairOutcome 构造**只依据该快照**（``snapshot.now`` 直接作为
+  finished_at_epoch），此后零回调（cost/cancel/now/verifier 与快照源一律
+  不再调用）。越界（成本超限/取消/超时/契约漂移）→ 立即停止且
+  ``final_report=None``（VERIFIED 绝不成为成功结果）。
+
+  **为什么独立的 effectful cost/cancel/now 回调不能构成最终边界（P6-A 移除
+  P4-D/P5-A 的伪原子有限回调协议）**：任何由独立回调组成的有限读取序列都有
+  **最后一个读取项**，其内部对其它边界状态的改写对更早读取的值不可见——
+  调整读取顺序、双采集、epoch 调用计数（wrapper 记账）都无法观察"最后一个
+  回调内部改写其它状态"，因此把独立回调包装后宣称为原子快照本身就是伪原子。
+  唯一封闭结构是**真正的单一权威快照源**：一次调用返回同一状态版本的全部
+  边界值（源内部回调的改写在值读取前完成、随快照整体可见），配合 version
+  协议（状态任何变更递增 version）证明两次读取之间状态未变。未提供快照源
+  （或快照源异常 / 版本不一致 / 值漂移 / 时钟回拨）→ VERIFIED 绝不被接受
+  （``UNSTABLE_BOUNDARY``）；attempt 生命周期内（attempt 前/factory 后/
+  approval 后/非 VERIFIED 后置）的边界复核仍走独立回调——那些位置每个回调
+  的副作用都被其后的读取捕获，且从不宣称为原子快照。
 
 - **修复允许条件**：WorkContract 允许（``budget.max_attempts > 1`` 才有修复余地；
   approval-gated 策略必须提供 ``approval_authority``，否则构造期 fail-closed）
@@ -176,12 +183,12 @@ def _diag_signature(diagnostic: str) -> str:
 
 @dataclass(frozen=True)
 class BoundarySnapshot:
-    """P4-D + P5-A：接受 VERIFIED 前的**单一权威边界快照**（版本一致性协议）。
+    """P6-A：接受 VERIFIED 前的**单一权威边界快照**（快照源一次调用原子返回）。
 
-    一次调用同时取得 contract hash / cancellation / cost / 新鲜当前时间——
-    判定与 RepairOutcome 构造**只依据本快照**；此后不得再调用任何
-    cost/cancel/now/verifier 回调。``version`` 是快照取得时的边界版本
-    （epoch ledger：采集窗口内每个边界回调调用恰递增一次）。
+    全部字段来自**同一次**快照源调用（同一状态版本）——判定与 RepairOutcome
+    构造**只依据本快照**；此后不得再调用任何 cost/cancel/now/verifier 回调
+    或快照源。``version`` 是快照源的状态版本（受控共享状态协议：状态任何
+    变更递增 version；两次读取 version 一致 ⇒ 状态未变）。
     """
 
     contract_hash: str
@@ -200,7 +207,9 @@ class BoundedRepairLoop:
                  approval_authority: Optional[Callable[[str, str], str]] = None,
                  cost_used: Optional[Callable[[], float]] = None,
                  run_id_factory: Optional[Callable[[str], str]] = None,
-                 now_fn: Callable[[], float] = time.time) -> None:
+                 now_fn: Callable[[], float] = time.time,
+                 boundary_snapshot: Optional[Callable[[], Mapping[str, Any]]] = None
+                 ) -> None:
         if not isinstance(contract, WorkContract):
             raise VerificationError(
                 f"repair 必须绑定 16A WorkContract，得到 {type(contract).__name__}")
@@ -211,6 +220,8 @@ class BoundedRepairLoop:
             raise VerificationError("verifier 与 repair 绑定的契约身份不一致")
         if not callable(collect_evidence):
             raise VerificationError("collect_evidence 必须是 callable")
+        if boundary_snapshot is not None and not callable(boundary_snapshot):
+            raise VerificationError("boundary_snapshot 必须是 callable（单一权威快照源）")
 
         policy_kind = contract.approval_policy.policy_kind
         if policy_kind in ("approval_required_each_step",
@@ -227,34 +238,13 @@ class BoundedRepairLoop:
         self._cost_used = cost_used
         self._run_id_factory = run_id_factory or (lambda attempt_id: f"run_{attempt_id}")
         self._now_fn = now_fn
+        # P6-A：单一权威边界快照源（接受 VERIFIED 前的最终边界唯一读取通道）。
+        # 未提供 → 无法取得同一状态版本的 contract/cancel/cost/now → VERIFIED
+        # 绝不被接受（UNSTABLE_BOUNDARY fail-closed）。
+        self._boundary_snapshot = boundary_snapshot
         self._initial_hash = contract.content_hash
         self._deadline = self._now_fn() + contract.budget.max_duration_seconds
         self._seen_run_ids: set = set()
-        # P5-A：边界回调仪表化——epoch ledger（采集窗口内每次调用恰 +1，用于
-        # 版本一致性证明）与重入检测（采集期间回调经仪表通道再入其它边界
-        # 回调 → 无法证明一致 → fail-closed）。采集窗口外仪表零副作用。
-        self._bepoch = 0
-        self._w_depth = 0
-        self._boundary_active = False
-        self._boundary_reentrant = False
-        self._w_cancel = self._wrap_boundary_callback(self._cancel_requested)
-        self._w_cost_used = (self._wrap_boundary_callback(self._cost_used)
-                             if self._cost_used is not None else None)
-        self._w_now = self._wrap_boundary_callback(self._now_fn)
-
-    def _wrap_boundary_callback(self, fn):
-        """边界回调仪表包装：仅当最终边界采集窗口激活时递增 epoch 并检测重入。"""
-        def wrapped():
-            if self._boundary_active:
-                self._bepoch += 1
-                if self._w_depth > 0:
-                    self._boundary_reentrant = True
-            self._w_depth += 1
-            try:
-                return fn()
-            finally:
-                self._w_depth -= 1
-        return wrapped
 
     # -- 主循环 ----------------------------------------------------------------
     def run(self) -> RepairOutcome:
@@ -264,7 +254,7 @@ class BoundedRepairLoop:
         stop: Optional[RepairStopReason] = None
         stop_diag = ""
         final_report: Optional[VerificationReport] = None
-        final_now: Optional[float] = None    # P4-D：最终边界快照的 now（构造
+        final_now: Optional[float] = None    # P6-A：最终边界快照的 now（构造
         # RepairOutcome 直接使用；此后零回调）
         max_attempts = self._contract.budget.max_attempts
 
@@ -346,8 +336,8 @@ class BoundedRepairLoop:
             # 6. VERIFIED 接受门（blocker B4）：只能来自**当前验证器**的真实
             #    密封报告——seal 真实性 + contract/run/standard/hash 精确身份
             #    全部复核；任一不满足绝不接受、绝不修补/重签（final_report=None）。
-            #    （VERIFIED 路径不再单独跑 legacy 后置复核——P5-A 的最终边界
-            #    双采集严格覆盖其后置复核的全部判定面。）
+            #    （VERIFIED 路径不再单独跑 legacy 后置复核——P6-A 的最终
+            #    边界单一权威快照严格覆盖其后置复核的全部判定面。）
             if report is not None and report.verdict is VerificationVerdict.VERIFIED:
                 accepted, why = self._accept_verified_report(report, run_id)
                 if not accepted:
@@ -355,20 +345,25 @@ class BoundedRepairLoop:
                     stop_diag = f"verification_report_rejected:{why[:256]}"
                     final_report = None
                     break
-                # 6a. P4-D + P5-A：接受门（seal/身份复核）完成后，经**单一权威
-                #     快照接口**以版本一致性协议取得最终 BoundarySnapshot——
-                #     见证采集暴露的越界立即以该原因停止；权威采集 + 一致性
-                #     证明（epoch ledger / 契约 hash / 时钟单调 / 回调异常）
-                #     无法证明一致 → UNSTABLE_BOUNDARY fail-closed；越界
-                #     （cost 超限/取消/超时/契约漂移）→ final_report=None，
-                #     VERIFIED 绝不成为成功结果。此后不得再调用任何
-                #     cost/cancel/now/verifier 回调；判定与 RepairOutcome
-                #     只依据该快照（finished_at_epoch == snapshot.now）。
+                # 6a. P6-A：接受门（seal/身份复核）完成后，最终边界**只**从
+                #     单一权威快照源取得 BoundarySnapshot：见证读取暴露的越界
+                #     立即以该原因停止；第二次读取必须证明同一状态版本
+                #     （version 一致 + 逐值一致 + now 单调）——无法取得同一
+                #     版本 → UNSTABLE_BOUNDARY fail-closed；越界（cost 超限/
+                #     取消/超时/契约漂移）→ final_report=None，VERIFIED 绝不
+                #     成为成功结果。此后不得再调用任何 cost/cancel/now/
+                #     verifier 回调或快照源；判定与 RepairOutcome 只依据该
+                #     快照（finished_at_epoch == snapshot.now）。
                 try:
                     bsnap, pre_reason, pre_diag = self._take_final_boundary()
                 except Exception as exc:
                     stop = RepairStopReason.UNSTABLE_BOUNDARY
-                    stop_diag = f"final_boundary_unstable:{type(exc).__name__}"
+                    # 本模块自产的 VerificationError 携带静态失败码（零秘密），
+                    # 可安全进入诊断；外部异常只记类型名（零 raw secret 回显）。
+                    detail = (scrub_secrets(str(exc))[:128]
+                              if isinstance(exc, VerificationError)
+                              else type(exc).__name__)
+                    stop_diag = f"final_boundary_unstable:{detail}"
                     final_report = None
                     break
                 if pre_reason is not None:
@@ -404,9 +399,9 @@ class BoundedRepairLoop:
         if stop is None:
             stop = RepairStopReason.ATTEMPTS_EXHAUSTED
             stop_diag = "max_attempts_reached"
-        # P4-D：VERIFIED 成功路径用最终边界快照的 now 构造 RepairOutcome——
-        # 此后零回调（不再调用 now_fn/cost/cancel/verifier）。非成功路径无
-        # 边界快照，沿用既有单次 now_fn 读取。
+        # P6-A：VERIFIED 成功路径用最终边界快照的 now 构造 RepairOutcome——
+        # 此后零回调（不再调用 now_fn/cost/cancel/verifier/快照源）。非成功
+        # 路径无边界快照，沿用既有单次 now_fn 读取。
         return RepairOutcome(
             stop_reason=stop, contract_id=self._contract.contract_id,
             contract_hash=self._contract.content_hash, attempts=tuple(attempts),
@@ -443,91 +438,101 @@ class BoundedRepairLoop:
             reasons.append("standard_hash_mismatch")
         return (not reasons), ":".join(reasons)
 
+    # -- 最终边界（P6-A：单一权威快照源） ----------------------------------------
+    _BOUNDARY_SNAPSHOT_KEYS = frozenset(
+        {"contract_hash", "cancelled", "cost_used", "now", "version"})
+
+    def _read_boundary_snapshot(self) -> Tuple[str, bool, Optional[float], float, int]:
+        """单次调用快照源并做严格 exact-schema / 类型校验（fail-closed）。
+
+        快照源必须一次调用原子返回 Mapping：contract_hash（非空 str）/
+        cancelled（严格 bool）/ cost_used（None 或非负有限数值，bool 拒绝）/
+        now（有限数值，bool 拒绝）/ version（非负 int，bool 拒绝）——缺键、
+        多键、类型不符、源异常一律 :class:`VerificationError`（调用方转
+        UNSTABLE_BOUNDARY）。绝不对源返回值做默认值补齐或类型强转。
+        """
+        try:
+            raw = self._boundary_snapshot()
+        except Exception as exc:
+            raise VerificationError(
+                f"boundary_snapshot_error:{type(exc).__name__}") from None
+        if not isinstance(raw, Mapping):
+            raise VerificationError("boundary_snapshot_not_mapping")
+        if set(raw.keys()) != self._BOUNDARY_SNAPSHOT_KEYS:
+            raise VerificationError("boundary_snapshot_schema")
+        h = raw["contract_hash"]
+        if not isinstance(h, str) or not h:
+            raise VerificationError("boundary_snapshot_contract_hash_invalid")
+        c = raw["cancelled"]
+        if not isinstance(c, bool):
+            raise VerificationError("boundary_snapshot_cancelled_not_bool")
+        k = raw["cost_used"]
+        if k is not None:
+            if isinstance(k, bool) or not isinstance(k, (int, float)) \
+                    or not math.isfinite(float(k)) or float(k) < 0:
+                raise VerificationError("boundary_snapshot_cost_invalid")
+            k = float(k)
+        n = raw["now"]
+        if isinstance(n, bool) or not isinstance(n, (int, float)) \
+                or not math.isfinite(float(n)):
+            raise VerificationError("boundary_snapshot_now_invalid")
+        v = raw["version"]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise VerificationError("boundary_snapshot_version_invalid")
+        return h, c, k, float(n), v
+
     def _take_final_boundary(self) -> Tuple[BoundarySnapshot,
                                             Optional[RepairStopReason], str]:
-        """P5-A：**单一权威快照接口**——版本一致性协议下的双重边界采集。
+        """P6-A：**单一权威快照源**下的最终边界——两次原子读取 + 同版本证明。
 
-        P4-D 的单次顺序读取（cancel→cost→now）不是原子快照：最后的 ``now_fn``
-        回调仍可改写已读取的 cost/cancel 让越界 VERIFIED 逃逸，且"调整读取
-        顺序"或"再多扫一轮"都不能封闭（任意有限读取序列都有最后一个读取项，
-        其副作用对更早读取的值不可见）。本协议以**两次采集 + 一致性证明**封闭：
+        P4-D 的单次顺序读取与 P5-A 的双重采集 + epoch 记账都是**伪原子**：
+        任何由独立 effectful 回调组成的有限读取序列都有最后一个读取项，其
+        内部对其它边界状态的改写对更早读取的值不可见（wrapper 记账只能证明
+        "每个回调被调用了几次"，证明不了"最后一个回调没有改写其它状态"）。
+        本协议因此**只**信任单一权威快照源——一次调用原子返回同一状态版本的
+        contract hash / cancelled / cost / now / version：
 
-        - **见证采集（acq1，cancel→cost→now）**后先做前置越界判定——见证已
-          暴露的越界立即以该原因停止（拒绝路径零逃逸面，无需第二采集；
-          P2-R/P3-G(b) 的"cost 回调推时钟"在此被捕获，且不触发第二采集的
-          额外回调）；
-        - 仅当见证采集干净时进行**权威采集（acq2，now→cancel→cost→now→
-          cancel）**——now 夹逼取消/成本读取（now 改写 cost 被其后的 cost
-          读取捕获；cost 推时钟被其后的 now 读取捕获），尾随 cancel 见证
-          封闭 now 改写取消的通道；
-        - **一致性证明**（任一不成立 → 异常 → UNSTABLE_BOUNDARY，零报告）：
-          epoch ledger 精确记账（采集窗口内回调调用次数与协议期望一致——
-          重入/隐藏调用 → 无法证明一致）；两次采集契约 hash 一致（采集中途
-          漂移 → 无法证明一致）；时钟单调 now₁ ≤ now₂ ≤ now₃（回拨 → 无法
-          证明一致）；任一回调异常 → 传播；
-        - **值聚合一律 fail-closed worst-wins**：cancelled = c1∨c2∨c3、
-          cost = max(有读数者)、now = n₃（最新权威读数）——两次采集间的
-          值差异绝不取"较乐观"值，绝不作为"已稳定"的信任依据。
+        - **见证读取（s1）**后先做越界判定——见证已暴露的越界立即以该原因
+          停止（拒绝路径零逃逸面，零第二读取）；
+        - 仅当见证干净时做**权威读取（s2）**并证明同一状态版本：version
+          一致 + contract hash / cancelled / cost 逐值一致（源违反"状态变更
+          必须递增 version"的协议义务 → 值漂移被捕获）+ now 单调不减；
+          任一不成立 → 异常 → 调用方 UNSTABLE_BOUNDARY fail-closed；
+        - 未提供快照源 → 无法取得同一状态版本的 contract/cancel/cost/now →
+          直接异常（UNSTABLE_BOUNDARY）——独立的 effectful 回调绝不被包装后
+          宣称为原子快照。
 
         返回 ``(权威快照, 见证越界原因或 None, 诊断)``；调用方此后不得再调用
-        任何 cost/cancel/now/verifier 回调。
+        任何 cost/cancel/now/verifier 回调或快照源。
         """
-        self._boundary_active = True
-        self._boundary_reentrant = False
-        try:
-            e0 = self._bepoch
-            h1 = self._contract.content_hash
-            c1 = bool(self._w_cancel())
-            k1: Optional[float] = None
-            if self._w_cost_used is not None:
-                k1, err = self._read_cost_used()
-                if err:
-                    k1 = float("inf")
-            n1 = float(self._w_now())
-            e1 = self._bepoch
-        finally:
-            self._boundary_active = False
+        if self._boundary_snapshot is None:
+            raise VerificationError("boundary_snapshot_source_unavailable")
+        h1, c1, k1, n1, v1 = self._read_boundary_snapshot()
         witness = BoundarySnapshot(contract_hash=h1, cancelled=c1, cost_used=k1,
-                                   now=n1, version=e1)
-        # 见证采集已暴露的越界 → 立即以该原因停止（final_report=None）。
+                                   now=n1, version=v1)
+        # 见证读取已暴露的越界 → 立即以该原因停止（final_report=None）。
         pre_reason, pre_diag = self._decide_final_boundary(witness)
         if pre_reason is not None:
             return witness, pre_reason, pre_diag
-        self._boundary_active = True
-        try:
-            n2 = float(self._w_now())
-            c2 = bool(self._w_cancel())
-            k2: Optional[float] = None
-            if self._w_cost_used is not None:
-                k2, err = self._read_cost_used()
-                if err:
-                    k2 = float("inf")
-            n3 = float(self._w_now())
-            c3 = bool(self._w_cancel())
-            e2 = self._bepoch
-            h2 = self._contract.content_hash
-        finally:
-            self._boundary_active = False
-        # ---- 版本一致性证明（无法证明一致 → fail-closed）----
-        per_acq1 = 2 + (1 if self._w_cost_used is not None else 0)   # cancel+cost?+now
-        per_acq2 = 4 + (1 if self._w_cost_used is not None else 0)   # now+cancel+cost?+now+cancel
-        if self._boundary_reentrant or (e1 - e0) != per_acq1 \
-                or (e2 - e1) != per_acq2:
+        h2, c2, k2, n2, v2 = self._read_boundary_snapshot()
+        # ---- 同一状态版本证明（无法证明 → fail-closed）----
+        if v2 != v1:
             raise VerificationError("boundary_version_mismatch")
         if h2 != h1:
             raise VerificationError("boundary_contract_drift_during_snapshot")
-        if not (n1 <= n2 <= n3):
+        if c2 != c1:
+            raise VerificationError("boundary_cancelled_value_drift")
+        if k2 != k1:
+            raise VerificationError("boundary_cost_value_drift")
+        if n2 < n1:
             raise VerificationError("boundary_clock_not_monotonic")
-        cancelled = bool(c1 or c2 or c3)
-        present = [v for v in (k1, k2) if v is not None]
-        cost = max(present) if present else None
-        return (BoundarySnapshot(contract_hash=h2, cancelled=cancelled,
-                                 cost_used=cost, now=n3, version=e2),
+        return (BoundarySnapshot(contract_hash=h2, cancelled=c2, cost_used=k2,
+                                 now=n2, version=v2),
                 None, "")
 
     def _decide_final_boundary(self, bsnap: BoundarySnapshot
                                ) -> Tuple[Optional[RepairStopReason], str]:
-        """P4-D：**纯快照判定**——不读取任何回调，只依据传入的 BoundarySnapshot
+        """P4-D/P6-A：**纯快照判定**——不读取任何回调，只依据传入的 BoundarySnapshot
         （契约 hash 漂移 / 成本超限 / 取消 / 新鲜时间越过 deadline 任一 → 越界
         停止；VERIFIED 绝不成为成功结果）。"""
         if bsnap.contract_hash != self._initial_hash:
@@ -555,11 +560,15 @@ class BoundedRepairLoop:
         接受 VERIFIED **前**（``used > limit`` / ``max(完成时间, 新鲜当前时间)
         > deadline`` → 越界）。
         返回 ``(停止原因或 None, 诊断)``。
+
+        这些是 attempt 生命周期内的**顺序复核**（每个回调副作用都被其后的
+        读取捕获，从不宣称为原子快照）；接受 VERIFIED 前的最终边界走
+        ``_take_final_boundary``（P6-A 单一权威快照源）。
         """
         if self._contract.content_hash != self._initial_hash:
             return RepairStopReason.CONTRACT_MUTATED, "contract_hash_changed"
         limit = self._contract.budget.cost_limit.amount
-        if self._w_cost_used is not None:
+        if self._cost_used is not None:
             used, err = self._read_cost_used()
             if err:
                 return RepairStopReason.BUDGET_EXHAUSTED, err
@@ -567,14 +576,14 @@ class BoundedRepairLoop:
             if over:
                 return RepairStopReason.BUDGET_EXHAUSTED, "cost_limit_exceeded"
         # cost meter 回调之后读取 cancellation（回调可能翻转取消标志）。
-        if bool(self._w_cancel()):
+        if bool(self._cancel_requested()):
             return RepairStopReason.CANCELLED, "cancellation_requested"
         if pre:
-            if self._w_now() >= self._deadline:
+            if self._now_fn() >= self._deadline:
                 return RepairStopReason.TIMEOUT, "time_budget_exhausted"
         elif attempt_finished is not None:
             # 全部回调结束后的新鲜时间（cost meter 可能已把时钟推过 deadline）。
-            finished = max(float(attempt_finished), float(self._w_now()))
+            finished = max(float(attempt_finished), float(self._now_fn()))
             if finished > self._deadline:
                 return RepairStopReason.TIMEOUT, "time_budget_exhausted"
         return None, ""
@@ -584,7 +593,7 @@ class BoundedRepairLoop:
         ``>= 0``；meter 异常 / NaN / Inf / 负数一律 fail-closed——返回
         ``(+inf, 诊断)`` → BUDGET_EXHAUSTED，绝不误判为可用预算。"""
         try:
-            raw = self._w_cost_used()
+            raw = self._cost_used()
         except Exception as exc:
             return float("inf"), f"cost_meter_error:{type(exc).__name__}"
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
