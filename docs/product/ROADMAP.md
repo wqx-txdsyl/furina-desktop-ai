@@ -3,8 +3,9 @@
 > STATUS = CURRENT canonical product roadmap.
 > Historical plans remain under `docs/archive/legacy-plan/`; later Phase task briefs may refine
 > implementation detail but must not silently renumber this roadmap.
-> Status vocabulary: **implemented / in_progress / pending**. Review outcomes belong in each
-> Phase closeout and are not duplicated here.
+> Status vocabulary: **implemented / in_progress / pending / future_optional**. Review outcomes
+> belong in each Phase closeout and are not duplicated here. The current Furina product delivery
+> baseline ends at Phase 23; Phase 24 is optional future expansion and is not a release blocker.
 
 ## Phase 13 — Core Runtime Closure（implemented）
 
@@ -20,7 +21,7 @@ Core Runtime V1、Windows exact-SHA evidence、Agent Runtime evidence 与 backen
 - C7 Agent Task History 与 runtime cognition boundary。
 
 本阶段只保留了 Work Willingness、Character Body 与 Integrated Manual 的接口/命名预留；
-它们分别归属 Phase 17、Phase 20 与 Phase 24，不得回填到 Phase 14。
+它们分别归属 Phase 17、Phase 20 与 Phase 23，不得回填到 Phase 14。
 
 ## Phase 15 — Cognitive Life（implemented）
 
@@ -122,7 +123,7 @@ Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成�
 - 语音与文字 Single Mouth；
 - 噪声、误唤醒、隐私指示和麦克风总开关。
 
-## Phase 23 — Eyes & Multimodal Perception（pending）
+## Phase 23 — Eyes, Multimodal Perception & Product Completion（pending）
 
 - 屏幕捕获、Accessibility Tree、OCR 与 UI 元素检测；
 - 浏览器、图片、图表和文档版面理解；
@@ -133,30 +134,38 @@ Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成�
 
 视觉观察不是成功证据，不能仅凭截图声明任务完成。
 
-## Phase 24 — Integrated Product, Character Platform & Release（pending）
-
-### Integrated product and manual
+### Integrated product acceptance
 
 - 人格、记忆、关系、Agency、工作、权限与恢复的全链路人工验收；
 - Browser/Office/Email、Connected Services、Body、Art、Voice 与 Eyes 集成；
-- 长时间运行、Windows 启动/更新/卸载、数据备份与最终 Integrated Life Manual。
-
-### Character interface
-
-在不重写 Furina 的前提下抽象 `CharacterProfile`、`CanonProvider`、`PersonaPolicy`、
-`DialogueStyle`、`EmbodimentProfile`、`VoiceProfile`、`AssetPack`、
-`RelationshipPolicy` 与 `AgencyPolicy`。Furina 仍是默认且最完整的第一实现。
-
-### Optional multi-character foundation
-
-每个角色的人格、记忆、关系、声音、身体、意图和状态必须隔离；可以共享通用执行能力，
-但不能共享人格真值，也不能用单一 prompt 假装成两个独立角色。Phase 24 只要求接口和
-协调架构成立，不强制立即制作第二个角色。
+- 长时间运行、崩溃恢复与真实 Windows 全链路验收；
+- 最终 Integrated Life Manual 与用户体验验收。
 
 ### Release
 
 安装包、自动更新、首次启动引导、权限控制台、紧急停止、数据导出/删除、Provider/插件
 管理、性能与电量优化、崩溃诊断、Stable/Beta 通道和最终用户手册。
+
+Phase 23 完成即表示当前 Furina Desktop AI 项目完整落地并达到正式发布终点，不依赖
+Phase 24。
+
+## Phase 24 — Persona Platform & Multi-Character Interaction（future_optional）
+
+Phase 24 是产品完成后的未来可选扩展，不属于当前项目交付范围，也不阻塞 Phase 23
+关闭或正式发布。
+
+### Character interface
+
+在不重写 Furina 的前提下，可进一步抽象 `CharacterProfile`、`CanonProvider`、
+`PersonaPolicy`、`DialogueStyle`、`EmbodimentProfile`、`VoiceProfile`、
+`AssetPack`、`RelationshipPolicy` 与 `AgencyPolicy`。Furina 始终是默认且
+最完整的第一实现。
+
+### Optional multi-character foundation
+
+若未来确实制作其他角色，每个角色的人格、记忆、关系、声音、身体、意图和状态必须
+隔离；可以共享通用执行能力，但不能共享人格真值，也不能用单一 prompt 假装成两个
+独立角色。多角色互动、关系历史、话轮仲裁与联合任务均属于此可选阶段。
 
 ## Canonical mainline
 
@@ -179,7 +188,9 @@ Phase 21     Production Art & Animation Library
         ↓
 Phase 22     Voice Interaction
         ↓
-Phase 23     Eyes & Multimodal Perception
+Phase 23     Eyes, Multimodal Perception, Product Completion & Release
+             └─ CURRENT PROJECT COMPLETE
         ↓
-Phase 24     Integrated Product, Character Platform & Release
+Phase 24     Persona Platform & Multi-Character Interaction
+             └─ FUTURE OPTIONAL; NOT A RELEASE BLOCKER
 ```
