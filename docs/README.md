@@ -6,7 +6,8 @@
 ## product/ — 产品
 
 - `product/PRD.md` — 产品需求文档
-- `product/ROADMAP.md` — 当前官方正式路线（Phase 13 → 19）
+- `product/ROADMAP.md` — 当前官方正式路线（Phase 13 → 24）
+- `phase/00_PHASE_17_24_PLANNING_AUTHORITY.md` — Phase 17–24 冻结执行规则与任务书入口
 
 ## architecture/ — 架构
 

@@ -59,6 +59,7 @@ furina/
 docs/
 ├─ README.md            Documentation Index
 ├─ product/             PRD / ROADMAP
+├─ phase/               各 Phase 的执行任务书、审查与 closeout 证据
 ├─ architecture/        PROJECT_STRUCTURE + future/（PLANNED）
 ├─ persona/             当前有效人格文档
 ├─ runtime/             运行时文档

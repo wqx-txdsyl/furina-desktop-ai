@@ -5,6 +5,10 @@
 > implementation detail but must not silently renumber this roadmap.
 > Status vocabulary: **implemented / in_progress / pending**. Review outcomes belong in each
 > Phase closeout and are not duplicated here.
+> POST-16 PLAN = **FROZEN**. Its execution authority is
+> [`docs/phase/00_PHASE_17_24_PLANNING_AUTHORITY.md`](../phase/00_PHASE_17_24_PLANNING_AUTHORITY.md).
+> Renumbering, moving ownership between Phase 17–24, or changing the Phase 23/24 release boundary
+> requires an explicit roadmap decision and reviewed documentation patch.
 
 ## Phase 13 — Core Runtime Closure（implemented）
 
@@ -58,6 +62,8 @@ Phase 16 只拥有技术可行性、权限与执行真值；角色主观愿不�
 
 ## Phase 17 — Character Agency & Work Willingness（pending）
 
+执行入口：[`docs/phase/Phase_17/_INDEX_README.md`](../phase/Phase_17/_INDEX_README.md)
+
 - willingness / refusal / negotiation；
 - Persona、关系与情绪驱动的表达和主观工作偏好；
 - P17-D1 计划/目标主动跟进；
@@ -68,6 +74,8 @@ Phase 16 只拥有技术可行性、权限与执行真值；角色主观愿不�
 Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成角色意愿。
 
 ## Phase 18 — Computer Control & Office Automation（pending）
+
+执行入口：[`docs/phase/Phase_18/_INDEX_README.md`](../phase/Phase_18/_INDEX_README.md)
 
 - 浏览器 DOM、Accessibility 与必要的视觉辅助控制；
 - 标签页、下载、上传、表单和文件跨应用搬运；
@@ -81,6 +89,8 @@ Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成�
 
 ## Phase 19 — Connected Services & Communications（pending）
 
+执行入口：[`docs/phase/Phase_19/_INDEX_README.md`](../phase/Phase_19/_INDEX_README.md)
+
 - 钉钉、飞书、企业微信等正式接口；
 - 微信、QQ 等桌面客户端的受控自动化；
 - 统一 Channel Adapter、联系人身份解析与跨平台收件箱；
@@ -93,6 +103,8 @@ Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成�
 
 ## Phase 20 — Desktop Embodiment & Visible Action（pending）
 
+执行入口：[`docs/phase/Phase_20/_INDEX_README.md`](../phase/Phase_20/_INDEX_README.md)
+
 - 透明桌面窗口与 sprite/APNG/WebP runtime；
 - 多方向、移动、路径、surface、碰撞和关键 UI 避让；
 - 点击、摸头、拖拽、喂食及生活动作；
@@ -103,6 +115,8 @@ Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成�
 身体只能表现真实工作状态，不能反向伪造任务成功。
 
 ## Phase 21 — Production Art & Animation Library（pending）
+
+执行入口：[`docs/phase/Phase_21/_INDEX_README.md`](../phase/Phase_21/_INDEX_README.md)
 
 - Identity Lock、方向一致性与角色拓扑一致性；
 - neutral/walk/sit/sleep/eat/play/pet/poke/work 等标准动作；
@@ -115,6 +129,8 @@ Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成�
 
 ## Phase 22 — Voice Interaction（pending）
 
+执行入口：[`docs/phase/Phase_22/_INDEX_README.md`](../phase/Phase_22/_INDEX_README.md)
+
 - ASR、push-to-talk、可选 wake word 与 TTS；
 - 合法、可持续使用的角色音色方案；
 - 流式语音、barge-in、打断与话轮仲裁；
@@ -123,6 +139,8 @@ Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成�
 - 噪声、误唤醒、隐私指示和麦克风总开关。
 
 ## Phase 23 — Eyes & Multimodal Perception（pending）
+
+执行入口：[`docs/phase/Phase_23/_INDEX_README.md`](../phase/Phase_23/_INDEX_README.md)
 
 - 屏幕捕获、Accessibility Tree、OCR 与 UI 元素检测；
 - 浏览器、图片、图表和文档版面理解；
@@ -134,6 +152,8 @@ Phase 17 不得扩张 WorkContract、绕过审批或把技术不可行解释成�
 视觉观察不是成功证据，不能仅凭截图声明任务完成。
 
 ## Phase 24 — Integrated Product, Character Platform & Release（pending）
+
+执行入口：[`docs/phase/Phase_24/_INDEX_README.md`](../phase/Phase_24/_INDEX_README.md)
 
 ### Integrated product and manual
 
