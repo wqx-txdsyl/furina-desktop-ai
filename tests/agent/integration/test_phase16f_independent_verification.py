@@ -88,6 +88,7 @@ import pytest
 
 from furina.agent.verification import (
     ARTIFACT_CLAIM_KEYS,
+    BoundarySnapshot,
     BoundedRepairLoop,
     CheckResult,
     HardBackendFailure,
@@ -143,12 +144,13 @@ class FakeClock:
 class _BoundarySource:
     """P6-A 受控共享边界状态：**单一权威边界快照源**（version 协议）。
 
-    ``snapshot()`` 单次调用原子返回 contract_hash / cancelled / cost_used /
-    now / version——内部回调（``on_read`` 钩子，可注入对抗性副作用）可改写
-    共享状态，但快照值一律在全部内部回调完成后一次性读取（改写随快照整体
-    可见——这正是独立回调组成的有限读取序列做不到的）；任何状态变更递增
-    version（协议义务）。``fail_reads``/``bump_on_read`` 用于锁定"源异常 /
-    版本不一致 → fail-closed"。
+    ``snapshot()`` 单次调用原子返回冻结、严格类型校验的
+    :class:`BoundarySnapshot`（P7-A 精确类型协议）——内部回调
+    （``on_read`` 钩子，可注入对抗性副作用）可改写共享状态，但快照值一律
+    在全部内部回调完成后一次性读取（改写随快照整体可见——这正是独立回调
+    组成的有限读取序列做不到的）；任何状态变更递增 version（协议义务）。
+    ``fail_reads``/``bump_on_read`` 用于锁定"源异常 / 版本不一致 →
+    fail-closed"。
     """
 
     def __init__(self, contract: WorkContract, *, cost=None, cancel=False,
@@ -164,7 +166,7 @@ class _BoundarySource:
         self.bump_on_read = tuple(bump_on_read)
         self.reads = 0
 
-    def snapshot(self) -> dict:
+    def snapshot(self) -> BoundarySnapshot:
         self.reads += 1
         if self.reads in self.fail_reads:
             raise RuntimeError("boundary snapshot source exploded")
@@ -175,9 +177,10 @@ class _BoundarySource:
             self.version += 1          # 协议：状态任何变更必须递增 version
         if self.reads in self.bump_on_read:
             self.version += 1          # 注入版本不一致（无状态变更也递增）
-        return {"contract_hash": self.contract.content_hash,
-                "cancelled": bool(self.cancel), "cost_used": self.cost,
-                "now": float(self.now), "version": self.version}
+        return BoundarySnapshot(contract_hash=self.contract.content_hash,
+                                cancelled=bool(self.cancel),
+                                cost_used=self.cost,
+                                now=float(self.now), version=self.version)
 
 
 def _make_dir_link(link: Path, target: Path) -> bool:
@@ -4249,11 +4252,14 @@ def test_p6_a_lock3_broken_source_fail_closed(env):
     assert "final_boundary_unstable" in out.diagnostic
 
     def broken(_s):
+        # P7-A：任意 Mapping（dict）返回值按精确类型拒绝——权威快照只能是
+        # Furina 自有冻结 BoundarySnapshot（schema 违约语义在精确类型协议下
+        # 同样 fail-closed）。
         return {"contract_hash": c.content_hash, "cancelled": False,
                 "cost_used": None, "now": 0.0, "version": 1,
-                "extra_key": True}             # 多键 → exact-schema 违约
+                "extra_key": True}
 
-    # (b) schema 违约（多键）→ UNSTABLE_BOUNDARY
+    # (b) schema 违约（任意 Mapping）→ UNSTABLE_BOUNDARY
     c2 = _verified_summary_contract(work_real, "wc_16f_p6a_l3b_0001")
     out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2),
                              collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
@@ -4263,10 +4269,12 @@ def test_p6_a_lock3_broken_source_fail_closed(env):
     assert out2.final_report is None
 
     def bad_cancel(_s):
+        # P7-A：dict 返回值（cancelled 亦非 bool）→ 非精确 BoundarySnapshot
+        # 类型 → fail-closed。
         return {"contract_hash": c.content_hash, "cancelled": "no",
-                "cost_used": None, "now": 0.0, "version": 1}   # cancelled 非 bool
+                "cost_used": None, "now": 0.0, "version": 1}
 
-    # (c) 类型违约（cancelled 非 bool）→ UNSTABLE_BOUNDARY
+    # (c) 类型违约（任意 Mapping）→ UNSTABLE_BOUNDARY
     c3 = _verified_summary_contract(work_real, "wc_16f_p6a_l3c_0001")
     out3 = BoundedRepairLoop(contract=c3, verifier=IndependentVerifier(c3),
                              collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
@@ -4615,3 +4623,434 @@ def test_p6_c_enum_and_report_id_rejection_messages_scrubbed(env):
     with pytest.raises(VerificationError):
         VerificationCheck(check_id="check_x_p6c_0001", kind="artifact_file_exists",
                           required=True, result=object())
+
+
+# ================================================================
+# Reviewer Patch 7 — P7-A: 权威快照必须是真正不可变值（精确类型封闭）
+# ================================================================
+
+def test_p7_a_arbitrary_mapping_snapshot_rejected(env):
+    """P7-A 锁定：权威快照只接受 Furina 自有、冻结、严格类型校验的
+    BoundarySnapshot **精确类型**——任意 Mapping（plain dict / 动态 Mapping
+    ABC / MappingProxyType）一律拒绝（UNSTABLE_BOUNDARY / final_report=None）。
+    拒绝路径绝不调用外部 mapping 的 keys()/__getitem__()/str()/repr()
+    （敌意动态 mapping 的协议方法一旦被调用即抛出携带秘密的异常——绝不
+    传播），见证读取拒绝后零第二读取。"""
+    from collections.abc import Mapping as ABCMapping
+    from types import MappingProxyType
+
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p7a_map_0001")
+    secret = "password:hunter2"
+
+    class _HostileDynamicMapping(ABCMapping):
+        """动态 Mapping：任何协议方法被调用即抛出携带秘密的异常。"""
+
+        def __getitem__(self, k):
+            raise RuntimeError(f"leak:{secret}")
+
+        def __iter__(self):
+            raise RuntimeError(f"leak:{secret}")
+
+        def __len__(self):
+            raise RuntimeError(f"leak:{secret}")
+
+        def keys(self):
+            raise RuntimeError(f"leak:{secret}")
+
+    reads = {"n": 0}
+
+    def dict_source():
+        reads["n"] += 1
+        return {"contract_hash": c.content_hash, "cancelled": False,
+                "cost_used": None, "now": 500.0, "version": 1}
+
+    def proxy_source():
+        return MappingProxyType({"contract_hash": c.content_hash,
+                                 "cancelled": False, "cost_used": None,
+                                 "now": 500.0, "version": 1})
+
+    def dynamic_source():
+        return _HostileDynamicMapping()
+
+    for tag, src in (("dict", dict_source), ("proxy", proxy_source),
+                     ("dynamic", dynamic_source)):
+        out = BoundedRepairLoop(
+            contract=c, verifier=IndependentVerifier(c),
+            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+            boundary_snapshot=src).run()
+        assert out.attempts[0].verdict == "VERIFIED", tag   # 报告本身真实产出
+        assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY, tag
+        assert out.final_report is None, tag
+        assert "final_boundary_unstable" in out.diagnostic, tag
+        assert "leak:" not in out.diagnostic, tag
+    # 见证读取即拒绝 → 恰一次源调用（零第二读取）
+    assert reads["n"] == 1
+
+
+def test_p7_b_snapshot_subclass_proxy_and_bypass_rejected(env):
+    """P7-A 锁定：BoundarySnapshot 子类、字段级代理均按**精确类型**拒绝；
+    经 ``object.__new__`` 旁路构造期校验交付的字段违约实例在权威读取期被
+    严格类型校验捕获（零默认值/零强转）——全部 UNSTABLE_BOUNDARY /
+    final_report=None。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p7b_sub_0001")
+
+    class _SubSnapshot(BoundarySnapshot):
+        pass
+
+    class _ProxySnapshot:
+        """代理：暴露与 BoundarySnapshot 完全同名的字段——但非精确类型。"""
+
+        def __init__(self, real):
+            self._real = real
+
+        @property
+        def contract_hash(self):
+            return self._real.contract_hash
+
+        @property
+        def cancelled(self):
+            return self._real.cancelled
+
+        @property
+        def cost_used(self):
+            return self._real.cost_used
+
+        @property
+        def now(self):
+            return self._real.now
+
+        @property
+        def version(self):
+            return self._real.version
+
+    real = BoundarySnapshot(contract_hash=c.content_hash, cancelled=False,
+                            cost_used=None, now=500.0, version=1)
+    subclass_snap = _SubSnapshot(contract_hash=c.content_hash, cancelled=False,
+                                 cost_used=None, now=500.0, version=1)
+    proxy_snap = _ProxySnapshot(real)
+    # 旁路构造：绕过 __post_init__ 的字段违约实例（cancelled 非 bool）
+    bypass = object.__new__(BoundarySnapshot)
+    object.__setattr__(bypass, "contract_hash", c.content_hash)
+    object.__setattr__(bypass, "cancelled", "no")
+    object.__setattr__(bypass, "cost_used", None)
+    object.__setattr__(bypass, "now", 500.0)
+    object.__setattr__(bypass, "version", 1)
+
+    for tag, snap in (("subclass", subclass_snap), ("proxy", proxy_snap),
+                      ("bypass", bypass)):
+        out = BoundedRepairLoop(
+            contract=c, verifier=IndependentVerifier(c),
+            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+            boundary_snapshot=lambda s=snap: s).run()
+        assert out.attempts[0].verdict == "VERIFIED", tag
+        assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY, tag
+        assert out.final_report is None, tag
+        assert "final_boundary_unstable" in out.diagnostic, tag
+
+
+def test_p7_c_exact_immutable_snapshot_positive(env):
+    """P7-A 锁定：精确类型的合法 BoundarySnapshot（冻结不可变、字段严格
+    校验）是唯一可被接受的权威快照——同版本双读取证明成立 → VERIFIED，
+    finished_at_epoch == snapshot.now，快照源恰被读取两次。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p7c_0001")
+    snap = BoundarySnapshot(contract_hash=c.content_hash, cancelled=False,
+                            cost_used=0.0, now=500.0, version=3)
+    # 冻结不可变：任何字段赋值都失败且快照事实不变
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        snap.cancelled = True
+    assert snap.cancelled is False and snap.version == 3
+    # 构造期严格类型校验（静态失败码）
+    for bad in (dict(contract_hash="", cancelled=False, cost_used=None,
+                     now=500.0, version=3),
+                dict(contract_hash=c.content_hash, cancelled=1, cost_used=None,
+                     now=500.0, version=3),
+                dict(contract_hash=c.content_hash, cancelled=False,
+                     cost_used=True, now=500.0, version=3),
+                dict(contract_hash=c.content_hash, cancelled=False,
+                     cost_used=None, now=float("nan"), version=3),
+                dict(contract_hash=c.content_hash, cancelled=False,
+                     cost_used=None, now=500.0, version=True)):
+        with pytest.raises(VerificationError):
+            BoundarySnapshot(**bad)
+    calls = {"n": 0}
+
+    def source():
+        calls["n"] += 1
+        return snap
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        boundary_snapshot=source).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.final_report is not None
+    assert out.finished_at_epoch == 500.0
+    assert calls["n"] == 2
+
+
+def test_p7_d_post_snapshot_zero_callbacks_preserved(env):
+    """P7-A 锁定：权威快照（精确类型）之后的零回调语义保持——恰两次快照
+    读取（见证 + 权威），第一次快照之后零 now/cost/cancel 回调、零快照
+    读取、零 verifier 回调（seal 认证只发生在接受门内、快照之前）；完成
+    时间取快照时间。"""
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    c = _verified_summary_contract(work_real, "wc_16f_p7d_0001")
+    events: list = []
+
+    def now_fn():
+        events.append("now")
+        return 0.0
+
+    def cost_used():
+        events.append("cost")
+        return 0.0
+
+    def cancel_requested():
+        events.append("cancel")
+        return False
+
+    class _SealSpyVerifier(IndependentVerifier):
+        def __init__(self, contract):
+            super().__init__(contract)
+            self.seal_calls = 0
+
+        def seal_is_authentic(self, report):
+            self.seal_calls += 1
+            events.append("seal")
+            return super().seal_is_authentic(report)
+
+    v = _SealSpyVerifier(c)
+    src = _BoundarySource(c, cost=0.0, now=500.0)
+
+    def snap(_s):
+        events.append("snap")
+
+    src.on_read = snap
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            cost_used=cost_used, cancel_requested=cancel_requested,
+                            now_fn=now_fn, boundary_snapshot=src.snapshot).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.final_report is not None
+    # seal 认证只发生在接受门内（快照之前恰一次）
+    assert v.seal_calls == 1
+    # 恰两次快照读取；第一次快照之后只剩第二次快照——零回调再发生
+    assert src.reads == 2
+    after_first_snap = events[events.index("snap"):]
+    assert after_first_snap == ["snap", "snap"]
+    assert out.finished_at_epoch == 500.0
+
+
+# ================================================================
+# Reviewer Patch 7 — P7-B: PDF 全图 generation 绑定
+# ================================================================
+
+def test_p7_e_pdf_kids_nonzero_generation_rejected(env):
+    """P7-B 锁定：Pages 的 /Kids 数组引用 generation 非零（``/Kids [3 9 R]``
+    指向 ``3 0 obj``）→ 全图扫描捕获 → malformed_content:pdf_ref_generation
+    fail-closed（此前 /Kids 引用的 generation 不被核对）。"""
+    from furina.agent.verification import full_content_verdict
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n",
+                   pages_body=b"<</Type/Pages/Kids[3 9 R]/Count 1>>\n")
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_ref_generation")
+
+
+def test_p7_f_pdf_parent_nonzero_generation_rejected(env):
+    """P7-B 锁定：Page 的 /Parent 引用 generation 非零（``/Parent 2 9 R``
+    指向 ``2 0 obj``）→ 全图扫描捕获 → malformed_content:pdf_ref_generation。"""
+    from furina.agent.verification import full_content_verdict
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n",
+                   page_body=b"<</Type/Page/Parent 2 9 R/MediaBox[0 0 200 200]>>\n")
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_ref_generation")
+
+
+def test_p7_g_nested_array_dict_nonzero_ref_rejected(env):
+    """P7-B 锁定：嵌套数组、数组内嵌套字典及 trailer 非键引用的 generation
+    非零一律 fail-closed（数组项不再被整体 opacity 丢弃）。"""
+    from furina.agent.verification import full_content_verdict
+    # 嵌套数组 [[3 9 R]]
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R/N[[3 9 R]]>>\n")
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_ref_generation")
+    # 数组内嵌套字典 [<< /K 3 9 R >>]
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R/N[<</K 3 9 R>>]>>\n")
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_ref_generation")
+    # trailer 字典的非键引用 /Info 3 9 R（/Root generation 合法）
+    blob = _p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n",
+                   trailer=b"trailer\n<</Size 4/Root 1 0 R/Info 3 9 R>>\n")
+    assert full_content_verdict(blob) == ("application/pdf",
+                                          "malformed_content:pdf_ref_generation")
+
+
+def test_p7_h_generation_zero_legal_pdf_passes(env):
+    """P7-B 正对照：generation-0 合法 PDF（含 /Kids [3 0 R]、/Parent 2 0 R、
+    嵌套数组/嵌套字典中的 gen-0 引用）保持 PASS；literal string / hex
+    string / 注释中的伪引用（``3 9 R`` 形态）绝不被误判。"""
+    from furina.agent.verification import full_content_verdict
+    # 默认夹具：/Kids[3 0 R] + /Parent 2 0 R
+    assert full_content_verdict(_p5_pdf(b"<</Type/Catalog/Pages 2 0 R>>\n")) \
+        == ("application/pdf", "")
+    # 嵌套结构 gen-0 引用 + 三种伪引用形态（literal/hex/注释）全部不误判
+    blob = _p5_pdf(
+        b"<</Type/Catalog/Pages 2 0 R/N<</K[3 0 R]/M[[2 0 R]]/D[<</E 3 0 R>>]>>"
+        b"/X(/fake 3 9 R)/Y<33203920>/Z 1% 3 9 R\n>>\n")
+    assert full_content_verdict(blob) == ("application/pdf", "")
+
+
+# ================================================================
+# Reviewer Patch 7 — P7-C/P7-D: authority_seal 类型封闭 + 拒绝路径
+# 不可信字符串转换封闭
+# ================================================================
+
+_P7_SHORT_SECRET = "password:hunter2"
+_P7_LONG_SECRET = "api_key=" + "C" * 600
+
+
+class _FalseyHostile:
+    """falsey 且任何字符串化/真值化都抛出携带秘密异常的敌意对象。"""
+
+    def __init__(self, secret):
+        self._secret = secret
+
+    def __bool__(self):
+        raise RuntimeError(f"leak:{self._secret}")
+
+    def __str__(self):
+        raise RuntimeError(f"leak:{self._secret}")
+
+    def __repr__(self):
+        raise RuntimeError(f"leak:{self._secret}")
+
+
+def _p7_report_kwargs(**overrides) -> dict:
+    from furina.agent.verification import EvidenceBundle
+    ev = EvidenceBundle(**_P5_BUNDLE_KW)
+    kw = dict(_P5_REPORT_KW)
+    kw["evidence"] = ev
+    kw.update(overrides)
+    return kw
+
+
+@pytest.mark.parametrize("bad", [0, False, None, [], {}, (), set()])
+def test_p7_i_falsey_non_string_authority_seal_rejected(bad):
+    """P7-C 锁定：所有 verdict 下 authority_seal 先验证为 str——falsey 非字符串
+    （0/False/None/空容器）在 VERIFIED 与非 VERIFIED 下都被拒绝（绝不因
+    truthiness 通过）；非 VERIFIED 必须**精确等于** ""。"""
+    # VERIFIED（合法 16F verifier_id）携带非 str seal → 拒绝
+    with pytest.raises(VerificationAuthorityError):
+        VerificationReport(**_p7_report_kwargs(
+            verdict=VerificationVerdict.VERIFIED, authority_seal=bad))
+    # 非 VERIFIED 携带 falsey 非字符串 seal → 拒绝（旧实现 truthiness 通过）
+    with pytest.raises(VerificationAuthorityError):
+        VerificationReport(**_p7_report_kwargs(
+            verdict=VerificationVerdict.FAILED, authority_seal=bad))
+    with pytest.raises(VerificationAuthorityError):
+        VerificationReport(**_p7_report_kwargs(
+            verdict=VerificationVerdict.INCONCLUSIVE, authority_seal=bad))
+    # 合法空字符串 seal（非 VERIFIED）保持可构造
+    VerificationReport(**_p7_report_kwargs(
+        verdict=VerificationVerdict.FAILED, authority_seal=""))
+
+
+def test_p7_i_falsey_hostile_object_authority_seal_rejected():
+    """P7-C 纵深：falsey 自定义敌意对象（__bool__ 为 False、__str__/__repr__
+    抛出携带秘密的异常）在所有 verdict 下都被拒绝——类型验证先于 truthiness/
+    字符串化，敌意异常绝不传播、秘密绝不泄漏。"""
+    for hostile in (_FalseyHostile(_P7_SHORT_SECRET),
+                    _FalseyHostile(_P7_LONG_SECRET)):
+        for verdict in (VerificationVerdict.VERIFIED,
+                        VerificationVerdict.FAILED,
+                        VerificationVerdict.INCONCLUSIVE):
+            with pytest.raises(VerificationAuthorityError) as ei:
+                VerificationReport(**_p7_report_kwargs(
+                    verdict=verdict, authority_seal=hostile))
+            msg = str(ei.value)
+            assert "hunter2" not in msg and "CCCC" not in msg
+            assert "leak:" not in msg
+
+
+class _HostileStrRepr:
+    """__str__/__repr__/__bool__ 全部抛出携带秘密异常的敌意对象。"""
+
+    def __init__(self, secret):
+        self._secret = secret
+
+    def __str__(self):
+        raise RuntimeError(f"leak:{self._secret}")
+
+    def __repr__(self):
+        raise RuntimeError(f"leak:{self._secret}")
+
+    def __bool__(self):
+        raise RuntimeError(f"leak:{self._secret}")
+
+
+@pytest.mark.parametrize("secret", [_P7_SHORT_SECRET, _P7_LONG_SECRET])
+def test_p7_j_hostile_str_repr_cannot_leak_secrets(env, secret):
+    """P7-D 锁定：五个公开模型的全部构造拒绝路径对非字符串输入绝不调用其
+    __str__/__repr__/__bool__（错误信息只用静态失败码或安全类型名）——把
+    字符串化即抛出携带秘密异常的敌意对象注入每个字段，构造一律以
+    VerificationError（含 VerificationAuthorityError）拒绝，敌意 RuntimeError
+    绝不传播、秘密绝不进入异常消息。"""
+    from furina.agent.verification import (
+        ArtifactObservation,
+        EvidenceBundle,
+        TerminalObservation,
+        VerificationCheck,
+    )
+    hostile = _HostileStrRepr(secret)
+    bases = _p6_base_kwargs()
+    for model, base in bases.items():
+        for f in dataclasses.fields(model):
+            kw = dict(base)
+            kw[f.name] = hostile
+            if f.name == "report_digest":
+                # 派生字段：__post_init__ 无条件重算（digest 覆盖构造值）——
+                # 敌意对象绝不被字符串化，构造成功且导出面零泄漏。
+                obj = model(**kw)
+                blob = _p5_export_blob(obj)
+                assert "leak:" not in blob and secret not in blob
+                continue
+            with pytest.raises(VerificationError) as ei:
+                model(**kw)
+            msg = str(ei.value)
+            assert "leak:" not in msg and secret not in msg, \
+                (model.__name__, f.name, msg)
+    # VerificationCheck inputs 键/值特化注入（键：类型名拒绝；值：str()
+    # 转换被敌意 __str__ 破坏 → 一律拒绝，敌意异常绝不传播）
+    with pytest.raises(VerificationError) as ek:
+        VerificationCheck(check_id="check_p7j_k_0001",
+                          kind="artifact_file_exists", required=True,
+                          result=CheckResult.PASS, inputs=((hostile, "v"),))
+    assert "leak:" not in str(ek.value) and secret not in str(ek.value)
+    with pytest.raises(VerificationError) as ev_:
+        VerificationCheck(check_id="check_p7j_v_0001",
+                          kind="artifact_file_exists", required=True,
+                          result=CheckResult.PASS, inputs=(("path", hostile),))
+    assert "leak:" not in str(ev_.value) and secret not in str(ev_.value)
+
+
+def test_p7_j_string_enum_values_still_reported_scrubbed():
+    """P7-D 语义保持：合法字符串的非法枚举值/词表外值仍在脱敏后报告
+    （[REDACTED]），非字符串才走安全类型名路径——不因 P7 收紧而丢失
+    字符串拒绝面的可观察性。"""
+    from furina.agent.verification import VerificationCheck
+    for verdict_bad in (_P7_SHORT_SECRET, _P7_LONG_SECRET):
+        with pytest.raises(VerificationError) as ei:
+            VerificationReport(**_p7_report_kwargs(verdict=verdict_bad))
+        assert "[REDACTED]" in str(ei.value)
+        assert "hunter2" not in str(ei.value) and "CCCC" not in str(ei.value)
+    for res_bad in (_P7_SHORT_SECRET, _P7_LONG_SECRET):
+        with pytest.raises(VerificationError) as ei:
+            VerificationCheck(check_id="check_p7j_s_0001",
+                              kind="artifact_file_exists", required=True,
+                              result=res_bad)
+        assert "[REDACTED]" in str(ei.value)
+        assert "hunter2" not in str(ei.value) and "CCCC" not in str(ei.value)

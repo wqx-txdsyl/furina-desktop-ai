@@ -97,6 +97,7 @@ from .verifier import IndependentVerifier
 
 __all__ = [
     "AttemptRecord",
+    "BoundarySnapshot",
     "BoundedRepairLoop",
     "HardBackendFailure",
     "RepairOutcome",
@@ -181,6 +182,29 @@ def _diag_signature(diagnostic: str) -> str:
     return hashlib.sha256(f"collect:{diagnostic}".encode("utf-8")).hexdigest()
 
 
+def _validate_boundary_snapshot_fields(contract_hash: Any, cancelled: Any,
+                                       cost_used: Any, now: Any,
+                                       version: Any) -> None:
+    """P7-A：BoundarySnapshot 字段严格类型校验（静态失败码，零值回显）——
+    contract_hash（非空 str）/ cancelled（严格 bool）/ cost_used（None 或
+    非负有限数值，bool 拒绝）/ now（有限数值，bool 拒绝）/ version（非负
+    int，bool 拒绝）。构造期（``__post_init__``）与权威读取期（快照源可能
+    经 ``object.__new__`` 旁路构造出非法实例）双重执行，绝不补默认值/强转。"""
+    if not isinstance(contract_hash, str) or not contract_hash:
+        raise VerificationError("boundary_snapshot_contract_hash_invalid")
+    if not isinstance(cancelled, bool):
+        raise VerificationError("boundary_snapshot_cancelled_not_bool")
+    if cost_used is not None:
+        if isinstance(cost_used, bool) or not isinstance(cost_used, (int, float)) \
+                or not math.isfinite(float(cost_used)) or float(cost_used) < 0:
+            raise VerificationError("boundary_snapshot_cost_invalid")
+    if isinstance(now, bool) or not isinstance(now, (int, float)) \
+            or not math.isfinite(float(now)):
+        raise VerificationError("boundary_snapshot_now_invalid")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+        raise VerificationError("boundary_snapshot_version_invalid")
+
+
 @dataclass(frozen=True)
 class BoundarySnapshot:
     """P6-A：接受 VERIFIED 前的**单一权威边界快照**（快照源一次调用原子返回）。
@@ -189,6 +213,12 @@ class BoundarySnapshot:
     构造**只依据本快照**；此后不得再调用任何 cost/cancel/now/verifier 回调
     或快照源。``version`` 是快照源的状态版本（受控共享状态协议：状态任何
     变更递增 version；两次读取 version 一致 ⇒ 状态未变）。
+
+    P7-A：本类是**唯一**可被 :class:`BoundedRepairLoop` 接受的权威快照值——
+    Furina 自有、冻结（frozen dataclass）、构造期经
+    :func:`_validate_boundary_snapshot_fields` 严格类型校验；权威读取通道
+    （``_read_boundary_snapshot``）按**精确类型**接受（``type(x) is
+    BoundarySnapshot``），Mapping、dict、代理及子类一律拒绝。
     """
 
     contract_hash: str
@@ -196,6 +226,11 @@ class BoundarySnapshot:
     cost_used: Optional[float]      # None = 未注入 cost meter
     now: float
     version: int = 0
+
+    def __post_init__(self) -> None:
+        _validate_boundary_snapshot_fields(self.contract_hash, self.cancelled,
+                                           self.cost_used, self.now,
+                                           self.version)
 
 
 class BoundedRepairLoop:
@@ -208,7 +243,7 @@ class BoundedRepairLoop:
                  cost_used: Optional[Callable[[], float]] = None,
                  run_id_factory: Optional[Callable[[str], str]] = None,
                  now_fn: Callable[[], float] = time.time,
-                 boundary_snapshot: Optional[Callable[[], Mapping[str, Any]]] = None
+                 boundary_snapshot: Optional[Callable[[], BoundarySnapshot]] = None
                  ) -> None:
         if not isinstance(contract, WorkContract):
             raise VerificationError(
@@ -239,8 +274,10 @@ class BoundedRepairLoop:
         self._run_id_factory = run_id_factory or (lambda attempt_id: f"run_{attempt_id}")
         self._now_fn = now_fn
         # P6-A：单一权威边界快照源（接受 VERIFIED 前的最终边界唯一读取通道）。
-        # 未提供 → 无法取得同一状态版本的 contract/cancel/cost/now → VERIFIED
-        # 绝不被接受（UNSTABLE_BOUNDARY fail-closed）。
+        # 只接受 Furina 自有、冻结、严格类型校验的 :class:`BoundarySnapshot`
+        # 精确类型（P7-A——Mapping/dict/代理/子类一律拒绝）。未提供 → 无法
+        # 取得同一状态版本的 contract/cancel/cost/now → VERIFIED 绝不被接受
+        # （UNSTABLE_BOUNDARY fail-closed）。
         self._boundary_snapshot = boundary_snapshot
         self._initial_hash = contract.content_hash
         self._deadline = self._now_fn() + contract.budget.max_duration_seconds
@@ -438,48 +475,35 @@ class BoundedRepairLoop:
             reasons.append("standard_hash_mismatch")
         return (not reasons), ":".join(reasons)
 
-    # -- 最终边界（P6-A：单一权威快照源） ----------------------------------------
-    _BOUNDARY_SNAPSHOT_KEYS = frozenset(
-        {"contract_hash", "cancelled", "cost_used", "now", "version"})
+    # -- 最终边界（P6-A：单一权威快照源；P7-A：精确类型不可变快照值） ----------
+    def _read_boundary_snapshot(self) -> BoundarySnapshot:
+        """单次调用快照源并做**精确类型**校验（P7-A，fail-closed）。
 
-    def _read_boundary_snapshot(self) -> Tuple[str, bool, Optional[float], float, int]:
-        """单次调用快照源并做严格 exact-schema / 类型校验（fail-closed）。
-
-        快照源必须一次调用原子返回 Mapping：contract_hash（非空 str）/
-        cancelled（严格 bool）/ cost_used（None 或非负有限数值，bool 拒绝）/
-        now（有限数值，bool 拒绝）/ version（非负 int，bool 拒绝）——缺键、
-        多键、类型不符、源异常一律 :class:`VerificationError`（调用方转
-        UNSTABLE_BOUNDARY）。绝不对源返回值做默认值补齐或类型强转。
+        快照源必须一次调用原子返回 Furina 自有、冻结、严格类型校验的
+        :class:`BoundarySnapshot` **实例本身**——按精确类型匹配（``type(x)
+        is BoundarySnapshot``）接受：任意 ``Mapping``（含 dict、代理）与
+        ``BoundarySnapshot`` 子类一律拒绝（拒绝消息只用静态失败码 + 安全
+        类型名）。本方法**绝不**调用外部对象的 ``keys()``、``__getitem__()``
+        、``str()``、``repr()``——字段只能作为本类自有冻结属性经构造期
+        （``__post_init__``）与读取期（防御 ``object.__new__`` 旁路构造的
+        非法实例）双重严格类型校验后使用，绝不补默认值/强转。源异常/类型
+        不符/字段违约一律 :class:`VerificationError`（调用方转
+        UNSTABLE_BOUNDARY）。
         """
         try:
             raw = self._boundary_snapshot()
         except Exception as exc:
             raise VerificationError(
                 f"boundary_snapshot_error:{type(exc).__name__}") from None
-        if not isinstance(raw, Mapping):
-            raise VerificationError("boundary_snapshot_not_mapping")
-        if set(raw.keys()) != self._BOUNDARY_SNAPSHOT_KEYS:
-            raise VerificationError("boundary_snapshot_schema")
-        h = raw["contract_hash"]
-        if not isinstance(h, str) or not h:
-            raise VerificationError("boundary_snapshot_contract_hash_invalid")
-        c = raw["cancelled"]
-        if not isinstance(c, bool):
-            raise VerificationError("boundary_snapshot_cancelled_not_bool")
-        k = raw["cost_used"]
-        if k is not None:
-            if isinstance(k, bool) or not isinstance(k, (int, float)) \
-                    or not math.isfinite(float(k)) or float(k) < 0:
-                raise VerificationError("boundary_snapshot_cost_invalid")
-            k = float(k)
-        n = raw["now"]
-        if isinstance(n, bool) or not isinstance(n, (int, float)) \
-                or not math.isfinite(float(n)):
-            raise VerificationError("boundary_snapshot_now_invalid")
-        v = raw["version"]
-        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
-            raise VerificationError("boundary_snapshot_version_invalid")
-        return h, c, k, float(n), v
+        if type(raw) is not BoundarySnapshot:
+            raise VerificationError(
+                f"boundary_snapshot_not_boundary_snapshot:"
+                f"{type(raw).__name__}")
+        # 权威读取期重校验：快照源理论上可经 object.__new__ 绕过构造期校验
+        # 交付字段违约的实例——零默认值/零强转，违约即 fail-closed。
+        _validate_boundary_snapshot_fields(raw.contract_hash, raw.cancelled,
+                                           raw.cost_used, raw.now, raw.version)
+        return raw
 
     def _take_final_boundary(self) -> Tuple[BoundarySnapshot,
                                             Optional[RepairStopReason], str]:
@@ -490,7 +514,7 @@ class BoundedRepairLoop:
         内部对其它边界状态的改写对更早读取的值不可见（wrapper 记账只能证明
         "每个回调被调用了几次"，证明不了"最后一个回调没有改写其它状态"）。
         本协议因此**只**信任单一权威快照源——一次调用原子返回同一状态版本的
-        contract hash / cancelled / cost / now / version：
+        不可变 :class:`BoundarySnapshot`（P7-A：精确类型、冻结、严格校验）：
 
         - **见证读取（s1）**后先做越界判定——见证已暴露的越界立即以该原因
           停止（拒绝路径零逃逸面，零第二读取）；
@@ -507,28 +531,24 @@ class BoundedRepairLoop:
         """
         if self._boundary_snapshot is None:
             raise VerificationError("boundary_snapshot_source_unavailable")
-        h1, c1, k1, n1, v1 = self._read_boundary_snapshot()
-        witness = BoundarySnapshot(contract_hash=h1, cancelled=c1, cost_used=k1,
-                                   now=n1, version=v1)
+        s1 = self._read_boundary_snapshot()
         # 见证读取已暴露的越界 → 立即以该原因停止（final_report=None）。
-        pre_reason, pre_diag = self._decide_final_boundary(witness)
+        pre_reason, pre_diag = self._decide_final_boundary(s1)
         if pre_reason is not None:
-            return witness, pre_reason, pre_diag
-        h2, c2, k2, n2, v2 = self._read_boundary_snapshot()
+            return s1, pre_reason, pre_diag
+        s2 = self._read_boundary_snapshot()
         # ---- 同一状态版本证明（无法证明 → fail-closed）----
-        if v2 != v1:
+        if s2.version != s1.version:
             raise VerificationError("boundary_version_mismatch")
-        if h2 != h1:
+        if s2.contract_hash != s1.contract_hash:
             raise VerificationError("boundary_contract_drift_during_snapshot")
-        if c2 != c1:
+        if s2.cancelled != s1.cancelled:
             raise VerificationError("boundary_cancelled_value_drift")
-        if k2 != k1:
+        if s2.cost_used != s1.cost_used:
             raise VerificationError("boundary_cost_value_drift")
-        if n2 < n1:
+        if s2.now < s1.now:
             raise VerificationError("boundary_clock_not_monotonic")
-        return (BoundarySnapshot(contract_hash=h2, cancelled=c2, cost_used=k2,
-                                 now=n2, version=v2),
-                None, "")
+        return s2, None, ""
 
     def _decide_final_boundary(self, bsnap: BoundarySnapshot
                                ) -> Tuple[Optional[RepairStopReason], str]:

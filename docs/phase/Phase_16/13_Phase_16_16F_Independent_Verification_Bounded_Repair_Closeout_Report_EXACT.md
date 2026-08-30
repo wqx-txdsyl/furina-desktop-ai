@@ -230,7 +230,169 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.00000 Patch 7 回执（Reviewer Patch 7 专用）
+
+```text
+BASE_SHA                         = 5b4d9d0ce56d2f78ee8c7b756d09a8e20ac20ca3
+                                   （PATCH6_FINAL_SHA；Patch 7 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–6 惯例）
+CHANGED_FILES                    = furina/agent/verification/models.py, repair.py,
+                                   __init__.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（verifier.py/checks.py 零改动；
+                                   __init__.py 仅 BoundarySnapshot 导出）
+BOUNDARY_SNAPSHOT_EXACT_TYPE     = true（P7-A：权威快照必须是真正不可变值——
+                                   boundary_snapshot 只接受 Furina 自有、冻结、
+                                   严格类型校验的 BoundarySnapshot 实例本身，
+                                   _read_boundary_snapshot 按精确类型匹配
+                                   （type(x) is BoundarySnapshot）接受：任意
+                                   Mapping（含 dict、MappingProxyType 代理）与
+                                   BoundarySnapshot 子类一律拒绝
+                                   （boundary_snapshot_not_boundary_snapshot:
+                                   {安全类型名}）；_read_boundary_snapshot
+                                   **绝不**调用外部对象的 keys()/__getitem__()/
+                                   str()/repr()（拒绝消息只用静态失败码 + 安全
+                                   类型名；敌意动态 Mapping 的协议方法一旦被
+                                   调用即抛出携带秘密的异常——零传播）；字段
+                                   严格类型校验（_validate_boundary_snapshot_
+                                   fields：contract_hash 非空 str、cancelled
+                                   严格 bool、cost_used None 或非负有限数值
+                                   且 bool 拒绝、now 有限数值且 bool 拒绝、
+                                   version 非负 int 且 bool 拒绝，静态失败码
+                                   零值回显）在构造期（BoundarySnapshot.
+                                   __post_init__）与权威读取期（防御
+                                   object.__new__ 旁路构造的非法实例）双重
+                                   执行，绝不补默认值/强转；同版本双快照证明
+                                   （见证读取→越界判定→权威读取→version 一致
+                                   + hash/cancelled/cost 逐值一致 + now 单调）
+                                   保留、无源不接受 VERIFIED
+                                   （boundary_snapshot_source_unavailable）保留、
+                                   权威快照后零回调保留；BoundarySnapshot 经
+                                   __init__.py 公开导出）
+ARBITRARY_MAPPING_REJECTED       = true（plain dict / 动态 Mapping ABC /
+                                   MappingProxyType 三形态否证——全部
+                                   UNSTABLE_BOUNDARY / final_report=None，
+                                   见证读取拒绝后恰一次源调用零第二读取，
+                                   敌意动态 mapping（keys()/__getitem__()/
+                                   __iter__/__len__ 即抛秘密异常）零传播）
+POST_SNAPSHOT_CALLBACKS          = false（P7-D 锁定：权威快照之后零
+                                   cost/cancel/now/verifier 回调、零快照读取
+                                   ——恰两次快照读取（见证+权威），seal 认证
+                                   只发生在接受门内（快照之前恰一次），
+                                   finished_at_epoch == snapshot.now）
+PDF_ALL_REFERENCES_GENERATION_BOUND = true（P7-B：PDF 全图 generation 绑定
+                                   ——_parse_pdf_value 数组分支从整体 opacity
+                                   "other" 升级为保留每项的 "array" 解析树
+                                   （嵌套数组递归保留）；新增 _pdf_iter_refs
+                                   解析树遍历器（字典/数组/嵌套数组/嵌套字典
+                                   递归）——_validate_pdf_structure 在既有
+                                   xref n-entry（pdf_xref_generation）、
+                                   trailer /Root（pdf_root_generation）、
+                                   Catalog /Pages（pdf_pages_generation）检查
+                                   之后、tail 检查之前对**全部对象字典与
+                                   trailer 字典**执行全图引用扫描：任意
+                                   ``n g R`` 的 generation 必须为 0，非零 →
+                                   malformed_content:pdf_ref_generation
+                                   fail-closed（/Kids [3 9 R]、/Parent 2 9 R、
+                                   嵌套数组 [[3 9 R]]、数组内嵌套字典
+                                   [<</K 3 9 R>>]、trailer 非键引用
+                                   /Info 3 9 R 全部拒绝）；literal/hex string
+                                   与注释中的伪引用不进入结构化解析树、绝不
+                                   被误判（正对照：/Kids[3 0 R]、/Parent 2 0 R、
+                                   嵌套 gen-0 引用 + literal/hex/注释三种
+                                   伪引用形态共存仍 PASS；既有 P6-B 三失败码
+                                   与全部 P5-B 否证零改动））
+AUTHORITY_SEAL_RUNTIME_TYPE_CLOSED = true（P7-C：authority_seal 类型封闭——
+                                   所有 verdict 下先验证为 str（isinstance
+                                   先行，绝不因 truthiness 通过、绝不调用
+                                   __str__/__bool__）；VERIFIED：严格 64 位
+                                   小写 hex（既有）；非 VERIFIED：必须**精确
+                                   等于** ""（旧实现 `if self.authority_seal:`
+                                   truthiness 检查使 0/False/None/空容器/
+                                   falsey 自定义对象静默通过——通道关闭；
+                                   0/False/None/[]/{}()/set() 七形态 ×
+                                   VERIFIED/FAILED/INCONCLUSIVE 三 verdict
+                                   全拒绝，合法 "" seal 非 VERIFIED 保持
+                                   可构造；falsey 敌意对象（__bool__ False +
+                                   __str__/__repr__ 抛秘密异常）同样拒绝且
+                                   敌意异常零传播）
+UNTRUSTED_STRINGIFICATION        = false（P7-D：五公开模型全部构造拒绝路径
+                                   审计修复——非字符串输入绝不调用其 str()/
+                                   repr()/__bool__/__eq__（错误信息只用静态
+                                   失败码或安全类型名）：TerminalObservation.
+                                   kind、ArtifactObservation.observed_sha256/
+                                   source（非 str 先拒，合法字符串词表外才
+                                   脱敏后报告）、VerificationCheck.result
+                                   （非枚举非 str → 类型名）/inputs 键（非
+                                   str → 类型名）/inputs 值（str() 转换被
+                                   敌意 __str__ 破坏 → 一律拒绝，敌意异常
+                                   零传播）、VerificationReport.report_id
+                                   （非 str → 类型名，词法非法才脱敏回显）/
+                                   verdict（非枚举非 str → 类型名）；合法
+                                   字符串枚举值/词表外值仍在脱敏后报告
+                                   （[REDACTED]）——语义保持；锁定测试：敌意
+                                   对象（__str__/__repr__/__bool__ 全部抛出
+                                   携带秘密异常）注入五模型全部 dataclass
+                                   字段 + inputs 键/值特化（短秘密与 600 字符
+                                   秘密双参数化）→ 全部 VerificationError
+                                   拒绝（敌意 RuntimeError 绝不传播、秘密零
+                                   进入异常；派生字段 report_digest 由
+                                   __post_init__ 无条件重算覆盖——构造成功且
+                                   导出面零泄漏））
+OLD_TARGETED_176_PRESERVED       = true（176 项既有专项测试全保留：13 项
+                                   边界测试在旧语义断言（stop reason/
+                                   final_report=None/clock.t==20/finished==
+                                   snapshot.now/恰两次快照读取）逐字保留
+                                   前提下适配 P7-A 精确类型协议——
+                                   _BoundarySource.snapshot 改为构造返回
+                                   BoundarySnapshot，P6-A 锁定 3 的
+                                   dict/schema·类型违约源在精确类型协议下
+                                   同样 fail-closed（语义不变）；零弱化断言、
+                                   零 skip、零 xfail）
+NEW_P7_TESTS                     = 19 项（10 个锁定测试函数 + 参数化展开：
+                                   P7-A arbitrary/dynamic Mapping rejected +
+                                   P7-B subclass/proxy/bypass rejected +
+                                   P7-C exact immutable snapshot positive +
+                                   P7-D post-snapshot zero callback preserved +
+                                   P7-E /Kids [3 9 R] rejected +
+                                   P7-F /Parent 2 9 R rejected +
+                                   P7-G nested array/dictionary/trailer
+                                   non-zero reference rejected +
+                                   P7-H generation-zero legal PDF passes +
+                                   P7-I falsey non-string/falsey hostile
+                                   authority_seal rejected（七形态参数化 +
+                                   敌意对象纵深）+
+                                   P7-J hostile __str__/__repr__ cannot leak
+                                   secrets（全字段注入双参数化 + 字符串枚举
+                                   值脱敏报告语义保持））
+TARGETED                         = 195 passed / 0 failed / 0 skipped（16F 专项：
+                                   原 176 全保留 + 19 项 P7 reviewer-locked
+                                   否证/正例；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 602 passed（tests/agent 全目录一次；
+                                   = Patch 6 基线 583 + P7 新增 19）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1884 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 195 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；本补丁全部测试尝试零 flaky 零
+                                   重跑）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 models.py + repair.py +
+                                   __init__.py + 1 测试文件 + 本 closeout
+                                   ——16A–16E frozen contracts 与 C1–C7 零
+                                   改动，verifier.py/checks.py 零改动）
+GIT_DIFF_CHECK                   = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+READY_FOR_REVIEW                 = YES
+```
+
 ## 0.0000 Patch 6 回执（Reviewer Patch 6 专用）
+
 
 ```text
 BASE_SHA                         = 3605ebe76484ccd3802631cc187a713b2e71f81c

@@ -58,7 +58,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from furina.agent.events.models import EventKind
 from furina.core import FurinaError
@@ -259,7 +259,7 @@ _PDF_DELIM_BYTES = b"()<>[]{}/%"
 _MAX_PDF_DICT_DEPTH = 16
 _INT_TOKEN_RE = re.compile(rb"\A[0-9]+\Z")
 _REAL_TOKEN_RE = re.compile(rb"\A[+-]?([0-9]+|[0-9]*\.[0-9]+|[0-9]+\.[0-9]*)\Z")
-_PDF_VALUE_KINDS = ("name", "ref", "int", "dict", "other")
+_PDF_VALUE_KINDS = ("name", "ref", "int", "dict", "array", "other")
 
 
 def _skip_pdf_ws(full: bytes, pos: int) -> int:
@@ -336,10 +336,11 @@ def _parse_pdf_value(full: bytes, pos: int,
                      depth: int) -> Tuple[Optional[Tuple[str, Any]], int]:
     """解析一个 PDF 对象值；返回 ``((kind, value), next_pos)`` 或 ``(None, pos)``。
 
-    kind ∈ {"name", "ref", "int", "dict", "other"}——受支持子集只需要区分：
-    name（``/Type`` 值）、indirect ref（``n g R``）、整数（``/Size``）、字典
-    （结构化直接键表）；literal/hex string、数组、布尔等整体视为不透明
-    "other"，但其括号/字典必须真实平衡，注释绝不进入 token 流。
+    kind ∈ {"name", "ref", "int", "dict", "array", "other"}——受支持子集只需要
+    区分：name（``/Type`` 值）、indirect ref（``n g R``）、整数（``/Size``）、
+    字典（结构化直接键表）、数组（每项保留——P7-B 全图 generation 绑定）；
+    literal/hex string、布尔等整体视为不透明 "other"，但其括号/字典必须真实
+    平衡，注释绝不进入 token 流。
     """
     if depth > _MAX_PDF_DICT_DEPTH:
         return None, pos
@@ -361,15 +362,20 @@ def _parse_pdf_value(full: bytes, pos: int,
             return None, pos
         return ("other", None), end
     if c == b"[":
+        # P7-B：数组（含嵌套数组）的每一项都被**保留**进入解析树——嵌套在
+        # 数组里的 ``n g R`` indirect ref 不再被整体 opacity 丢弃，消费方
+        # （全图 generation 绑定扫描）据此核对全部引用的 generation。
         pos = _pdf_skip_ws_comment(full, pos + 1)
+        items: List[Tuple[str, Any]] = []
         while True:
             if pos >= n:
                 return None, pos
             if full[pos:pos + 1] == b"]":
-                return ("other", None), pos + 1
+                return ("array", items), pos + 1
             item, pos = _parse_pdf_value(full, pos, depth + 1)
             if item is None:
                 return None, pos
+            items.append(item)
     if c == b"/":
         tok, pos2 = _pdf_scan_token(full, pos + 1)
         if tok is None:
@@ -446,6 +452,21 @@ def _parse_pdf_int(full: bytes, pos: int) -> Tuple[Optional[int], Optional[int]]
     return int(full[start:pos]), pos
 
 
+def _pdf_iter_refs(node: Tuple[str, Any]):
+    """P7-B：遍历解析树中的**全部** indirect ref（字典/数组/嵌套数组/嵌套
+    字典递归）——literal string、hex string 与注释中的伪引用不在解析树内，
+    绝不被扫描（结构化 token 解析的可观察性边界）。"""
+    kind, value = node
+    if kind == "ref":
+        yield value
+    elif kind == "dict":
+        for v in value.values():
+            yield from _pdf_iter_refs(v)
+    elif kind == "array":
+        for v in value:
+            yield from _pdf_iter_refs(v)
+
+
 def _validate_pdf_structure(full: bytes) -> str:
     """封闭、确定性的受支持 PDF 结构验证（Patch 3 B1 + Patch 4 P4-A）——
     **绝不只检查** ``%PDF-`` 与 ``%%EOF`` 两个 marker，而是验证 header / 对象
@@ -457,10 +478,14 @@ def _validate_pdf_structure(full: bytes) -> str:
     - xref：该偏移处必须是经典 ``xref`` 表——子段（start/count）+ 定长 20 字节
       条目（``nnnnnnnnnn ggggg n|f``），``n`` 条目记录的字节偏移必须精确指向
       文件中对应 ``<num> 0 obj`` 的位置（偏移关系，非仅对象存在）；
-    - **generation 精确绑定（P6-B）**：indirect ref 一律保存
+    - **generation 精确绑定（P6-B + P7-B）**：indirect ref 一律保存
       ``(object_number, generation)``——本封闭子集只支持 ``n 0 obj`` 对象定义，
       因此 xref ``n`` 条目、trailer ``/Root``、Catalog ``/Pages`` 引用的
-      generation 都必须为 0，非零即引用与定义不一致 → fail-closed；
+      generation 都必须为 0，非零即引用与定义不一致 → fail-closed；P7-B
+      进一步把绑定扩展到**封闭对象图内全部** indirect ref（所有对象字典、
+      数组、嵌套数组、嵌套字典及 trailer 字典中的 ``n g R``——如 ``/Kids
+      [3 9 R]``、``/Parent 2 9 R`` 一律拒绝），literal/hex string 与注释中
+      的伪引用不进入解析树、绝不被误判；
     - **对象图（P4-A）**：每个 ``n`` 条目对象必须有匹配的 ``obj ... endobj``
       （缺 ``endobj`` 或对象间存在非空白内容一律 fail-closed），对象体必须是
       完整平衡字典 ``<<...>>``（任意文本/流对象体不被受支持子集接受）；定义
@@ -630,6 +655,18 @@ def _validate_pdf_structure(full: bytes) -> str:
     pages_map = obj_dict_maps.get(pages_num)
     if pages_map is None or pages_map.get(b"Type") != ("name", b"Pages"):
         return "malformed_content:pdf_pages_not_pages"
+    # P7-B：全图 generation 绑定——封闭对象图内**全部** indirect ref（所有
+    # 对象字典、数组、嵌套数组、嵌套字典及 trailer 字典中的 ``n g R``）的
+    # generation 都必须为 0（本封闭子集只支持 ``n 0 obj`` 对象定义——任何
+    # 非零引用指向本子集不存在的对象版本 → fail-closed）。literal/hex
+    # string 与注释中的伪引用不进入结构化解析树、绝不被误判。
+    for od in obj_dict_maps.values():
+        for _ref_num, ref_gen in _pdf_iter_refs(("dict", od)):
+            if ref_gen != 0:
+                return "malformed_content:pdf_ref_generation"
+    for _ref_num, ref_gen in _pdf_iter_refs(("dict", tmap)):
+        if ref_gen != 0:
+            return "malformed_content:pdf_ref_generation"
     # P4-A：trailer 之后只允许合法 startxref + 偏移 + 空白 + EOF——任何文本
     # 对象/多余内容（startxref 与 trailer 之间出现其它 token）一律 fail-closed。
     tail = _skip_pdf_ws(full, end + 2)
@@ -866,10 +903,15 @@ class TerminalObservation:
                            validate_identity(self.event_id, "event_id"))
         # P4-E：kind 是公开导出字符串——16E EventKind 封闭词表，类型封闭；
         # 词表外值（含秘密形态）构造面直接拒绝，绝不脱敏后继续导出。
-        if not isinstance(self.kind, str) or self.kind not in EVENT_KIND_VALUES:
+        # P7-D：非字符串输入绝不调用其 __str__（拒绝消息只用安全类型名）；
+        # 合法字符串但词表外才在脱敏后报告。
+        if not isinstance(self.kind, str):
+            raise VerificationError(
+                f"kind 必须是 str，得到 {type(self.kind).__name__}")
+        if self.kind not in EVENT_KIND_VALUES:
             raise VerificationError(
                 f"kind 必须是 16E 封闭词表值，得到 "
-                f"{scrub_secrets(str(self.kind))[:64]!r}")
+                f"{scrub_secrets(self.kind)[:64]!r}")
 
 
 @dataclass(frozen=True)
@@ -933,23 +975,32 @@ class ArtifactObservation:
                 f"observed_mime 必须是封闭 MIME 词表值或空，得到 "
                 f"{scrub_secrets(str(self.observed_mime))[:64]!r}")
         # P5-C：observed_sha256 是严格格式值——空或 64 位小写 hex。
+        # P7-D：先验证确为 str（绝不调用非字符串输入的 __eq__/__str__），
+        # 合法字符串但格式非法才在脱敏后报告。
+        if not isinstance(self.observed_sha256, str):
+            raise VerificationError(
+                f"observed_sha256 必须是 str，得到 "
+                f"{type(self.observed_sha256).__name__}")
         if self.observed_sha256 != "" \
-                and (not isinstance(self.observed_sha256, str)
-                     or not _SHA256_PATTERN.match(self.observed_sha256)):
+                and not _SHA256_PATTERN.match(self.observed_sha256):
             raise VerificationError(
                 f"observed_sha256 必须是空或 64 位小写 hex，得到 "
-                f"{scrub_secrets(str(self.observed_sha256))[:64]!r}")
+                f"{scrub_secrets(self.observed_sha256)[:64]!r}")
         object.__setattr__(self, "claimed_path",
                            scrub_secrets(self.claimed_path)[:MAX_PATH_CHARS])
         object.__setattr__(self, "resolved_path",
                            scrub_secrets(self.resolved_path)[:MAX_PATH_CHARS])
         # P4-E：公开导出字符串类型封闭或脱敏——source 是封闭取值（expectation|
-        # declared，词表外值直接拒绝）；rejection / name_mime / content_rejection
-        # 统一脱敏后限长（raw secret 绝不进入 to_dict()/to_digest_dict() 导出）。
-        if not isinstance(self.source, str) or self.source not in ARTIFACT_SOURCE_VALUES:
+        # declared，词表外值直接拒绝）。P7-D：非字符串输入绝不调用其
+        # __str__/__eq__（拒绝消息只用安全类型名）；合法字符串但词表外才在
+        # 脱敏后报告。
+        if not isinstance(self.source, str):
+            raise VerificationError(
+                f"source 必须是 str，得到 {type(self.source).__name__}")
+        if self.source not in ARTIFACT_SOURCE_VALUES:
             raise VerificationError(
                 f"source 必须是 expectation|declared（类型封闭），得到 "
-                f"{scrub_secrets(str(self.source))[:64]!r}")
+                f"{scrub_secrets(self.source)[:64]!r}")
         object.__setattr__(self, "rejection",
                            scrub_secrets(self.rejection)[:64])
         object.__setattr__(self, "name_mime",
@@ -1118,10 +1169,13 @@ class VerificationCheck:
             except ValueError:
                 raise VerificationError(
                     f"check {cid} result 非法: "
-                    f"{scrub_secrets(str(self.result))[:64]!r}") from None
+                    f"{scrub_secrets(result)[:64]!r}") from None
         if not isinstance(result, CheckResult):
+            # P7-D：非字符串、非枚举的非法 result 绝不调用其 __str__/
+            # __repr__（拒绝消息只用安全类型名）。
             raise VerificationError(
-                f"check {cid} result 非法: {scrub_secrets(str(self.result))[:64]!r}")
+                f"check {cid} result 非法（类型封闭），得到 "
+                f"{type(self.result).__name__}")
         object.__setattr__(self, "result", result)
         object.__setattr__(self, "explanation", _bounded_text(self.explanation or "",
                                                               MAX_EXPLANATION_CHARS))
@@ -1133,15 +1187,27 @@ class VerificationCheck:
                 raise VerificationError(
                     f"check {cid} input 必须是 (键, 值) 二元组")
             k, v = pair
-            if not isinstance(k, str) or not k.strip() or len(k) > 64:
-                # P5-C：异常回显一律先脱敏——raw secret 绝不进入异常消息。
+            # P7-D：非字符串键绝不调用其 __str__/__eq__（拒绝消息只用安全
+            # 类型名）；合法字符串键非法/超界才在脱敏后报告。
+            if not isinstance(k, str):
                 raise VerificationError(
-                    f"check {cid} input 键非法: {scrub_secrets(str(k))[:64]!r}")
+                    f"check {cid} input 键必须是 str，得到 {type(k).__name__}")
+            if not k.strip() or len(k) > 64:
+                raise VerificationError(
+                    f"check {cid} input 键非法: {scrub_secrets(k)[:64]!r}")
             # P5-C：input 键同样是公开导出字符串——canonical 词法 + 秘密形态
             # 拒绝（值面经 _bounded_text 脱敏限长）。
             validate_identity(k, f"check {cid} input 键")
             if not isinstance(v, str):
-                v = str(v)
+                # P7-D：非字符串值的 str() 转换若被恶意 __str__ 破坏（抛出
+                # 携带秘密的异常）→ 一律拒绝（异常回显只用安全类型名，绝不
+                # 传播外部异常消息）。
+                try:
+                    v = str(v)
+                except Exception:
+                    raise VerificationError(
+                        f"check {cid} input 值必须是 str（非 str 且 str() 转换"
+                        f"失败，得到 {type(v).__name__}）") from None
             frozen_inputs.append((k, _bounded_text(v, MAX_INPUT_VALUE_CHARS)))
         object.__setattr__(self, "inputs", tuple(frozen_inputs))
 
@@ -1220,10 +1286,14 @@ class VerificationReport:
     # -------------------------------------------------- 校验
     def __post_init__(self) -> None:
         # P6-C：report_id 拒绝异常回显先脱敏——raw secret 绝不进入异常消息。
-        if not isinstance(self.report_id, str) \
-                or not _REPORT_ID_PATTERN.match(self.report_id):
+        # P7-D：先验证确为 str（非字符串输入绝不调用其 __str__/__eq__，
+        # 拒绝消息只用安全类型名）；合法字符串词法非法才在脱敏后报告。
+        if not isinstance(self.report_id, str):
             raise VerificationError(
-                f"report_id 词法非法: {scrub_secrets(str(self.report_id))[:64]!r}")
+                f"report_id 必须是 str，得到 {type(self.report_id).__name__}")
+        if not _REPORT_ID_PATTERN.match(self.report_id):
+            raise VerificationError(
+                f"report_id 词法非法: {scrub_secrets(self.report_id)[:64]!r}")
         # P4-E：verifier_id 同样走 canonical validate_identity——秘密形态/
         # 词法非法（含 600 字符长秘密值）构造面直接拒绝，绝不脱敏后继续导出。
         if not isinstance(self.verifier_id, str):
@@ -1249,10 +1319,12 @@ class VerificationReport:
                 verdict = VerificationVerdict(verdict)
             except ValueError:
                 raise VerificationError(
-                    f"verdict 非法: {scrub_secrets(str(self.verdict))[:64]!r}") from None
+                    f"verdict 非法: {scrub_secrets(verdict)[:64]!r}") from None
         if not isinstance(verdict, VerificationVerdict):
+            # P7-D：非字符串、非枚举的非法 verdict 绝不调用其 __str__/
+            # __repr__（拒绝消息只用安全类型名）。
             raise VerificationError(
-                f"verdict 非法: {scrub_secrets(str(self.verdict))[:64]!r}")
+                f"verdict 非法（类型封闭），得到 {type(self.verdict).__name__}")
         object.__setattr__(self, "verdict", verdict)
 
         # P6-C：真实运行时类型逐字段封闭——checks/diagnostics 容器类型与元素
@@ -1304,19 +1376,26 @@ class VerificationReport:
         )
         object.__setattr__(self, "report_digest", digest)
 
+        # P7-C：authority_seal 按真实运行时类型封闭——**所有 verdict** 下先
+        # 验证为 str（0/False/None/空容器/falsey 自定义对象一律拒绝——绝不
+        # 因 truthiness 通过，绝不调用其 __str__/__bool__）；VERIFIED：严格
+        # 64 位小写 hex；非 VERIFIED：必须精确等于 ""。
+        if not isinstance(self.authority_seal, str):
+            raise VerificationAuthorityError(
+                f"authority_seal 必须是 str，得到 "
+                f"{type(self.authority_seal).__name__}")
         if verdict is VerificationVerdict.VERIFIED:
             if self.verifier_id != VERIFIER_ID:
                 raise VerificationAuthorityError(
                     "VERIFIED 报告只能由 16F 独立验证器产生")
-            if not isinstance(self.authority_seal, str) \
-                    or not _SHA256_PATTERN.match(self.authority_seal):
+            if not _SHA256_PATTERN.match(self.authority_seal):
                 raise VerificationAuthorityError(
                     "VERIFIED 报告必须携带 64-hex authority_seal（无 seal 的 VERIFIED "
                     "一律拒绝构造）")
         else:
-            if self.authority_seal:
+            if self.authority_seal != "":
                 raise VerificationAuthorityError(
-                    "非 VERIFIED 报告不得携带 authority_seal")
+                    "非 VERIFIED 报告不得携带 authority_seal（必须精确等于空字符串）")
 
     # -------------------------------------------------- 导出（零共享引用）
     def to_dict(self) -> Dict[str, Any]:

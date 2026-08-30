@@ -68,6 +68,7 @@ from .models import (
 )
 from .repair import (
     AttemptRecord,
+    BoundarySnapshot,
     BoundedRepairLoop,
     HardBackendFailure,
     RepairOutcome,
@@ -80,6 +81,7 @@ __all__ = [
     "ARTIFACT_SOURCE_VALUES",
     "ARTIFACT_TYPE_CONTENT_RULES",
     "AttemptRecord",
+    "BoundarySnapshot",
     "BoundedRepairLoop",
     "CheckResult",
     "EVENT_KIND_VALUES",
