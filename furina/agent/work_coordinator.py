@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from furina.agent.backend.models import BackendEvent, BackendRunHandle
 from furina.agent.events.models import EventKind
-from furina.agent.events.reducer import WorkExecutionState
+from furina.agent.events.reducer import WorkExecutionReducer, WorkExecutionState
 from furina.agent.events.normalizer import BackendEventNormalizer
 from furina.agent.work_ledger import (
     WorkLedger,
@@ -72,45 +72,63 @@ class RecoveryCoordinator:
                  verifier=None,
                  submission_builder: Optional[Callable[..., Mapping[str, Any]]] = None,
                  now_fn=time.time, max_events_window: int = 64,
-                 deadline_seconds: float = 30.0) -> None:
+                 deadline_seconds: float = 30.0,
+                 max_total_executions: int = 256) -> None:
         if not isinstance(ledger, WorkLedger):
             raise WorkLedgerError("ledger 必须是 WorkLedger")
-        if max_events_window < 1 or max_events_window > 10_000:
-            raise WorkLedgerError("max_events_window 必须在 [1, 10000] 内")
-        if deadline_seconds <= 0 or deadline_seconds > 600.0:
+        if type(max_events_window) is not int or max_events_window < 1 or max_events_window > 10_000:
+            raise WorkLedgerError("max_events_window 必须是 [1, 10000] int")
+        if type(deadline_seconds) not in (int, float):
+            raise WorkLedgerError("deadline_seconds 必须是 builtin 数值")
+        import math as _m
+        dl = float(deadline_seconds)
+        if not _m.isfinite(dl) or dl <= 0 or dl > 600.0:
             raise WorkLedgerError("deadline_seconds 必须在 (0, 600] 内")
+        if type(max_total_executions) is not int or max_total_executions < 1:
+            raise WorkLedgerError("max_total_executions 必须是正 int")
         self._ledger = ledger
         self._registry = backend_registry
         self._verifier = verifier
         self._submission_builder = submission_builder
-        self._now = now_fn
+        self._now_fn = now_fn
         self._max_events_window = max_events_window
-        self._deadline_seconds = float(deadline_seconds)
+        self._deadline_seconds = dl
+        self._max_total_executions = max_total_executions
+        self._closed = False
+
+    def close(self) -> None:
+        """确定性 close（真实资源生命周期）。"""
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise WorkLedgerError("coordinator 已 close")
 
     # --------------------------------------------------
     def recover_all(self) -> Tuple[RecoveryOutcome, ...]:
-        """reopen 入口：对全部 non-terminal execution 逐个执行有界恢复。"""
+        """reopen 入口：全局 execution 数量预算。"""
+        self._ensure_open()
         outcomes: List[RecoveryOutcome] = []
-        for rec in self._ledger.load_non_terminal():
+        non_terminal = self._ledger.load_non_terminal()
+        if len(non_terminal) > self._max_total_executions:
+            raise WorkLedgerError(
+                f"non-terminal executions {len(non_terminal)} 超过全局恢复预算"
+                f" {self._max_total_executions}")
+        for rec in non_terminal:
             outcomes.append(self.recover_execution(rec.execution_id))
         return tuple(outcomes)
 
     def recover_execution(self, execution_id: int) -> RecoveryOutcome:
+        self._ensure_open()
         deadline = time.monotonic() + self._deadline_seconds
         rec = self._ledger.get_execution(execution_id)
-        # ① 完整契约 fail-closed 重载（损坏/失配 → WorkContractReloadError
-        #    传播为恢复失败——绝不带病恢复）。
         self._ledger.load_contract(rec.contract_id)
-        # ② 原子进入 reconciliation/UNKNOWN（同 contract submit 继续被阻止）。
         self._ledger.begin_reconciliation(
             execution_id, expected_version=rec.state_version)
-        # ③ pre-run crash：零 backend 调用（submit_calls 恒 0），保持 UNKNOWN。
         if not rec.run_id:
             return RecoveryOutcome(
                 execution_id=execution_id, status="unknown_no_run",
                 submit_calls=0, detail="run 未绑定（submit 结果不确定窗口）")
-        # ④ 按 backend_id 从显式注入的 registry 获取原 backend；不可用 →
-        #    typed UNKNOWN（绝不重复 submit、绝不推断 VERIFIED/COMPLETED）。
         backend = None
         if self._registry is not None and rec.backend_id:
             backend = self._registry.get(rec.backend_id)
@@ -118,13 +136,15 @@ class RecoveryCoordinator:
             return RecoveryOutcome(
                 execution_id=execution_id, status="unknown_no_backend",
                 submit_calls=0, detail="backend registry 不可用/未注册")
-        # ⑤ 用持久化 run 身份重建 BackendRunHandle；只经公开 events 面消费。
-        handle = BackendRunHandle(backend_id=rec.backend_id, run_id=rec.run_id)
+        # Hermes 强制 correlation=contract_id
+        handle = BackendRunHandle(backend_id=rec.backend_id, run_id=rec.run_id,
+                                  correlation=rec.contract_id)
         normalizer = BackendEventNormalizer(
             backend_id=rec.backend_id, contract_id=rec.contract_id,
             run_id=rec.run_id)
         consumed = 0
-        terminal_evidence: Optional[Dict[str, Any]] = None
+        terminal_evidence = None
+        terminal_kind = None
         try:
             for raw in backend.events(handle):
                 if consumed >= self._max_events_window:
@@ -142,26 +162,41 @@ class RecoveryCoordinator:
                         "kind": event.kind.value,
                         "event_id": event.event_id,
                         "payload": dict(event.payload),
+                        "reducer_state": reduce_result.state.value,
                     }
+                    terminal_kind = event.kind
                     break
-        except Exception as exc:      # 网络结果不确定 → typed UNKNOWN（不重试）
+        except Exception as exc:
             return RecoveryOutcome(
                 execution_id=execution_id, status="unknown_insufficient_evidence",
                 events_consumed=consumed, submit_calls=0,
                 detail=f"backend events 不确定: {type(exc).__name__}")
-        if terminal_evidence is None:
+        if terminal_evidence is None or terminal_kind is None:
             return RecoveryOutcome(
                 execution_id=execution_id, status="unknown_no_events",
                 events_consumed=consumed, submit_calls=0,
                 detail="事件窗口内无 terminal evidence——保持 UNKNOWN")
-        # ⑥ terminal evidence 持久化 → BACKEND_DONE_UNVERIFIED → 真实 16F。
-        v = self._ledger.mark_terminal_evidence(
+        # completed/failed/cancelled 分流：仅 completed 可进入 16F 验证
+        # recovery-only authority（UNKNOWN absorbing，generic 不得迁出）
+        rec_now = self._ledger.get_execution(execution_id)
+        v_now = rec_now.state_version
+        if terminal_kind is not EventKind.BACKEND_COMPLETED:
+            final_state = (WorkExecutionState.FAILED
+                           if terminal_kind is EventKind.BACKEND_FAILED
+                           else WorkExecutionState.CANCELLED)
+            self._ledger.recover_terminal(
+                execution_id, terminal_evidence, final_state,
+                expected_version=v_now)
+            return RecoveryOutcome(
+                execution_id=execution_id,
+                status=f"terminal_{final_state.value}",
+                events_consumed=consumed, submit_calls=0,
+                detail=f"recovery terminal={final_state.value}（不进入 16F）")
+        # completed：recover_terminal 到 BACKEND_DONE_UNVERIFIED（evidence 同事务）
+        v = self._ledger.recover_terminal(
             execution_id, terminal_evidence,
-            expected_version=self._ledger.get_execution(
-                execution_id).state_version)
-        v = self._ledger.transition(
-            execution_id, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
-            expected_version=v)
+            WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+            expected_version=v_now)
         verifier = self._verifier
         if verifier is None or self._submission_builder is None:
             return RecoveryOutcome(
@@ -172,8 +207,6 @@ class RecoveryCoordinator:
         try:
             submission = self._submission_builder(rec, terminal_evidence)
             report = verifier.verify(submission)
-            # 真实 16F 报告 → 绑定本 execution attempt 身份的权威 outcome
-            # （mark_verified_by_outcome 只接受 exact RepairOutcome）。
             from furina.agent.verification.repair import (
                 AttemptRecord,
                 RepairOutcome,
@@ -193,11 +226,11 @@ class RecoveryCoordinator:
                 started_at_epoch=float(report.started_at_epoch),
                 finished_at_epoch=float(report.finished_at_epoch))
             self._ledger.mark_verified_by_outcome(
-                execution_id, verifier, outcome, expected_version=v)
-        except Exception as exc:      # 验证失败/不足 → 类型化 UNKNOWN 保持
+                execution_id, verifier, outcome, expected_version=v,
+                terminal_evidence=terminal_evidence)
+        except Exception as exc:
             return RecoveryOutcome(
-                execution_id=execution_id,
-                status="verification_failed",
+                execution_id=execution_id, status="verification_failed",
                 events_consumed=consumed, submit_calls=0,
                 detail=f"16F 验证未通过: {type(exc).__name__}")
         return RecoveryOutcome(
@@ -214,10 +247,13 @@ class CancellationCoordinator:
                  now_fn=time.time) -> None:
         if not isinstance(ledger, WorkLedger):
             raise WorkLedgerError("ledger 必须是 WorkLedger")
+        if approval_canceller is not None and not callable(approval_canceller):
+            raise WorkLedgerError("approval_canceller 必须是 callable")
+        # 装配边界诚实记录：approval_canceller 是注入的窄 typed adapter
+        # （16D ApprovalBroker.cancel 的 owner 线程包装），不是 broker 本体；
+        # coordinator 不读取 broker._private。
         self._ledger = ledger
         self._registry = backend_registry
-        # approval_canceller：注入的 16D ApprovalBroker.cancel 包装（owner
-        # 线程归属由调用方保证；None = 无可取消的 approval 通道）。
         self._approval_canceller = approval_canceller
 
     def cancel(self, execution_id: int) -> CancellationOutcome:
