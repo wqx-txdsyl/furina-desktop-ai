@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from furina.agent.backend.models import BackendEvent, BackendRunHandle
 from furina.agent.events.models import EventKind
+from furina.agent.events.reducer import WorkExecutionState
 from furina.agent.events.reducer import WorkExecutionReducer, WorkExecutionState
 from furina.agent.events.normalizer import BackendEventNormalizer
 from furina.agent.work_ledger import (
@@ -162,7 +163,6 @@ class RecoveryCoordinator:
                         "kind": event.kind.value,
                         "event_id": event.event_id,
                         "payload": dict(event.payload),
-                        "reducer_state": reduce_result.state.value,
                     }
                     terminal_kind = event.kind
                     break

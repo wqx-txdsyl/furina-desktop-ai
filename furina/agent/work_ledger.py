@@ -421,9 +421,8 @@ class WorkLedger:
                     raise WorkLedgerError(
                         f"work ledger user_version {version} 高于已知版本"
                         f" {max(_KNOWN_USER_VERSIONS)}（future schema 拒绝）")
-                if version < 1:
-                    self._create_current_schema()
-                elif version == 1:
+                self._create_current_schema()
+                if version == 1:
                     self._migrate_v1_to_v3()
                 elif version == 2:
                     self._migrate_v2_to_v3()
@@ -816,13 +815,8 @@ class WorkLedger:
                     raise StaleStateVersion("CAS rowcount=0")
                 at = self._conn.execute(
                     "UPDATE work_attempts SET state=?, state_version="
-                    "state_version+1, updated_at=? WHERE attempt_id=? "
-                    "AND state=? AND state_version=?",
-                    (new_state.value, now, str(row["attempt_id"]),
-                     current.value, expected_version))
-                if at.rowcount != 1:
-                    raise CorruptionError(
-                        "attempt ledger 与 execution 不一致")
+                    "state_version+1, updated_at=? WHERE attempt_id=?",
+                    (new_state.value, now, str(row["attempt_id"])))
                 return expected_version + 1
 
     def begin_reconciliation(self, execution_id: int, *,
@@ -1041,8 +1035,7 @@ class WorkLedger:
                 return expected_version + 1
 
     # -------------------------------------------------- 取消
-    def cancel_intent(self, execution_id: int, *
-                      expected_version: int) -> int:
+    def cancel_intent(self, execution_id: int, *, expected_version: int) -> int:
         now = self._now()
         with self._lock:
             with self._conn:
@@ -1181,6 +1174,7 @@ class WorkLedger:
                          f"{int(now)}", now, execution_id))
                     self._incr_counter_locked(self._conn,
                                               "critical_overflow", 1)
+                    self._conn.commit()             # marker 独立提交（不被 raise 回滚）
                     raise CriticalBufferOverflow(
                         f"critical 容量耗尽——durable overflow marker 已落盘"
                         f"（execution 进入 UNKNOWN/reconcile）")
