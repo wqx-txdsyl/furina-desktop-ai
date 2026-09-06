@@ -852,6 +852,8 @@ def validate_identity(value: Any, field_name: str) -> str:
 
     - 显式词法：``^[A-Za-z0-9][A-Za-z0-9._:\\-]{0,127}$``——控制字符、首尾
       空白、非法字符全部拒绝，**绝不静默 trim / normalize 后重新绑定**；
+    - **P8-B4：只接受 builtin str**（``type(x) is str``——str 子类可重载
+      ``__eq__``/``__hash__`` 使身份比较失真，一律拒绝）；
     - 秘密形态（password:x / token=y / bearer …，含 ``_``/``.``/``-``/``:`` 分隔
       前缀）即使词法合法也拒绝（两个不同秘密值清洗成同一身份会造成歧义 →
       fail-closed，零报告零 seal）；
@@ -859,9 +861,10 @@ def validate_identity(value: Any, field_name: str) -> str:
     - **异常消息不含 raw value**：回显一律先脱敏并限长——原始秘密不得进入
       异常/诊断（scrubber 与 identity rejector 共享同一秘密边界）。
     """
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise VerificationInputError(
-            f"{field_name} 必须是 str（canonical identity），得到 {type(value).__name__}")
+            f"{field_name} 必须是 builtin str（canonical identity），得到 "
+            f"{type(value).__name__}")
     if not _RUN_ID_PATTERN.match(value):
         raise VerificationInputError(
             f"{field_name} 词法非法（控制字符/首尾空白/非法字符拒绝，不静默 trim）: "
@@ -889,12 +892,13 @@ class TerminalObservation:
     bound: bool
 
     def __post_init__(self) -> None:
-        # P6-C：公开模型按**真实运行时类型**逐字段封闭——observed_at_epoch 必须
-        # 是有限数值（bool 拒绝）、bound 必须是严格 bool。
-        if isinstance(self.observed_at_epoch, bool) \
-                or not isinstance(self.observed_at_epoch, (int, float)) \
+        # P6-C + P8-B4：公开模型按**真实运行时类型**逐字段封闭——observed_at_epoch
+        # 必须是 **builtin** int/float 有限数值（bool/数值子类/NaN/Inf 拒绝——
+        # 敌意子类的 __float__/比较方法零调用）、bound 必须是严格 bool。
+        if type(self.observed_at_epoch) not in (int, float) \
                 or not math.isfinite(float(self.observed_at_epoch)):
-            raise VerificationError("observed_at_epoch 必须是有限数值（bool 拒绝）")
+            raise VerificationError(
+                "observed_at_epoch 必须是有限数值（bool/子类/NaN/Inf 拒绝）")
         if not isinstance(self.bound, bool):
             raise VerificationError("bound 必须是严格 bool")
         # Patch 3 B5：公开模型身份字段同样走 canonical validate_identity——
@@ -903,11 +907,13 @@ class TerminalObservation:
                            validate_identity(self.event_id, "event_id"))
         # P4-E：kind 是公开导出字符串——16E EventKind 封闭词表，类型封闭；
         # 词表外值（含秘密形态）构造面直接拒绝，绝不脱敏后继续导出。
-        # P7-D：非字符串输入绝不调用其 __str__（拒绝消息只用安全类型名）；
-        # 合法字符串但词表外才在脱敏后报告。
-        if not isinstance(self.kind, str):
+        # P8-B4：只接受 **builtin str**（str 子类可重载 __hash__/__eq__ 使
+        # 词表成员判定失真）——非字符串输入绝不调用其 __str__/__hash__/
+        # __eq__（拒绝消息只用安全类型名）；合法字符串但词表外才在脱敏后
+        # 报告。
+        if type(self.kind) is not str:
             raise VerificationError(
-                f"kind 必须是 str，得到 {type(self.kind).__name__}")
+                f"kind 必须是 builtin str，得到 {type(self.kind).__name__}")
         if self.kind not in EVENT_KIND_VALUES:
             raise VerificationError(
                 f"kind 必须是 16E 封闭词表值，得到 "
@@ -950,9 +956,11 @@ class ArtifactObservation:
             if not isinstance(getattr(self, _name), str):
                 raise VerificationError(
                     f"{_name} 必须是 str，得到 {type(getattr(self, _name)).__name__}")
-        if not isinstance(self.observed_mime, str):
+        if not isinstance(self.observed_mime, str) \
+                or type(self.observed_mime) is not str:
             raise VerificationError(
-                f"observed_mime 必须是 str，得到 {type(self.observed_mime).__name__}")
+                f"observed_mime 必须是 builtin str，得到 "
+                f"{type(self.observed_mime).__name__}")
         if not isinstance(self.target_exists, bool) \
                 or not isinstance(self.is_regular_file, bool) \
                 or not isinstance(self.within_workspace, bool):
@@ -969,11 +977,13 @@ class ArtifactObservation:
                            validate_identity(self.artifact_id, "artifact_id"))
         # P5-C：observed_mime 是严格格式值——封闭 MIME 词表（完整内容识别
         # 真值只可能来自 full_content_verdict 的封闭输出集），词表外值（含
-        # 秘密形态）构造面直接拒绝，绝不脱敏后继续导出。
+        # 秘密形态）构造面直接拒绝，绝不脱敏后继续导出。P8-B4：入口已精确
+        # builtin str（子类 __eq__/__hash__/__str__ 零调用），拒绝消息不再
+        # 包装 str()。
         if self.observed_mime != "" and self.observed_mime not in SUPPORTED_MIME_TYPES:
             raise VerificationError(
                 f"observed_mime 必须是封闭 MIME 词表值或空，得到 "
-                f"{scrub_secrets(str(self.observed_mime))[:64]!r}")
+                f"{scrub_secrets(self.observed_mime)[:64]!r}")
         # P5-C：observed_sha256 是严格格式值——空或 64 位小写 hex。
         # P7-D：先验证确为 str（绝不调用非字符串输入的 __eq__/__str__），
         # 合法字符串但格式非法才在脱敏后报告。
@@ -991,12 +1001,12 @@ class ArtifactObservation:
         object.__setattr__(self, "resolved_path",
                            scrub_secrets(self.resolved_path)[:MAX_PATH_CHARS])
         # P4-E：公开导出字符串类型封闭或脱敏——source 是封闭取值（expectation|
-        # declared，词表外值直接拒绝）。P7-D：非字符串输入绝不调用其
-        # __str__/__eq__（拒绝消息只用安全类型名）；合法字符串但词表外才在
-        # 脱敏后报告。
-        if not isinstance(self.source, str):
+        # declared，词表外值直接拒绝）。P8-B4：只接受 **builtin str**（子类
+        # 的 __hash__/__eq__ 零调用）；非字符串输入绝不调用其 __str__/__eq__
+        # （拒绝消息只用安全类型名）；合法字符串但词表外才在脱敏后报告。
+        if type(self.source) is not str:
             raise VerificationError(
-                f"source 必须是 str，得到 {type(self.source).__name__}")
+                f"source 必须是 builtin str，得到 {type(self.source).__name__}")
         if self.source not in ARTIFACT_SOURCE_VALUES:
             raise VerificationError(
                 f"source 必须是 expectation|declared（类型封闭），得到 "
@@ -1187,27 +1197,23 @@ class VerificationCheck:
                 raise VerificationError(
                     f"check {cid} input 必须是 (键, 值) 二元组")
             k, v = pair
-            # P7-D：非字符串键绝不调用其 __str__/__eq__（拒绝消息只用安全
-            # 类型名）；合法字符串键非法/超界才在脱敏后报告。
-            if not isinstance(k, str):
+            # P8-B4：键与值都必须是 **builtin str**（type(x) is str）——非
+            # 字符串值一律拒绝（P7 的"非 str 且 str() 失败才拒绝"留有
+            # ``str(v)`` 静默强转通道：value=123 被偷偷变成 "123"——P8 删除
+            # 该强转，拒绝消息只用安全类型名，绝不调用其 __str__/__eq__）。
+            if type(k) is not str:
                 raise VerificationError(
-                    f"check {cid} input 键必须是 str，得到 {type(k).__name__}")
+                    f"check {cid} input 键必须是 builtin str，得到 {type(k).__name__}")
             if not k.strip() or len(k) > 64:
                 raise VerificationError(
                     f"check {cid} input 键非法: {scrub_secrets(k)[:64]!r}")
             # P5-C：input 键同样是公开导出字符串——canonical 词法 + 秘密形态
             # 拒绝（值面经 _bounded_text 脱敏限长）。
             validate_identity(k, f"check {cid} input 键")
-            if not isinstance(v, str):
-                # P7-D：非字符串值的 str() 转换若被恶意 __str__ 破坏（抛出
-                # 携带秘密的异常）→ 一律拒绝（异常回显只用安全类型名，绝不
-                # 传播外部异常消息）。
-                try:
-                    v = str(v)
-                except Exception:
-                    raise VerificationError(
-                        f"check {cid} input 值必须是 str（非 str 且 str() 转换"
-                        f"失败，得到 {type(v).__name__}）") from None
+            if type(v) is not str:
+                raise VerificationError(
+                    f"check {cid} input 值必须是 builtin str（非字符串一律拒绝，"
+                    f"绝不 str() 强转），得到 {type(v).__name__}")
             frozen_inputs.append((k, _bounded_text(v, MAX_INPUT_VALUE_CHARS)))
         object.__setattr__(self, "inputs", tuple(frozen_inputs))
 

@@ -5054,3 +5054,595 @@ def test_p7_j_string_enum_values_still_reported_scrubbed():
                               result=res_bad)
         assert "[REDACTED]" in str(ei.value)
         assert "hunter2" not in str(ei.value) and "CCCC" not in str(ei.value)
+
+
+# ================================================================
+# Reviewer Patch 8 — B1 消费 post-attempt 边界结果 / B2 BoundarySnapshot
+# 真正 builtin 值语义 / B3 全部时钟读取 fail-closed / B4 非字符串与敌意
+# 对象封闭补全（外部 Reviewer 确认的 4 组 blocker，reviewer-locked）
+# ================================================================
+
+_P8_SECRET = "password:hunter2"
+
+
+class _P8Hostile:
+    """__eq__/__str__/__repr__/__bool__ 全部抛出携带秘密异常的敌意对象
+    （带调用计数——锁定"零调用"）。``__hash__`` 不计数（仅使本对象可作
+    dict 键注入）。"""
+
+    def __init__(self, secret):
+        self._secret = secret
+        self.calls = {"eq": 0, "str": 0, "repr": 0, "bool": 0}
+
+    __hash__ = object.__hash__
+
+    def __eq__(self, other):
+        self.calls["eq"] += 1
+        raise RuntimeError(f"leak:{self._secret}")
+
+    def __str__(self):
+        self.calls["str"] += 1
+        raise RuntimeError(f"leak:{self._secret}")
+
+    def __repr__(self):
+        self.calls["repr"] += 1
+        raise RuntimeError(f"leak:{self._secret}")
+
+    def __bool__(self):
+        self.calls["bool"] += 1
+        raise RuntimeError(f"leak:{self._secret}")
+
+    def reset(self):
+        self.calls = {"eq": 0, "str": 0, "repr": 0, "bool": 0}
+
+
+def test_p8_b1_lock1_failed_overrun_timeout_single_attempt(env):
+    """P8-B1 锁定 1：max_attempts=1，FAILED attempt 内越过 deadline →
+    TIMEOUT（旧实现丢弃 post 边界结果 → 错误 ATTEMPTS_EXHAUSTED）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=1))
+    v = IndependentVerifier(c)
+    clock = FakeClock(0.0)
+    failing = _failing_collector(c, distinct=True)
+
+    def collector(attempt_id, run_id):
+        clock.advance(700.0)          # attempt 内把时钟推过 deadline（600）
+        return failing(attempt_id, run_id)
+
+    out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
+                            now_fn=clock).run()
+    assert out.stop_reason is RepairStopReason.TIMEOUT
+    assert len(out.attempts) == 1
+    assert out.attempts[0].verdict == "FAILED"
+    assert out.final_report is None
+
+
+def test_p8_b1_lock2_failed_attempt_cancelled_single_attempt(env):
+    """P8-B1 锁定 2：max_attempts=1，FAILED attempt 内触发 cancellation →
+    CANCELLED（绝非 ATTEMPTS_EXHAUSTED）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=1))
+    v = IndependentVerifier(c)
+    flags = {"checked": 0}
+
+    def cancel_requested():
+        flags["checked"] += 1
+        return flags["checked"] > 2   # 第 3 次（attempt 1 完成后的 post）翻转
+
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=_failing_collector(c, distinct=True),
+                            cancel_requested=cancel_requested).run()
+    assert out.stop_reason is RepairStopReason.CANCELLED
+    assert len(out.attempts) == 1
+    assert out.final_report is None
+
+
+def test_p8_b1_lock3_failed_attempt_cost_overrun_single_attempt(env):
+    """P8-B1 锁定 3：max_attempts=1，FAILED attempt 内 cost 从 0 越过 limit →
+    BUDGET_EXHAUSTED。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=1))
+    v = IndependentVerifier(c)
+    costs = [0.0, 0.0]                # pre1/pre2 读 0；post 起读 6（> limit 5）
+
+    def cost_used():
+        return costs.pop(0) if costs else 6.0
+
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=_failing_collector(c, distinct=True),
+                            cost_used=cost_used).run()
+    assert out.stop_reason is RepairStopReason.BUDGET_EXHAUSTED
+    assert len(out.attempts) == 1
+    assert out.final_report is None
+
+
+def test_p8_b1_lock4_inconclusive_overrun_timeout(env):
+    """P8-B1 锁定 4：INCONCLUSIVE attempt 同样消费 post 边界结果——越过
+    deadline → TIMEOUT。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p8b1_inc_0001")
+    c = c  # 文件已存在——判据全部可过，仅缺终态 claim → INCONCLUSIVE
+    clock = FakeClock(0.0)
+    art = work_real / "summary.md"
+
+    def collector(attempt_id, run_id):
+        clock.advance(700.0)
+        # 有声明 artifact（判据可过）但零终态 claim → substantive gate 之外的
+        # INCONCLUSIVE（terminal claim NOT_EVALUABLE）
+        return _submission(c, run_id, terminal=[],
+                           declared=[_declared(art, sha_hex=_sha(b"ok"),
+                                               mime="text/markdown",
+                                               artifact_id="doc")])
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=collector, now_fn=clock).run()
+    assert out.stop_reason is RepairStopReason.TIMEOUT
+    assert len(out.attempts) == 1
+    assert out.attempts[0].verdict == "INCONCLUSIVE"
+    assert out.final_report is None
+
+
+def test_p8_b1_lock5_boundary_stop_zero_extra_collect(env):
+    """P8-B1 锁定 5：max_attempts>1 时边界停止不烧剩余 attempts——越界即停，
+    零额外 collect（绝不依赖下一轮 pre-check 偶然补抓）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
+    v = IndependentVerifier(c)
+    clock = FakeClock(0.0)
+    ran = {"n": 0}
+
+    def collector(attempt_id, run_id):
+        ran["n"] += 1
+        clock.advance(700.0)
+        return _failing_collector(c, distinct=True)(attempt_id, run_id)
+
+    out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
+                            now_fn=clock).run()
+    assert out.stop_reason is RepairStopReason.TIMEOUT
+    assert ran["n"] == 1 and len(out.attempts) == 1
+    assert out.final_report is None
+
+
+def test_p8_b1_lock6_boundary_reason_beats_hard_and_repeated(env):
+    """P8-B1 锁定 6：与 hard failure / repeated failure 同时发生时，安全边界
+    原因优先（TIMEOUT 压过 HARD_FAILURE；CANCELLED 压过 REPEATED_FAILURE）。"""
+    tmp, work, work_real, outside, outside_real = env
+    # (a) hard + 越过 deadline → TIMEOUT
+    c1 = _contract(work_real, contract_id="wc_16f_p8b1_hard_0001",
+                   budget=ExecutionBudget(max_duration_seconds=600.0,
+                                          cost_limit=CostBudget(amount=5.0),
+                                          max_attempts=1))
+    clock = FakeClock(0.0)
+
+    def hard_collector(attempt_id, run_id):
+        clock.advance(700.0)
+        raise HardBackendFailure("backend runtime crashed")
+
+    out1 = BoundedRepairLoop(contract=c1, verifier=IndependentVerifier(c1),
+                             collect_evidence=hard_collector, now_fn=clock).run()
+    assert out1.stop_reason is RepairStopReason.TIMEOUT
+    assert len(out1.attempts) == 1 and out1.final_report is None
+
+    # (b) repeated（同签名失败）+ cancellation → CANCELLED（恰 1 个 attempt，
+    #     第二个 attempt 绝不启动）
+    c2 = _contract(work_real, contract_id="wc_16f_p8b1_rep_0001",
+                   budget=ExecutionBudget(max_duration_seconds=600.0,
+                                          cost_limit=CostBudget(amount=5.0),
+                                          max_attempts=5))
+    flags = {"checked": 0}
+    ran = {"n": 0}
+    failing = _failing_collector(c2, distinct=False)
+
+    def cancel_requested():
+        flags["checked"] += 1
+        return flags["checked"] > 2
+
+    def collector(attempt_id, run_id):
+        ran["n"] += 1
+        return failing(attempt_id, run_id)
+
+    out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2),
+                             collect_evidence=collector,
+                             cancel_requested=cancel_requested).run()
+    assert out2.stop_reason is RepairStopReason.CANCELLED
+    assert ran["n"] == 1 and len(out2.attempts) == 1
+    assert out2.final_report is None
+
+
+def test_p8_b2_numeric_subclass_construction_rejected():
+    """P8-B2 锁定：敌意数值/字符串子类（重载比较/转换）在 BoundarySnapshot
+    构造面即拒绝——校验绝不调用其 __gt__/__lt__/__float__/__eq__。"""
+    calls = {"cmp": 0, "float": 0, "eq": 0}
+
+    class _LyingFloat(float):
+        def __gt__(self, other):
+            calls["cmp"] += 1
+            return False
+
+        def __lt__(self, other):
+            calls["cmp"] += 1
+            return False
+
+        def __float__(self):
+            calls["float"] += 1
+            return 0.0
+
+        def __eq__(self, other):
+            calls["eq"] += 1
+            return False
+
+    class _LyingInt(int):
+        def __lt__(self, other):
+            calls["cmp"] += 1
+            return False
+
+    class _LyingStr(str):
+        def __eq__(self, other):
+            calls["eq"] += 1
+            return True               # 谎报与任何 contract_hash 相等
+
+    h = "a" * 64
+    for over in ({"cost_used": _LyingFloat(999.0)},
+                 {"now": _LyingFloat(999.0)},
+                 {"version": _LyingInt(9)},
+                 {"contract_hash": _LyingStr(h)}):
+        kw = dict(contract_hash=h, cancelled=False, cost_used=None,
+                  now=1000.0, version=1)
+        kw.update(over)
+        with pytest.raises(VerificationError):
+            BoundarySnapshot(**kw)
+    assert calls == {"cmp": 0, "float": 0, "eq": 0}
+
+
+def test_p8_b2_hostile_cost_snapshot_source_fail_closed(env):
+    """P8-B2 锁定（reviewer 复现面）：float 子类重载 __gt__/__lt__ 恒 False、
+    cost=999/now=999 vs limit=5 —— 快照源构造 BoundarySnapshot 即被拒绝 →
+    UNSTABLE_BOUNDARY，绝不 VERIFIED（旧实现 isinstance 放行后由敌意比较
+    接管越界判定 → VERIFIED）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p8b2_e2e_0001")
+    calls = {"cmp": 0}
+
+    class _LyingFloat(float):
+        def __gt__(self, other):
+            calls["cmp"] += 1
+            return False
+
+        def __lt__(self, other):
+            calls["cmp"] += 1
+            return False
+
+    def source():
+        return BoundarySnapshot(contract_hash=c.content_hash, cancelled=False,
+                                cost_used=_LyingFloat(999.0), now=999.0,
+                                version=1)
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            boundary_snapshot=source).run()
+    assert out.attempts[0].verdict == "VERIFIED"     # 报告本身真实产出
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert calls["cmp"] == 0                          # 敌意比较零调用
+
+
+def test_p8_b2_bypass_instance_subclass_values_rejected(env):
+    """P8-B2 锁定：object.__new__ 旁路实例携带敌意子类字段值 → 权威读取期
+    精确类型校验拒绝 → UNSTABLE_BOUNDARY，绝不 VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p8b2_byp_0001")
+
+    class _LyingFloat(float):
+        def __gt__(self, other):
+            return False
+
+    def source():
+        s = object.__new__(BoundarySnapshot)
+        object.__setattr__(s, "contract_hash", c.content_hash)
+        object.__setattr__(s, "cancelled", False)
+        object.__setattr__(s, "cost_used", _LyingFloat(999.0))
+        object.__setattr__(s, "now", 999.0)
+        object.__setattr__(s, "version", 1)
+        return s
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            boundary_snapshot=source).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+
+
+def test_p8_b2_builtin_int_inputs_normalized_still_verifies(env):
+    """P8-B2 锁定（正例）：合法 builtin int 输入构造期规范化为 builtin float，
+    快照值语义恒为 builtin——验证路径照常 VERIFIED，完成时间取快照 now。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p8b2_ok_0001")
+
+    def source():
+        return BoundarySnapshot(contract_hash=c.content_hash, cancelled=False,
+                                cost_used=2, now=500, version=3)
+
+    snap = source()
+    assert type(snap.cost_used) is float and snap.cost_used == 2.0
+    assert type(snap.now) is float and snap.now == 500.0
+    assert type(snap.version) is int and type(snap.cancelled) is bool
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            boundary_snapshot=source).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.final_report is not None
+    assert out.finished_at_epoch == 500.0
+    assert type(out.finished_at_epoch) is float
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"),
+                                 "1.0", True, False, None, object()])
+def test_p8_b3_invalid_initial_clock_construct_fails(env, bad):
+    """P8-B3 锁定：构造期时钟（deadline 派生）非有限 builtin 数值 →
+    VerificationError（bool/子类/NaN/±Inf/非数值全部拒绝）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    with pytest.raises(VerificationError):
+        BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                          collect_evidence=lambda a, r: _submission(c, r),
+                          now_fn=lambda: bad)
+
+
+def test_p8_b3_nan_clock_clean_snapshot_never_verified(env):
+    """P8-B3 锁定（reviewer 反例）：now_fn=NaN + 干净 BoundarySnapshot 绝不
+    VERIFIED——非法时钟在构造面即被拒绝，循环从未启动。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p8b3_nan_0001")
+    with pytest.raises(VerificationError):
+        BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                          collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                          now_fn=lambda: float("nan"),
+                          boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot)
+
+
+def test_p8_b3_clock_breaks_at_attempt_finish_unstable_boundary(env):
+    """P8-B3 锁定：collect 后时钟变 NaN → attempt_finished 读取失效 →
+    UNSTABLE_BOUNDARY / final_report=None / 不启动下一 attempt / 快照源零
+    读取；已发生副作用的 attempt 保留记录且全部时间戳有限。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p8b3_mid_0001")
+    state = {"broken": False}
+    src = _BoundarySource(c, cost=0.0)
+
+    def now_fn():
+        return float("nan") if state["broken"] else 0.0
+
+    def collector(attempt_id, run_id):
+        state["broken"] = True        # collect 期间时钟失效
+        return _ok_summary_submission(c, run_id)
+
+    out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
+                            collect_evidence=collector, now_fn=now_fn,
+                            boundary_snapshot=src.snapshot).run()
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert len(out.attempts) == 1
+    assert src.reads == 0             # 未走到 VERIFIED 接受门——快照源零读取
+    import math
+    assert math.isfinite(out.started_at_epoch)
+    assert math.isfinite(out.finished_at_epoch)
+    assert math.isfinite(out.attempts[0].started_at_epoch)
+    assert math.isfinite(out.attempts[0].finished_at_epoch)
+
+
+def test_p8_b3_clock_breaks_at_post_boundary_unstable_boundary(env):
+    """P8-B3 锁定：attempt 完成后（post boundary 新鲜时间读取）时钟失效 →
+    UNSTABLE_BOUNDARY / final_report=None / 不启动下一 attempt。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=3))
+    v = IndependentVerifier(c)
+    reads = {"n": 0}
+
+    def now_fn():
+        reads["n"] += 1
+        # run started→pre1→pre2→attempt_started→attempt_finished 恰 5 次；
+        # 第 6 次（post boundary 新鲜时间）起返回 NaN。
+        return float("nan") if reads["n"] > 5 else 0.0
+
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=_failing_collector(c, distinct=True),
+                            now_fn=now_fn).run()
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert len(out.attempts) == 1
+    assert "clock_read_failed" in out.diagnostic
+
+
+def test_p8_b4_hostile_approval_result_fail_closed(env):
+    """P8-B4 锁定：approval_authority 返回敌意对象（__eq__/__str__/__repr__/
+    __bool__ 全部抛秘密异常）→ APPROVAL_DENIED 静态 fail-closed——协议方法
+    零调用、敌意异常零传播、诊断只含安全类型名、零 collect。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    hostile = _P8Hostile(_P8_SECRET)
+    ran = {"n": 0}
+
+    def collector(attempt_id, run_id):
+        ran["n"] += 1
+        return _submission(c, run_id)
+
+    def authority(attempt_id, run_id):
+        return hostile
+
+    out = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector,
+                            approval_authority=authority).run()
+    assert out.stop_reason is RepairStopReason.APPROVAL_DENIED
+    assert out.final_report is None
+    assert ran["n"] == 0 and len(out.attempts) == 0
+    assert "non_string" in out.diagnostic
+    assert hostile.calls == {"eq": 0, "str": 0, "repr": 0, "bool": 0}
+    assert _P8_SECRET not in out.diagnostic and "leak:" not in out.diagnostic
+
+
+def test_p8_b4_approval_authority_exception_fail_closed(env):
+    """P8-B4 锁定：approval_authority 回调抛出携带秘密的异常 → APPROVAL_DENIED
+    静态 fail-closed（诊断脱敏），异常绝不逃出 repair loop。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+
+    def authority(attempt_id, run_id):
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=lambda a, r: _submission(c, r),
+                            approval_authority=authority).run()
+    assert out.stop_reason is RepairStopReason.APPROVAL_DENIED
+    assert out.final_report is None
+    assert "authority_error" in out.diagnostic
+    assert "hunter2" not in out.diagnostic and "leak:password=hunter2" not in out.diagnostic
+
+
+@pytest.mark.parametrize("bad", [1, 0, "", "no", None, 1.0])
+def test_p8_b4_non_bool_cancel_never_treated_false(env, bad):
+    """P8-B4 锁定：cancel_requested 非 builtin bool 返回值绝不当作 False →
+    UNSTABLE_BOUNDARY（VERIFIED-capable 场景绝不 VERIFIED）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p8b4_cnl_0001")
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cancel_requested=lambda: bad,
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot).run()
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert "cancel_flag_invalid_type" in out.diagnostic
+
+
+def test_p8_b4_hostile_cancel_object_and_exception_fail_closed(env):
+    """P8-B4 锁定：cancel_requested 返回敌意对象 / 抛出携带秘密异常 →
+    UNSTABLE_BOUNDARY——__bool__ 零调用、秘密零泄漏。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p8b4_hcnl_0001")
+    hostile = _P8Hostile(_P8_SECRET)
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cancel_requested=lambda: hostile).run()
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert hostile.calls["bool"] == 0 and hostile.calls["str"] == 0
+    assert _P8_SECRET not in out.diagnostic
+
+    def exploding():
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    out2 = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cancel_requested=exploding).run()
+    assert out2.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out2.final_report is None
+    assert "cancel_flag_error" in out2.diagnostic
+    assert "hunter2" not in out2.diagnostic
+
+
+def test_p8_b4_hostile_collect_exception_diag_closed(env):
+    """P8-B4 锁定：collect 抛出 __str__ 即爆 / args 非字符串的异常 → 循环
+    有界失败收尾——诊断面只记类型名或脱敏 args，绝不崩溃、秘密零泄漏
+    （禁止无条件 str(exc)）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=1))
+    v = IndependentVerifier(c)
+
+    class _BoomStrExc(Exception):
+        def __str__(self):
+            raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    class _BoomNonStrArgs(Exception):
+        pass
+
+    def boom_collector(attempt_id, run_id):
+        raise _BoomStrExc("x")        # args 全 builtin str → 脱敏导出；__str__ 零调用
+
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=boom_collector).run()
+    assert out.stop_reason is RepairStopReason.ATTEMPTS_EXHAUSTED
+    assert "collect_or_verify_error:_BoomStrExc" in out.attempts[0].diagnostic
+    assert "hunter2" not in out.attempts[0].diagnostic
+
+    def non_str_collector(attempt_id, run_id):
+        raise _BoomNonStrArgs(123)    # args=(123,) 非全 builtin str → 只记类型名
+
+    out2 = BoundedRepairLoop(contract=c, verifier=v,
+                             collect_evidence=non_str_collector).run()
+    assert out2.stop_reason is RepairStopReason.ATTEMPTS_EXHAUSTED
+    assert "collect_or_verify_error:_BoomNonStrArgs" in out2.attempts[0].diagnostic
+    assert "123" not in out2.attempts[0].diagnostic
+
+
+def test_p8_b4_hostile_declared_and_terminal_fields_fail_closed(env):
+    """P8-B4 锁定：declared_mime / declared_sha256 / declared_size_bytes /
+    terminal kind / observed_at_epoch / 非 str 输入键注入敌意对象 →
+    verify() 一律 VerificationInputError/VerificationError——敌意对象协议
+    方法零调用、raw secret 零进入异常消息（reviewer 的 str(d_mime) 逃逸
+    通道关闭）。"""
+    tmp, work, work_real, outside, outside_real = env
+    content = b"ok"
+    art = work_real / "summary.md"
+    art.write_bytes(content)
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    base_decl = _declared(art, sha_hex=_sha(content), mime="text/markdown",
+                          size=len(content))
+
+    def expect_input_reject(sub):
+        with pytest.raises(VerificationError) as ei:
+            v.verify(sub)
+        assert all(n == 0 for n in attrs_snapshot.values()), dict(attrs_snapshot)
+        blob = str(ei.value)
+        assert _P8_SECRET not in blob and "leak:" not in blob
+
+    # declared 字段三连
+    for field in ("declared_mime", "declared_sha256", "declared_size_bytes"):
+        hostile = _P8Hostile(_P8_SECRET)
+        d = dict(base_decl)
+        d[field] = hostile
+        attrs_snapshot = hostile.calls
+        sub = _submission(c, f"run_p8b4_d_{field[:6]}", declared=[d])
+        expect_input_reject(sub)
+
+    # terminal claim 字段
+    for field in ("kind", "observed_at_epoch"):
+        hostile = _P8Hostile(_P8_SECRET)
+        ev = dict(_bound_terminal(c, "run_p8b4_t_0001"))
+        ev[field] = hostile
+        attrs_snapshot = hostile.calls
+        sub = _submission(c, "run_p8b4_t_0001", terminal=[ev])
+        expect_input_reject(sub)
+
+    # 非 str 顶层输入键
+    hostile = _P8Hostile(_P8_SECRET)
+    attrs_snapshot = hostile.calls
+    sub = _submission(c, "run_p8b4_k_0001")
+    sub[hostile] = "x"
+    hostile.reset()                   # dict 插入本身不计入（hash 不计数、零碰撞）
+    expect_input_reject(sub)
+
+
+def test_p8_b4_check_input_non_string_value_rejected():
+    """P8-B4 锁定（reviewer 反例）：VerificationCheck.inputs 值=123 必须
+    拒绝（旧实现 str() 静默强转成 "123"——与"非字符串一律拒绝"声明冲突）。"""
+    from furina.agent.verification import VerificationCheck
+    with pytest.raises(VerificationError):
+        VerificationCheck(check_id="check_p8b4_v_0001", kind="artifact_file_exists",
+                          required=True, result=CheckResult.PASS,
+                          inputs=(("count", 123),))
+    with pytest.raises(VerificationError):
+        VerificationCheck(check_id="check_p8b4_v_0002", kind="artifact_file_exists",
+                          required=True, result=CheckResult.PASS,
+                          inputs=((123, "x"),))

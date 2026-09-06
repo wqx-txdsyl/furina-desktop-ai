@@ -315,8 +315,11 @@ class IndependentVerifier:
                 f"evidence 提交必须是 Mapping，得到 {type(evidence).__name__}")
         keys = set()
         for k in evidence.keys():
-            if not isinstance(k, str):
-                raise VerificationInputError(f"输入键必须全为 str，得到 {k!r}")
+            # P8-B4：只接受 builtin str 键——拒绝消息只用安全类型名（绝不
+            # {k!r} 调用敌意对象的 __repr__）。
+            if type(k) is not str:
+                raise VerificationInputError(
+                    f"输入键必须全为 str，得到 {type(k).__name__}")
             keys.add(k)
         unknown = sorted(keys - set(VERIFICATION_INPUT_KEYS))
         missing = sorted(set(VERIFICATION_INPUT_KEYS) - keys)
@@ -428,8 +431,10 @@ class IndependentVerifier:
                 f"terminal_events 条目必须是 Mapping，得到 {type(item).__name__}")
         keys = set()
         for k in item.keys():
-            if not isinstance(k, str):
-                raise VerificationInputError(f"terminal claim 键必须全为 str，得到 {k!r}")
+            # P8-B4：拒绝消息只用安全类型名（绝不 {k!r} 调用敌意 __repr__）。
+            if type(k) is not str:
+                raise VerificationInputError(
+                    f"terminal claim 键必须全为 str，得到 {type(k).__name__}")
             keys.add(k)
         if keys != set(TERMINAL_CLAIM_KEYS):
             raise VerificationInputError(
@@ -438,13 +443,25 @@ class IndependentVerifier:
                 f"缺失 {sorted(set(TERMINAL_CLAIM_KEYS) - keys)}")
         event_id = validate_identity(item["event_id"], "event_id")
         kind = item["kind"]
-        if not isinstance(kind, str) or kind not in _EVENT_KIND_VALUES:
+        # P8-B4：kind 只接受 builtin str（子类 __hash__ 零调用）；非字符串
+        # 拒绝消息只用安全类型名（绝不 {kind!r}）。
+        if type(kind) is not str:
+            raise VerificationInputError(
+                f"kind 必须是 16E 规范化词表值（builtin str），得到 "
+                f"{type(kind).__name__}")
+        if kind not in _EVENT_KIND_VALUES:
             raise VerificationInputError(
                 f"kind 必须是 16E 规范化词表值，得到 {kind!r}")
         ts = item["observed_at_epoch"]
-        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(float(ts)):
+        # P8-B4：只接受 builtin int/float（bool/数值子类拒绝——敌意
+        # __float__ 零调用）；非数值拒绝消息只用安全类型名。
+        if type(ts) not in (int, float):
             raise VerificationInputError(
-                f"observed_at_epoch 必须是有限数值（bool/NaN/Inf 拒绝），得到 {ts!r}")
+                f"observed_at_epoch 必须是有限数值（bool/子类/NaN/Inf 拒绝），"
+                f"得到 {type(ts).__name__}")
+        if not math.isfinite(float(ts)):
+            raise VerificationInputError(
+                f"observed_at_epoch 必须是有限数值（NaN/Inf 拒绝），得到 {ts!r}")
         out: Dict[str, Any] = {"event_id": event_id, "kind": kind,
                                "observed_at_epoch": float(ts)}
         for name in ("run_id", "contract_id", "backend_id"):
@@ -459,8 +476,10 @@ class IndependentVerifier:
                 f"declared_artifacts 条目必须是 Mapping，得到 {type(item).__name__}")
         keys = set()
         for k in item.keys():
-            if not isinstance(k, str):
-                raise VerificationInputError(f"artifact claim 键必须全为 str，得到 {k!r}")
+            # P8-B4：拒绝消息只用安全类型名（绝不 {k!r} 调用敌意 __repr__）。
+            if type(k) is not str:
+                raise VerificationInputError(
+                    f"artifact claim 键必须全为 str，得到 {type(k).__name__}")
             keys.add(k)
         if keys != set(ARTIFACT_CLAIM_KEYS):
             raise VerificationInputError(
@@ -469,8 +488,13 @@ class IndependentVerifier:
                 f"缺失 {sorted(set(ARTIFACT_CLAIM_KEYS) - keys)}")
         aid = validate_identity(item["artifact_id"], "artifact_id")
         path = item["path"]
-        if not isinstance(path, str) or not path or path != path.strip() \
-                or len(path) > MAX_PATH_CHARS:
+        # P8-B4：path 只接受 builtin str（敌意子类的 __eq__/__strip__ 零调用）；
+        # 非字符串拒绝消息只用安全类型名。
+        if type(path) is not str:
+            raise VerificationInputError(
+                f"path 必须是非空 str(<=1024) 且无首尾空白（不静默 trim），得到 "
+                f"{type(path).__name__}")
+        if not path or path != path.strip() or len(path) > MAX_PATH_CHARS:
             # Patch 3 B5：异常回显一律先脱敏——raw secret 绝不进入异常消息。
             raise VerificationInputError(
                 f"path 必须是非空 str(<=1024) 且无首尾空白（不静默 trim）: "
@@ -485,22 +509,41 @@ class IndependentVerifier:
                 f"artifact path 必须是绝对路径: "
                 f"{scrub_secrets(path)[:MAX_PATH_CHARS]!r}")
         d_sha = item["declared_sha256"]
-        if d_sha is not None and (not isinstance(d_sha, str)
-                                  or not _SHA256_PATTERN.match(d_sha)):
-            raise VerificationInputError(
-                f"declared_sha256 必须是 None 或 64 位小写 hex，得到 {d_sha!r}")
+        if d_sha is not None:
+            # P8-B4：非字符串拒绝消息只用安全类型名（绝不 {d_sha!r}）。
+            if type(d_sha) is not str:
+                raise VerificationInputError(
+                    f"declared_sha256 必须是 None 或 64 位小写 hex，得到 "
+                    f"{type(d_sha).__name__}")
+            if not _SHA256_PATTERN.match(d_sha):
+                raise VerificationInputError(
+                    f"declared_sha256 必须是 None 或 64 位小写 hex，得到 {d_sha!r}")
         d_mime = item["declared_mime"]
-        if d_mime is not None and (not isinstance(d_mime, str) or not d_mime.strip()
-                                   or len(d_mime) > MAX_ID_CHARS):
-            raise VerificationInputError(
-                f"declared_mime 必须是 None 或非空 str(<=128)，得到 "
-                f"{scrub_secrets(str(d_mime))[:MAX_ID_CHARS]!r}")
+        if d_mime is not None:
+            # P8-B4：declared_mime 只接受 builtin str——**绝不 str(d_mime)**
+            # （reviewer 复现的敌意对象逃逸通道：原实现在拒绝消息里调用
+            # str(d_mime)，敌意 __str__ 的原始异常/内容直接逃出 verify()）。
+            if type(d_mime) is not str:
+                raise VerificationInputError(
+                    f"declared_mime 必须是 None 或非空 str(<=128)，得到 "
+                    f"{type(d_mime).__name__}")
+            if not d_mime.strip() or len(d_mime) > MAX_ID_CHARS:
+                raise VerificationInputError(
+                    f"declared_mime 必须是 None 或非空 str(<=128)，得到 "
+                    f"{scrub_secrets(d_mime)[:MAX_ID_CHARS]!r}")
         d_size = item["declared_size_bytes"]
         if d_size is not None:
-            if isinstance(d_size, bool) or not isinstance(d_size, int) or d_size <= 0:
+            # P8-B4：只接受 builtin int（bool/数值子类拒绝——敌意 __le__ 零
+            # 调用）；非数值拒绝消息只用安全类型名。
+            if type(d_size) is not int:
                 raise VerificationInputError(
-                    "declared_size_bytes 必须是 None 或正 int（bool/float/负数/0 拒绝），"
-                    f"得到 {d_size!r}")
+                    "declared_size_bytes 必须是 None 或正 int（bool/float/子类/"
+                    "负数/0 拒绝），"
+                    f"得到 {type(d_size).__name__}")
+            if d_size <= 0:
+                raise VerificationInputError(
+                    "declared_size_bytes 必须是 None 或正 int（bool/float/负数/0 "
+                    f"拒绝），得到 {d_size!r}")
         return {"artifact_id": aid, "path": path,
                 "declared_sha256": d_sha, "declared_mime": d_mime,
                 "declared_size_bytes": d_size}

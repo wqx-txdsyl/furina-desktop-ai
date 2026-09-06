@@ -230,6 +230,142 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.000000 Patch 8 回执（Reviewer Patch 8 专用）
+
+```text
+BASE_SHA                         = 34f624a2b52f04eb2338400552eb2abcbc8a185b
+                                   （PATCH7_FINAL_SHA；Patch 8 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+BRANCH                           = feature/phase16-16f-independent-verification-
+                                   patch2-clean（外部 Reviewer 要求：回执明确
+                                   写 clean 分支——原分支 feature/phase16-16f-
+                                   independent-verification 停在 544d1d10，
+                                   非本轮对象）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–7 惯例）
+CHANGED_FILES                    = furina/agent/verification/models.py,
+                                   repair.py, verifier.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（checks.py/__init__.py 零改动）
+POST_ATTEMPT_BOUNDARY_CONSUMED   = true（B1：非 VERIFIED attempt 完成后的
+                                   CONTRACT_MUTATED/BUDGET_EXHAUSTED/CANCELLED/
+                                   TIMEOUT 立即停止，优先于 HARD_FAILURE/
+                                   REPEATED_FAILURE/ATTEMPTS_EXHAUSTED；
+                                   boundary stop 时 final_report=None、已完成
+                                   attempt 记录保留——绝不依赖"下一轮
+                                   pre-check 偶然补抓"。锁定 1–6：max_attempts=1
+                                   的 FAILED/INCONCLUSIVE attempt 内越过
+                                   deadline → TIMEOUT、触发 cancellation →
+                                   CANCELLED、cost 0→6 越过 limit →
+                                   BUDGET_EXHAUSTED（旧实现三例全部错误
+                                   ATTEMPTS_EXHAUSTED）；max_attempts>1 时
+                                   越界即停零额外 collect；hard+超时 →
+                                   TIMEOUT、repeated+取消 → CANCELLED）
+BOUNDARY_BUILTIN_VALUES_ONLY     = true（B2：_validate_boundary_snapshot_fields
+                                   全部字段 type(x) is … 精确匹配——bool/
+                                   str/int/float 子类一律拒绝；contract_hash
+                                   锁定 canonical 64 位小写 SHA-256；数值在
+                                   构造期规范化为 builtin float（快照内绝不
+                                   保留用户子类，越界判定全部是 builtin
+                                   比较）；读取期继续防御 object.__new__ 旁路
+                                   （旁路实例携带子类字段值同样拒绝）；拒绝
+                                   前绝不调用外部对象 __float__/__eq__/
+                                   __ne__/__gt__/__lt__/__bool__/__str__/
+                                   __repr__。锁定：reviewer 复现面（float
+                                   子类 __gt__/__lt__ 恒 False + cost=999/
+                                   now=999 vs limit=5）→ 快照源构造即拒 →
+                                   UNSTABLE_BOUNDARY 绝不 VERIFIED、敌意
+                                   比较零调用；旁路实例同样拒绝；合法
+                                   builtin int 输入规范化后照常 VERIFIED；
+                                   P7 全部 snapshot/version/zero-callback
+                                   测试保持）
+NAN_CLOCK_CANNOT_VERIFY          = true（B3：单一 _read_clock 严格通道覆盖
+                                   deadline 构造 / run started / attempt
+                                   started·finished / pre·post boundary /
+                                   非成功 finished 时间——仅接受 builtin
+                                   int/float，bool/数值子类/NaN/±Inf/非数值/
+                                   回调异常一律 VerificationError fail-closed；
+                                   构造期非法时钟 → 构造即拒（reviewer 反例
+                                   now_fn=NaN + 干净 BoundarySnapshot 绝不
+                                   VERIFIED——循环从未启动）；attempt 期间
+                                   时钟失效 → UNSTABLE_BOUNDARY、
+                                   final_report=None、不启动下一 attempt、
+                                   快照源零读取；AttemptRecord/RepairOutcome
+                                   时间戳构造面有限性结构校验（_finite_epoch
+                                   ——RepairOutcome 结构上不可能携带 NaN/Inf））
+CALLBACK_OUTPUTS_TYPE_CLOSED     = true（B4：approval_authority 只接受
+                                   builtin str——精确 "approve" 放行、其他
+                                   字符串正常拒绝、非字符串/回调异常静态
+                                   fail-closed（禁用 __eq__/__bool__/__str__/
+                                   __repr__，敌意 RuntimeError 零逃出）；
+                                   cancel_requested 只接受 builtin bool——
+                                   非 bool（1/0/""/"no"/None/1.0）/异常绝不
+                                   当作 False（UNSTABLE_BOUNDARY，绝不
+                                   VERIFIED）；cost_used 只接受 builtin
+                                   int/float（子类拒绝，__float__ 零调用）；
+                                   异常诊断面 _safe_exc_diag——args 全为
+                                   builtin str 才脱敏导出，否则只记安全类型名
+                                   （HardBackendFailure/generic collect/
+                                   verify 异常/快照源异常全部收口））
+UNTRUSTED_STRING_CONVERSION      = false（B4：VerificationCheck.inputs 键与
+                                   值都必须 builtin str——非字符串 value 的
+                                   str() 静默强转通道删除（value=123 一律
+                                   拒绝）；validate_identity 只接受 builtin
+                                   str（str 子类 __eq__/__hash__ 零调用）；
+                                   IndependentVerifier submission/terminal/
+                                   artifact claim 解析面收紧——非 str 键/
+                                   kind/observed_at_epoch/path/declared_
+                                   sha256/declared_mime/declared_size_bytes
+                                   拒绝消息只用安全类型名（{x!r} 与
+                                   str(d_mime) 通道关闭——reviewer 复现的
+                                   敌意对象原始异常逃逸通道关闭）；
+                                   TerminalObservation.observed_at_epoch/kind
+                                   与 ArtifactObservation.source/observed_
+                                   mime 同步精确类型封闭；锁定：敌意对象
+                                   （协议方法即抛秘密异常）注入七类字段 →
+                                   全部 VerificationInputError/VerificationError、
+                                   协议方法零调用、秘密零传播）
+SECRET_STORED_OR_EXPORTED        = false（秘密形态不进入对象字段/报告 JSON/
+                                   evidence digest/failure signature/诊断
+                                   载荷——P4–P7 边界保持 + P8 拒绝路径
+                                   纵深）
+OLD_TESTS_PRESERVED              = true（195 项既有专项测试全保留——P7 的
+                                   13 项协议适配断言与全部 P1–P6 否证零弱化、
+                                   零 skip、零 xfail）
+NEW_P8_TESTS                     = 33 项（B1 锁定 1–6 + B2 构造拒绝/reviewer
+                                   复现面/旁路实例/合法 int 规范化正例 +
+                                   B3 构造期八形态参数化/reviewer NaN 反例/
+                                   attempt 完成时时钟失效/post boundary 时钟
+                                   失效 + B4 敌意 approval/审批回调异常/非
+                                   bool cancel 六形态/敌意 cancel 对象与
+                                   异常/敌意 collect 异常（__str__ 即爆 +
+                                   args 非字符串）/敌意 declared·terminal·
+                                   键字段七类注入/check input 值=123 与键=123）
+TARGETED                         = 228 passed / 0 failed / 0 skipped（16F 专项：
+                                   原 195 全保留 + 33 项 P8 reviewer-locked
+                                   否证/正例；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 635 passed（tests/agent 全目录一次；
+                                   = Patch 7 基线 602 + P8 新增 33）
+COGNITION                        = 279 passed（tests/cognition 全目录一次，
+                                   与 16C 基线一致）
+FULL_SUITE                       = 1917 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 228 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；本补丁全部测试尝试零 flaky 零
+                                   重跑）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 models.py + repair.py +
+                                   verifier.py + 1 测试文件 + 本 closeout
+                                   ——16A–16E frozen contracts 与 C1–C7 零
+                                   改动，checks.py/__init__.py 零改动）
+GIT_DIFF_CHECK                   = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+STATUS                           = READY_FOR_REVIEW
+```
+
 ## 0.00000 Patch 7 回执（Reviewer Patch 7 专用）
 
 ```text

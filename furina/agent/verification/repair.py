@@ -1,6 +1,6 @@
 """Phase 16F — BoundedRepairLoop：严格有界修复循环（16F 任务书 §5 + 关键锁定 9–12
 + Reviewer Patch 1 blocker 4/6 + Reviewer Patch 3（blocker B3）+ Patch 4（P4-D）
-+ Patch 6（P6-A）。
++ Patch 6（P6-A）+ Patch 8（B1–B4）。
 
 - **接受 VERIFIED 前的真正封闭最终边界（P6-A：单一权威快照源）**：
   ``_accept_verified_report``（seal 认证 / standard·hash 属性访问——都可能携带
@@ -71,6 +71,30 @@
   非字符串拒绝、绝不 ``str()`` 强转、绝不静默 trim）——原始 secret text
   不进入对象字段、异常、stop 诊断与 failure signature 载荷。
 
+Patch 8（外部 Reviewer 确认的四组 blocker）：
+
+- **B1 消费 post-attempt 边界结果**：非 VERIFIED attempt 完成后的
+  CONTRACT_MUTATED / BUDGET_EXHAUSTED / CANCELLED / TIMEOUT 立即停止，优先于
+  HARD_FAILURE / REPEATED_FAILURE / ATTEMPTS_EXHAUSTED；boundary stop 时
+  final_report=None、已完成 attempt 记录保留——绝不依赖"下一轮 pre-check
+  偶然补抓"。
+- **B2 BoundarySnapshot 真正 builtin 值语义**：``type(x) is …`` 精确匹配
+  （bool/str/int/float 子类全部拒绝），数值构造期规范化为 builtin float，
+  快照内不保留用户子类——敌意 ``__gt__``/``__lt__``/``__float__`` 无法介入
+  越界判定；拒绝前绝不调用外部对象任何协议方法。
+- **B3 全部 repair 时钟读取 fail-closed**：单一 ``_read_clock`` 严格通道
+  （仅 builtin int/float；bool/子类/NaN/±Inf/非数值/回调异常 →
+  VerificationError）覆盖 deadline 构造 / run started / attempt
+  started·finished / pre·post boundary / 非成功 finished 时间；
+  AttemptRecord / RepairOutcome 时间戳构造面有限性结构校验——NaN 比较恒
+  False 的 VERIFIED 通道被关闭。
+- **B4 非字符串/敌意对象封闭补全**：approval_authority 只接受 builtin str
+  （精确 "approve" 放行；回调异常/非字符串静态 fail-closed）；
+  cancel_requested 只接受 builtin bool（非 bool/异常绝不当作 False）；
+  cost_used 只接受 builtin 数值；异常诊断面 ``_safe_exc_diag``（args 全为
+  builtin str 才脱敏导出，否则只记类型名）——敌意 ``__str__``/``__repr__``/
+  ``__bool__``/``__eq__`` 零调用、raw secret 零传播。
+
 本模块零 DB / 零 C1–C7 / 零事件总线 / 零持久化（C6/C7/C3 写入属 16G）。
 """
 from __future__ import annotations
@@ -91,6 +115,7 @@ from .models import (
     VerificationError,
     VerificationReport,
     VerificationVerdict,
+    _SHA256_PATTERN,
     scrub_secrets,
 )
 from .verifier import IndependentVerifier
@@ -127,6 +152,20 @@ class RepairStopReason(str, enum.Enum):
     UNSTABLE_BOUNDARY = "UNSTABLE_BOUNDARY"
 
 
+def _finite_epoch(value: Any, field_name: str) -> float:
+    """P8-B3：时间戳字段唯一入口——只接受 builtin int/float（bool/数值子类/
+    NaN/±Inf/非数值一律 :class:`VerificationError`），返回规范化 builtin
+    float。RepairOutcome / AttemptRecord 的时间面因此**结构上不可能**携带
+    NaN/Inf（NaN 比较恒 False 的 VERIFIED 通道被构造面关闭）。"""
+    if type(value) not in (int, float):
+        raise VerificationError(
+            f"{field_name} 必须是 builtin int/float，得到 {type(value).__name__}")
+    v = float(value)
+    if not math.isfinite(v):
+        raise VerificationError(f"{field_name} 必须是有限数值（NaN/Inf 拒绝）")
+    return v
+
+
 @dataclass(frozen=True)
 class AttemptRecord:
     """单次 attempt 的不可变记录（attempt/run 身份 + 契约 hash + 结果/签名）。"""
@@ -142,6 +181,11 @@ class AttemptRecord:
     diagnostic: str = ""
 
     def __post_init__(self) -> None:
+        # P8-B3：时间戳有限数值结构校验（bool/子类/NaN/Inf 拒绝）+ float 规范。
+        object.__setattr__(self, "started_at_epoch",
+                           _finite_epoch(self.started_at_epoch, "started_at_epoch"))
+        object.__setattr__(self, "finished_at_epoch",
+                           _finite_epoch(self.finished_at_epoch, "finished_at_epoch"))
         # 秘密边界（blocker 6）：诊断字符串面统一脱敏后限长
         object.__setattr__(self, "diagnostic",
                            scrub_secrets(self.diagnostic or "")[:MAX_DIAGNOSTIC_CHARS])
@@ -161,6 +205,11 @@ class RepairOutcome:
     diagnostic: str = ""
 
     def __post_init__(self) -> None:
+        # P8-B3：时间戳有限数值结构校验——RepairOutcome 不得包含 NaN/Inf。
+        object.__setattr__(self, "started_at_epoch",
+                           _finite_epoch(self.started_at_epoch, "started_at_epoch"))
+        object.__setattr__(self, "finished_at_epoch",
+                           _finite_epoch(self.finished_at_epoch, "finished_at_epoch"))
         object.__setattr__(self, "diagnostic",
                            scrub_secrets(self.diagnostic or "")[:MAX_DIAGNOSTIC_CHARS])
 
@@ -182,26 +231,50 @@ def _diag_signature(diagnostic: str) -> str:
     return hashlib.sha256(f"collect:{diagnostic}".encode("utf-8")).hexdigest()
 
 
+def _safe_exc_diag(exc: BaseException) -> str:
+    """P8-B4：异常诊断面封闭——**绝不无条件** ``str(exc)``（敌意异常的
+    ``__str__`` 可能抛出携带秘密的异常或返回任意内容）。只有 ``args`` 全为
+    **builtin str** 的异常（本模块自产 ``VerificationError`` 的静态失败码、
+    契约侧纯文本硬失败消息）才脱敏导出其消息；否则只记安全类型名。
+    敌意对象的方法零调用、raw secret 零传播。"""
+    args = getattr(exc, "args", None)
+    if type(args) is tuple and args and all(type(a) is str for a in args):
+        return scrub_secrets(" ".join(args))[:MAX_DIAGNOSTIC_CHARS]
+    return type(exc).__name__
+
+
 def _validate_boundary_snapshot_fields(contract_hash: Any, cancelled: Any,
                                        cost_used: Any, now: Any,
                                        version: Any) -> None:
-    """P7-A：BoundarySnapshot 字段严格类型校验（静态失败码，零值回显）——
-    contract_hash（非空 str）/ cancelled（严格 bool）/ cost_used（None 或
-    非负有限数值，bool 拒绝）/ now（有限数值，bool 拒绝）/ version（非负
-    int，bool 拒绝）。构造期（``__post_init__``）与权威读取期（快照源可能
-    经 ``object.__new__`` 旁路构造出非法实例）双重执行，绝不补默认值/强转。"""
-    if not isinstance(contract_hash, str) or not contract_hash:
+    """P7-A + P8-B2：BoundarySnapshot 字段**精确 builtin 类型**校验（静态失败
+    码，零值回显）——contract_hash（builtin str 且 canonical 64 位小写
+    SHA-256）/ cancelled（builtin bool）/ cost_used（None 或 builtin
+    int/float，有限非负）/ now（builtin int/float，有限）/ version（builtin
+    int，非负）。
+
+    全部校验只做 ``type(x) is …`` 精确匹配——**bool、str/int/float 子类一律
+    拒绝**（敌意数值子类可重载 ``__gt__``/``__lt__``/``__float__`` 使越界
+    比较恒 False）；**拒绝前绝不调用外部对象的** ``__float__``/``__eq__``/
+    ``__ne__``/``__gt__``/``__lt__``/``__bool__``/``__str__``/``__repr__``
+    （``float(x)`` 只在精确类型确认后执行——builtin 值语义固定）。构造期
+    （``__post_init__``）与权威读取期（快照源可能经 ``object.__new__`` 旁路
+    构造出非法实例）双重执行，绝不补默认值/强转。"""
+    if type(contract_hash) is not str or not contract_hash \
+            or not _SHA256_PATTERN.match(contract_hash):
         raise VerificationError("boundary_snapshot_contract_hash_invalid")
-    if not isinstance(cancelled, bool):
+    if type(cancelled) is not bool:
         raise VerificationError("boundary_snapshot_cancelled_not_bool")
     if cost_used is not None:
-        if isinstance(cost_used, bool) or not isinstance(cost_used, (int, float)) \
-                or not math.isfinite(float(cost_used)) or float(cost_used) < 0:
+        if type(cost_used) not in (int, float):
             raise VerificationError("boundary_snapshot_cost_invalid")
-    if isinstance(now, bool) or not isinstance(now, (int, float)) \
-            or not math.isfinite(float(now)):
+        cost_value = float(cost_used)
+        if not math.isfinite(cost_value) or cost_value < 0:
+            raise VerificationError("boundary_snapshot_cost_invalid")
+    if type(now) not in (int, float):
         raise VerificationError("boundary_snapshot_now_invalid")
-    if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+    if not math.isfinite(float(now)):
+        raise VerificationError("boundary_snapshot_now_invalid")
+    if type(version) is not int or version < 0:
         raise VerificationError("boundary_snapshot_version_invalid")
 
 
@@ -219,6 +292,11 @@ class BoundarySnapshot:
     :func:`_validate_boundary_snapshot_fields` 严格类型校验；权威读取通道
     （``_read_boundary_snapshot``）按**精确类型**接受（``type(x) is
     BoundarySnapshot``），Mapping、dict、代理及子类一律拒绝。
+
+    P8-B2：字段是**真正的 builtin 值语义**——数值字段在构造时复制/规范化为
+    builtin float（``type(x)`` 恒为 float/int/str/bool/NoneType 本尊），快照
+    内**绝不保留**任何用户子类实例；全部越界判定（``>``/``<``/``==``）因此
+    是 builtin 比较，敌意子类无从介入。
     """
 
     contract_hash: str
@@ -231,6 +309,12 @@ class BoundarySnapshot:
         _validate_boundary_snapshot_fields(self.contract_hash, self.cancelled,
                                            self.cost_used, self.now,
                                            self.version)
+        # P8-B2：校验通过（builtin 精确类型）后规范化——int → float、值复制，
+        # 冻结对象内不保留任何调用方传入的原始子类/引用。
+        object.__setattr__(self, "cost_used",
+                           None if self.cost_used is None
+                           else float(self.cost_used))
+        object.__setattr__(self, "now", float(self.now))
 
 
 class BoundedRepairLoop:
@@ -280,12 +364,19 @@ class BoundedRepairLoop:
         # （UNSTABLE_BOUNDARY fail-closed）。
         self._boundary_snapshot = boundary_snapshot
         self._initial_hash = contract.content_hash
-        self._deadline = self._now_fn() + contract.budget.max_duration_seconds
+        # P8-B3：构造期 deadline 由**单一严格时钟读取**派生——非法时钟
+        # （bool/子类/NaN/Inf/非数值/回调异常）在构造面即 VerificationError
+        # fail-closed（NaN deadline 使全部越界比较恒 False 的 VERIFIED 通道
+        # 被关闭）。
+        self._deadline = self._read_clock() + contract.budget.max_duration_seconds
         self._seen_run_ids: set = set()
 
     # -- 主循环 ----------------------------------------------------------------
     def run(self) -> RepairOutcome:
-        started = self._now_fn()
+        # P8-B3：run 起点时钟与构造期 deadline 同一严格读取通道——非法时钟在
+        # 构造/起点即 VerificationError fail-closed（绝不产生 NaN 时间戳）。
+        started = self._read_clock()
+        last_known = started               # P8-B3：最后已知的有限时钟读数
         attempts: List[AttemptRecord] = []
         last_signature = ""
         stop: Optional[RepairStopReason] = None
@@ -314,12 +405,27 @@ class BoundedRepairLoop:
             if reason is not None:
                 stop, stop_diag = reason, diag
                 break
-            # 4. 审批门：未明确 approve 一律不放行（deny/timeout/pending/未知/空 → 停）。
+            # 4. 审批门（P8-B4）：authority 输出只接受 **builtin str**——只有
+            #    精确 "approve" 放行；其他字符串正常拒绝；非字符串/回调异常
+            #    静态 fail-closed（诊断只用安全类型名/脱敏 args），**禁止调用
+            #    其 __eq__/__bool__/__str__/__repr__**，敌意 RuntimeError 绝不
+            #    逃出 repair loop。
             if self._approval_authority is not None:
-                verdict_str = self._approval_authority(attempt_id, run_id)
-                if verdict_str != "approve":
+                try:
+                    raw_verdict = self._approval_authority(attempt_id, run_id)
+                except Exception as exc:
                     stop = RepairStopReason.APPROVAL_DENIED
-                    stop_diag = f"approval_not_granted:{scrub_secrets(str(verdict_str))[:64]}"
+                    stop_diag = f"approval_not_granted:authority_error:" \
+                                f"{_safe_exc_diag(exc)[:96]}"
+                    break
+                if type(raw_verdict) is not str:
+                    stop = RepairStopReason.APPROVAL_DENIED
+                    stop_diag = f"approval_not_granted:non_string:" \
+                                f"{type(raw_verdict).__name__}"
+                    break
+                if raw_verdict != "approve":
+                    stop = RepairStopReason.APPROVAL_DENIED
+                    stop_diag = f"approval_not_granted:{scrub_secrets(raw_verdict)[:64]}"
                     break
                 # 审批回调（外部副作用边界）之后再次复核边界。
                 reason, diag = self._boundary_violation(pre=True)
@@ -327,7 +433,16 @@ class BoundedRepairLoop:
                     stop, stop_diag = reason, diag
                     break
 
-            attempt_started = self._now_fn()
+            # P8-B3：attempt 起点时钟严格读取——失效 → UNSTABLE_BOUNDARY，
+            # final_report=None，不启动任何 collect/下一 attempt。
+            try:
+                attempt_started = self._read_clock()
+                last_known = attempt_started
+            except VerificationError as exc:
+                stop = RepairStopReason.UNSTABLE_BOUNDARY
+                stop_diag = f"attempt_clock_failed:{_safe_exc_diag(exc)[:96]}"
+                final_report = None
+                break
             diagnostic = ""
             report: Optional[VerificationReport] = None
             signature = ""
@@ -342,16 +457,36 @@ class BoundedRepairLoop:
                     report = self._verifier.verify(submission)
             except HardBackendFailure as exc:
                 # 硬失败信号：记录该 attempt 后**立即停止**（绝不重试）；
-                # 消息面脱敏（blocker 6）。
+                # P8-B4：诊断面封闭——args 全为 builtin str 才脱敏导出，否则
+                # 只记类型名（绝不无条件 str(exc)）。
                 hard = True
-                diagnostic = f"hard_backend_failure:{scrub_secrets(str(exc))[:128]}"
+                diagnostic = f"hard_backend_failure:{_safe_exc_diag(exc)[:128]}"
             except Exception as exc:
                 # VerificationInputError（含伪造证据）与其它 collect/verify 异常：
                 # 记为该次 attempt 的失败（有界重试；重复签名由断路器拦截）。
+                # P8-B4：诊断面封闭（同上——敌意异常 __str__ 零调用）。
                 diagnostic = f"collect_or_verify_error:{type(exc).__name__}:" \
-                             f"{scrub_secrets(str(exc))[:MAX_DIAGNOSTIC_CHARS]}"
+                             f"{_safe_exc_diag(exc)[:MAX_DIAGNOSTIC_CHARS]}"
 
-            attempt_finished = self._now_fn()
+            # P8-B3：attempt 完成时钟严格读取——失效时该 attempt 的副作用已经
+            # 真实发生：保留记录（完成时间取最后已知有限读数），UNSTABLE_BOUNDARY
+            # 停止，绝不启动下一 attempt，绝不产生 NaN 时间戳。
+            try:
+                attempt_finished = self._read_clock()
+                last_known = attempt_finished
+            except VerificationError as exc:
+                attempts.append(AttemptRecord(
+                    attempt_id=attempt_id, run_id=run_id,
+                    contract_hash=self._contract.content_hash,
+                    verdict="", report_id="",
+                    failure_signature=_diag_signature("clock_read_failed_after_attempt"),
+                    started_at_epoch=attempt_started, finished_at_epoch=last_known,
+                    diagnostic=f"clock_read_failed_after_attempt:"
+                               f"{_safe_exc_diag(exc)[:96]}"))
+                stop = RepairStopReason.UNSTABLE_BOUNDARY
+                stop_diag = "clock_read_failed_after_attempt"
+                final_report = None
+                break
             if report is not None:
                 signature = ("" if report.verdict is VerificationVerdict.VERIFIED
                              else _failure_signature(report))
@@ -395,12 +530,10 @@ class BoundedRepairLoop:
                     bsnap, pre_reason, pre_diag = self._take_final_boundary()
                 except Exception as exc:
                     stop = RepairStopReason.UNSTABLE_BOUNDARY
-                    # 本模块自产的 VerificationError 携带静态失败码（零秘密），
-                    # 可安全进入诊断；外部异常只记类型名（零 raw secret 回显）。
-                    detail = (scrub_secrets(str(exc))[:128]
-                              if isinstance(exc, VerificationError)
-                              else type(exc).__name__)
-                    stop_diag = f"final_boundary_unstable:{detail}"
+                    # P8-B4：诊断面封闭——自产 VerificationError 携带静态失败
+                    # 码（args 全为 builtin str）→ 脱敏导出；外部异常只记
+                    # 安全类型名（敌意 __str__ 零调用、零 raw secret 回显）。
+                    stop_diag = f"final_boundary_unstable:{_safe_exc_diag(exc)[:128]}"
                     final_report = None
                     break
                 if pre_reason is not None:
@@ -415,10 +548,19 @@ class BoundedRepairLoop:
                 final_now = bsnap.now
                 stop, final_report = RepairStopReason.VERIFIED, report
                 break
-            # 5b. 非 VERIFIED 报告：既有后置边界复核（attempt 完成后、下一
-            #     attempt 前的越界停止——cost/cancel/时钟/契约漂移）。
+            # 5b. 非 VERIFIED 报告：后置边界复核（attempt 完成后、下一 attempt
+            #     前的越界停止——cost/cancel/时钟/契约漂移）。P8-B1：边界结果
+            #     **必须消费**——CONTRACT_MUTATED / BUDGET_EXHAUSTED / CANCELLED /
+            #     TIMEOUT 立即停止，**优先于** HARD_FAILURE / REPEATED_FAILURE /
+            #     ATTEMPTS_EXHAUSTED（绝不依赖"下一轮 pre-check 偶然补抓"）；
+            #     boundary stop 时 final_report=None（越界后的报告绝不携带），
+            #     已完成 attempt 记录保留。
             reason, diag = self._boundary_violation(pre=False,
                                                     attempt_finished=attempt_finished)
+            if reason is not None:
+                stop, stop_diag = reason, diag
+                final_report = None
+                break
             # 7. 硬失败：立即停止（绝不重试）。
             if hard:
                 stop = RepairStopReason.HARD_FAILURE
@@ -438,13 +580,20 @@ class BoundedRepairLoop:
             stop_diag = "max_attempts_reached"
         # P6-A：VERIFIED 成功路径用最终边界快照的 now 构造 RepairOutcome——
         # 此后零回调（不再调用 now_fn/cost/cancel/verifier/快照源）。非成功
-        # 路径无边界快照，沿用既有单次 now_fn 读取。
+        # 路径无边界快照：P8-B3 严格时钟读取（失效时取最后已知有限读数——
+        # 绝不产生 NaN/Inf 时间戳）。
+        if final_now is not None:
+            end_time: float = final_now
+        else:
+            try:
+                end_time = self._read_clock()
+            except VerificationError:
+                end_time = last_known
         return RepairOutcome(
             stop_reason=stop, contract_id=self._contract.contract_id,
             contract_hash=self._contract.content_hash, attempts=tuple(attempts),
             final_report=final_report, started_at_epoch=started,
-            finished_at_epoch=(final_now if final_now is not None
-                               else self._now_fn()), diagnostic=stop_diag)
+            finished_at_epoch=end_time, diagnostic=stop_diag)
 
     # -- VERIFIED 接受门（blocker B4） ------------------------------------------
     def _accept_verified_report(self, report: VerificationReport,
@@ -596,27 +745,72 @@ class BoundedRepairLoop:
             if over:
                 return RepairStopReason.BUDGET_EXHAUSTED, "cost_limit_exceeded"
         # cost meter 回调之后读取 cancellation（回调可能翻转取消标志）。
-        if bool(self._cancel_requested()):
+        # P8-B4：cancel_requested 只接受 **builtin bool**——非 bool/回调异常
+        # 绝不当作 False（fail-closed UNSTABLE_BOUNDARY），绝不调用其
+        # __bool__/__eq__。
+        try:
+            raw_cancel = self._cancel_requested()
+        except Exception as exc:
+            return (RepairStopReason.UNSTABLE_BOUNDARY,
+                    f"cancel_flag_error:{_safe_exc_diag(exc)[:96]}")
+        if type(raw_cancel) is not bool:
+            return (RepairStopReason.UNSTABLE_BOUNDARY,
+                    f"cancel_flag_invalid_type:{type(raw_cancel).__name__}")
+        if raw_cancel:
             return RepairStopReason.CANCELLED, "cancellation_requested"
+        # P8-B3：时钟读取走单一严格通道——失效 → UNSTABLE_BOUNDARY fail-closed
+        # （NaN/Inf/子类时钟使越界比较恒 False 的通道被关闭）。
         if pre:
-            if self._now_fn() >= self._deadline:
+            try:
+                now_value = self._read_clock()
+            except VerificationError as exc:
+                return (RepairStopReason.UNSTABLE_BOUNDARY,
+                        f"clock_read_failed:{_safe_exc_diag(exc)[:96]}")
+            if now_value >= self._deadline:
                 return RepairStopReason.TIMEOUT, "time_budget_exhausted"
         elif attempt_finished is not None:
             # 全部回调结束后的新鲜时间（cost meter 可能已把时钟推过 deadline）。
-            finished = max(float(attempt_finished), float(self._now_fn()))
+            try:
+                fresh = self._read_clock()
+            except VerificationError as exc:
+                return (RepairStopReason.UNSTABLE_BOUNDARY,
+                        f"clock_read_failed:{_safe_exc_diag(exc)[:96]}")
+            finished = max(float(attempt_finished), fresh)
             if finished > self._deadline:
                 return RepairStopReason.TIMEOUT, "time_budget_exhausted"
         return None, ""
 
+    def _read_clock(self) -> float:
+        """P8-B3：**单一严格时钟读取**（所有 repair 时钟面唯一入口）——仅接受
+        **builtin int/float**（bool、数值子类、NaN、±Inf、非数值、回调异常一律
+        :class:`VerificationError` fail-closed），返回规范化 builtin float。
+
+        构造阶段（deadline / run started）非法时钟 → VerificationError 直接
+        传播；attempt 期间由调用方折算 UNSTABLE_BOUNDARY（final_report=None、
+        不启动下一 attempt）。"""
+        try:
+            raw = self._now_fn()
+        except Exception as exc:
+            raise VerificationError(
+                f"clock_read_error:{type(exc).__name__}") from None
+        if type(raw) not in (int, float):
+            raise VerificationError(f"clock_invalid_type:{type(raw).__name__}")
+        value = float(raw)
+        if not math.isfinite(value):
+            raise VerificationError("clock_not_finite")
+        return value
+
     def _read_cost_used(self) -> Tuple[float, str]:
-        """严格 cost meter 读取（零误判）：严格数值类型（bool/str 拒绝）、finite、
-        ``>= 0``；meter 异常 / NaN / Inf / 负数一律 fail-closed——返回
-        ``(+inf, 诊断)`` → BUDGET_EXHAUSTED，绝不误判为可用预算。"""
+        """严格 cost meter 读取（零误判）：**builtin** int/float（bool/子类
+        拒绝——P8-B4）、finite、``>= 0``；meter 异常 / NaN / Inf / 负数一律
+        fail-closed——返回 ``(+inf, 诊断)`` → BUDGET_EXHAUSTED，绝不误判为
+        可用预算。``float(x)`` 只在精确类型确认后执行（敌意 ``__float__``
+        零调用）。"""
         try:
             raw = self._cost_used()
         except Exception as exc:
             return float("inf"), f"cost_meter_error:{type(exc).__name__}"
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        if type(raw) not in (int, float):
             return float("inf"), f"cost_meter_invalid_type:{type(raw).__name__}"
         value = float(raw)
         if not math.isfinite(value):
