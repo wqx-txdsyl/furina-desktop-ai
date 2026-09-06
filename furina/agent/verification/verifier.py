@@ -110,6 +110,7 @@ from .models import (
     mime_for_suffix,
     scrub_secrets,
     validate_identity,
+    _safe_type_name,
 )
 
 _TERMINAL_KIND_VALUES = frozenset(k.value for k in TERMINAL_KINDS)
@@ -185,14 +186,19 @@ class IndependentVerifier:
                  process_timeout_seconds: float = DEFAULT_PROCESS_TIMEOUT_SECONDS) -> None:
         if not isinstance(contract, WorkContract):
             raise VerificationError(
-                f"verifier 必须绑定 16A WorkContract，得到 {type(contract).__name__}")
+                f"verifier 必须绑定 16A WorkContract，得到 {_safe_type_name(type(contract))}")
         pt = process_timeout_seconds
-        if isinstance(pt, bool) or not isinstance(pt, (int, float)) \
-                or not math.isfinite(float(pt)) \
-                or not (0 < float(pt) <= MAX_PROCESS_TIMEOUT_SECONDS):
+        # P9-B4：exact builtin 数值、有限、范围封闭——数值子类在入口即拒绝
+        # （绝不调用其 __float__/比较协议），错误消息绝不 repr 非法对象。
+        if type(pt) not in (int, float):
             raise VerificationError(
-                f"process_timeout_seconds 必须在 (0, {MAX_PROCESS_TIMEOUT_SECONDS}] 内，"
-                f"得到 {pt!r}")
+                f"process_timeout_seconds 必须是 builtin 数值，得到 "
+                f"{_safe_type_name(type(pt))}")
+        pt_value = float(pt)
+        if not math.isfinite(pt_value) \
+                or not (0 < pt_value <= MAX_PROCESS_TIMEOUT_SECONDS):
+            raise VerificationError(
+                f"process_timeout_seconds 必须在 (0, {MAX_PROCESS_TIMEOUT_SECONDS}] 内")
         # 秘密边界（blocker 6）：契约侧身份/期望路径带秘密形态会造成脱敏歧义
         # （两个不同秘密值清洗成同一身份）——构造期 fail-closed，零报告零 seal。
         if scrub_secrets(contract.contract_id) != contract.contract_id:
@@ -205,10 +211,26 @@ class IndependentVerifier:
                     f"{scrub_secrets(exp.artifact_id)[:MAX_ID_CHARS]}")
         self._contract = contract
         self._now_fn = now_fn
-        self._process_timeout = float(pt)
+        self._process_timeout = pt_value
         self._seal_key = _secrets.token_bytes(32)
 
     # -- 身份 ----------------------------------------------------------------
+    def _strict_now(self) -> float:
+        """P9-B4：验证器时钟唯一严格入口——仅接受 **builtin** int/float
+        （bool/数值子类/NaN/±Inf/非数值/回调异常一律 VerificationError）、
+        返回规范化 builtin float（与 repair._read_clock 同一严格语义）。"""
+        try:
+            raw = self._now_fn()
+        except Exception as exc:
+            raise VerificationError(
+                f"verifier_clock_read_error:{_safe_type_name(type(exc))}") from None
+        if type(raw) not in (int, float):
+            raise VerificationError(
+                f"verifier_clock_invalid_type:{_safe_type_name(type(raw))}")
+        value = float(raw)
+        if not math.isfinite(value):
+            raise VerificationError("verifier_clock_not_finite")
+        return value
     @property
     def verifier_id(self) -> str:
         return VERIFIER_ID
@@ -231,7 +253,7 @@ class IndependentVerifier:
 
     # -- 主入口 ----------------------------------------------------------------
     def verify(self, evidence: Mapping[str, Any]) -> VerificationReport:
-        started = float(self._now_fn())
+        started = self._strict_now()
         submission = self._parse_submission(evidence)
         # P4-F：执行前资源门——任何文件读取/进程启动之前检查期望/声明数量、
         # check 估计与快照总字节上界；超限立即拒绝（零文件读取、零进程启动）。
@@ -261,7 +283,12 @@ class IndependentVerifier:
                 f"检查数量 {len(check_list)} 超过报告上限 {MAX_REPORT_CHECKS}")
         verdict = self._aggregate(check_list)
         diagnostics = self._diagnostics(bundle, check_list)
-        finished = float(self._now_fn())
+        # P9-B4：完成时间走同一严格入口——finished >= started（回退/非法时钟
+        # → 类型化拒绝、零报告零 seal，绝不产生 NaN/Inf 时间戳）。
+        finished = self._strict_now()
+        if finished < started:
+            raise VerificationError(
+                "verifier_clock_regressed: finished < started")
         checks = tuple(check_list)
         report_id = f"vrp_{uuid.uuid4().hex}"
         digest = compute_report_digest(
@@ -312,14 +339,14 @@ class IndependentVerifier:
     def _parse_submission(self, evidence: Any) -> Dict[str, Any]:
         if not isinstance(evidence, Mapping):
             raise VerificationInputError(
-                f"evidence 提交必须是 Mapping，得到 {type(evidence).__name__}")
+                f"evidence 提交必须是 Mapping，得到 {_safe_type_name(type(evidence))}")
         keys = set()
         for k in evidence.keys():
             # P8-B4：只接受 builtin str 键——拒绝消息只用安全类型名（绝不
             # {k!r} 调用敌意对象的 __repr__）。
             if type(k) is not str:
                 raise VerificationInputError(
-                    f"输入键必须全为 str，得到 {type(k).__name__}")
+                    f"输入键必须全为 str，得到 {_safe_type_name(type(k))}")
             keys.add(k)
         unknown = sorted(keys - set(VERIFICATION_INPUT_KEYS))
         missing = sorted(set(VERIFICATION_INPUT_KEYS) - keys)
@@ -338,7 +365,7 @@ class IndependentVerifier:
         events_raw = evidence["terminal_events"]
         if not isinstance(events_raw, (list, tuple)):
             raise VerificationInputError(
-                f"terminal_events 必须是序列，得到 {type(events_raw).__name__}")
+                f"terminal_events 必须是序列，得到 {_safe_type_name(type(events_raw))}")
         if len(events_raw) > MAX_EVIDENCE_EVENTS:
             raise VerificationInputError(
                 f"terminal_events 数量 {len(events_raw)} 超界 {MAX_EVIDENCE_EVENTS}")
@@ -354,7 +381,7 @@ class IndependentVerifier:
         arts_raw = evidence["declared_artifacts"]
         if not isinstance(arts_raw, (list, tuple)):
             raise VerificationInputError(
-                f"declared_artifacts 必须是序列，得到 {type(arts_raw).__name__}")
+                f"declared_artifacts 必须是序列，得到 {_safe_type_name(type(arts_raw))}")
         if len(arts_raw) > MAX_DECLARED_ARTIFACTS:
             raise VerificationInputError(
                 f"declared_artifacts 数量 {len(arts_raw)} 超界 {MAX_DECLARED_ARTIFACTS}")
@@ -428,13 +455,13 @@ class IndependentVerifier:
         from .models import TERMINAL_CLAIM_KEYS
         if not isinstance(item, Mapping):
             raise VerificationInputError(
-                f"terminal_events 条目必须是 Mapping，得到 {type(item).__name__}")
+                f"terminal_events 条目必须是 Mapping，得到 {_safe_type_name(type(item))}")
         keys = set()
         for k in item.keys():
             # P8-B4：拒绝消息只用安全类型名（绝不 {k!r} 调用敌意 __repr__）。
             if type(k) is not str:
                 raise VerificationInputError(
-                    f"terminal claim 键必须全为 str，得到 {type(k).__name__}")
+                    f"terminal claim 键必须全为 str，得到 {_safe_type_name(type(k))}")
             keys.add(k)
         if keys != set(TERMINAL_CLAIM_KEYS):
             raise VerificationInputError(
@@ -448,7 +475,7 @@ class IndependentVerifier:
         if type(kind) is not str:
             raise VerificationInputError(
                 f"kind 必须是 16E 规范化词表值（builtin str），得到 "
-                f"{type(kind).__name__}")
+                f"{_safe_type_name(type(kind))}")
         if kind not in _EVENT_KIND_VALUES:
             raise VerificationInputError(
                 f"kind 必须是 16E 规范化词表值，得到 {kind!r}")
@@ -458,7 +485,7 @@ class IndependentVerifier:
         if type(ts) not in (int, float):
             raise VerificationInputError(
                 f"observed_at_epoch 必须是有限数值（bool/子类/NaN/Inf 拒绝），"
-                f"得到 {type(ts).__name__}")
+                f"得到 {_safe_type_name(type(ts))}")
         if not math.isfinite(float(ts)):
             raise VerificationInputError(
                 f"observed_at_epoch 必须是有限数值（NaN/Inf 拒绝），得到 {ts!r}")
@@ -473,13 +500,13 @@ class IndependentVerifier:
         from .models import ARTIFACT_CLAIM_KEYS, _SHA256_PATTERN
         if not isinstance(item, Mapping):
             raise VerificationInputError(
-                f"declared_artifacts 条目必须是 Mapping，得到 {type(item).__name__}")
+                f"declared_artifacts 条目必须是 Mapping，得到 {_safe_type_name(type(item))}")
         keys = set()
         for k in item.keys():
             # P8-B4：拒绝消息只用安全类型名（绝不 {k!r} 调用敌意 __repr__）。
             if type(k) is not str:
                 raise VerificationInputError(
-                    f"artifact claim 键必须全为 str，得到 {type(k).__name__}")
+                    f"artifact claim 键必须全为 str，得到 {_safe_type_name(type(k))}")
             keys.add(k)
         if keys != set(ARTIFACT_CLAIM_KEYS):
             raise VerificationInputError(
@@ -493,7 +520,7 @@ class IndependentVerifier:
         if type(path) is not str:
             raise VerificationInputError(
                 f"path 必须是非空 str(<=1024) 且无首尾空白（不静默 trim），得到 "
-                f"{type(path).__name__}")
+                f"{_safe_type_name(type(path))}")
         if not path or path != path.strip() or len(path) > MAX_PATH_CHARS:
             # Patch 3 B5：异常回显一律先脱敏——raw secret 绝不进入异常消息。
             raise VerificationInputError(
@@ -514,7 +541,7 @@ class IndependentVerifier:
             if type(d_sha) is not str:
                 raise VerificationInputError(
                     f"declared_sha256 必须是 None 或 64 位小写 hex，得到 "
-                    f"{type(d_sha).__name__}")
+                    f"{_safe_type_name(type(d_sha))}")
             if not _SHA256_PATTERN.match(d_sha):
                 raise VerificationInputError(
                     f"declared_sha256 必须是 None 或 64 位小写 hex，得到 {d_sha!r}")
@@ -526,7 +553,7 @@ class IndependentVerifier:
             if type(d_mime) is not str:
                 raise VerificationInputError(
                     f"declared_mime 必须是 None 或非空 str(<=128)，得到 "
-                    f"{type(d_mime).__name__}")
+                    f"{_safe_type_name(type(d_mime))}")
             if not d_mime.strip() or len(d_mime) > MAX_ID_CHARS:
                 raise VerificationInputError(
                     f"declared_mime 必须是 None 或非空 str(<=128)，得到 "
@@ -539,7 +566,7 @@ class IndependentVerifier:
                 raise VerificationInputError(
                     "declared_size_bytes 必须是 None 或正 int（bool/float/子类/"
                     "负数/0 拒绝），"
-                    f"得到 {type(d_size).__name__}")
+                    f"得到 {_safe_type_name(type(d_size))}")
             if d_size <= 0:
                 raise VerificationInputError(
                     "declared_size_bytes 必须是 None 或正 int（bool/float/负数/0 "

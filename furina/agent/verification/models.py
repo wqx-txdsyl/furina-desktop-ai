@@ -840,6 +840,31 @@ def scrub_secrets(text: str) -> str:
     return t
 
 
+_SAFE_TYPE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+#: P9-B2：类型名携带秘密关键词（即使无分隔符、scrub 不命中）→ 一律占位符。
+_TYPE_NAME_SECRET_KEYWORD_RE = re.compile(
+    r"(?i)password|passwd|secret|token|api[_\-]?key|access[_\-]?key|"
+    r"private[_\-]?key|client[_\-]?secret|authorization|credential|bearer")
+
+
+def _safe_type_name(tp: Any) -> str:
+    """P9-B2：类型名的**安全导出**——``type(x).__name__`` 可能被敌意元类做成
+    property（抛出携带秘密的异常）或直接改写成秘密形态字符串；只有取用过程
+    无异常、恰为 builtin str、词法安全、脱敏后不变且不含秘密关键词的名称才
+    进入诊断/异常消息，否则固定占位符 ``<type>``。"""
+    try:
+        name = tp.__name__
+    except Exception:
+        return "<type>"
+    if type(name) is not str or not _SAFE_TYPE_NAME_RE.match(name):
+        return "<type>"
+    if scrub_secrets(name) != name:
+        return "<type>"
+    if _TYPE_NAME_SECRET_KEYWORD_RE.search(name):
+        return "<type>"
+    return name
+
+
 def _bounded_text(text: str, cap: int) -> str:
     s = scrub_secrets(text)
     if len(s) > cap:
@@ -864,7 +889,7 @@ def validate_identity(value: Any, field_name: str) -> str:
     if type(value) is not str:
         raise VerificationInputError(
             f"{field_name} 必须是 builtin str（canonical identity），得到 "
-            f"{type(value).__name__}")
+            f"{_safe_type_name(type(value))}")
     if not _RUN_ID_PATTERN.match(value):
         raise VerificationInputError(
             f"{field_name} 词法非法（控制字符/首尾空白/非法字符拒绝，不静默 trim）: "
@@ -892,7 +917,7 @@ class TerminalObservation:
     bound: bool
 
     def __post_init__(self) -> None:
-        # P6-C + P8-B4：公开模型按**真实运行时类型**逐字段封闭——observed_at_epoch
+        # P6-C + P9-B3：公开模型按**真实运行时类型**逐字段封闭——observed_at_epoch
         # 必须是 **builtin** int/float 有限数值（bool/数值子类/NaN/Inf 拒绝——
         # 敌意子类的 __float__/比较方法零调用）、bound 必须是严格 bool。
         if type(self.observed_at_epoch) not in (int, float) \
@@ -907,13 +932,12 @@ class TerminalObservation:
                            validate_identity(self.event_id, "event_id"))
         # P4-E：kind 是公开导出字符串——16E EventKind 封闭词表，类型封闭；
         # 词表外值（含秘密形态）构造面直接拒绝，绝不脱敏后继续导出。
-        # P8-B4：只接受 **builtin str**（str 子类可重载 __hash__/__eq__ 使
-        # 词表成员判定失真）——非字符串输入绝不调用其 __str__/__hash__/
-        # __eq__（拒绝消息只用安全类型名）；合法字符串但词表外才在脱敏后
-        # 报告。
+        # P8-B4/P9-B3：只接受 **builtin str**（str 子类可重载 __hash__/__eq__
+        # 使词表成员判定失真）——非字符串输入绝不调用其 __str__/__hash__/
+        # __eq__（拒绝消息只经 _safe_type_name 给出安全类型名）。
         if type(self.kind) is not str:
             raise VerificationError(
-                f"kind 必须是 builtin str，得到 {type(self.kind).__name__}")
+                f"kind 必须是 builtin str，得到 {_safe_type_name(type(self.kind))}")
         if self.kind not in EVENT_KIND_VALUES:
             raise VerificationError(
                 f"kind 必须是 16E 封闭词表值，得到 "
@@ -947,29 +971,30 @@ class ArtifactObservation:
     content_rejection: str = ""      # 完整内容结构验证拒绝（""=通过）
 
     def __post_init__(self) -> None:
-        # P6-C：公开模型按**真实运行时类型**逐字段封闭——声明为字符串的字段
-        # 先验证确为 str（绝不把非 str 静默变成 ""）；bool 字段严格 bool；
-        # size_bytes 必须是 None 或非负 int（bool 拒绝）。异常回显只带类型名，
-        # 绝不回显字段值（raw secret 零回显）。
+        # P6-C + P9-B3：公开模型按**真实运行时类型**逐字段封闭——声明为字符串
+        # 的字段必须是 **builtin str**（str 子类一律拒绝）；bool 字段严格 bool；
+        # size_bytes 必须是 None 或非负 **builtin int**（bool/子类拒绝）。异常
+        # 回显只经 _safe_type_name 给出安全类型名，绝不回显字段值（raw secret
+        # 零回显）。
         for _name in ("claimed_path", "resolved_path", "rejection", "name_mime",
                       "content_rejection"):
-            if not isinstance(getattr(self, _name), str):
+            if type(getattr(self, _name)) is not str:
                 raise VerificationError(
-                    f"{_name} 必须是 str，得到 {type(getattr(self, _name)).__name__}")
-        if not isinstance(self.observed_mime, str) \
-                or type(self.observed_mime) is not str:
+                    f"{_name} 必须是 builtin str，得到 "
+                    f"{_safe_type_name(type(getattr(self, _name)))}")
+        if type(self.observed_mime) is not str:
             raise VerificationError(
                 f"observed_mime 必须是 builtin str，得到 "
-                f"{type(self.observed_mime).__name__}")
+                f"{_safe_type_name(type(self.observed_mime))}")
         if not isinstance(self.target_exists, bool) \
                 or not isinstance(self.is_regular_file, bool) \
                 or not isinstance(self.within_workspace, bool):
             raise VerificationError(
                 "target_exists/is_regular_file/within_workspace 必须是严格 bool")
         if self.size_bytes is not None \
-                and (isinstance(self.size_bytes, bool)
-                     or not isinstance(self.size_bytes, int) or self.size_bytes < 0):
-            raise VerificationError("size_bytes 必须是 None 或非负 int（bool 拒绝）")
+                and (type(self.size_bytes) is not int or self.size_bytes < 0):
+            raise VerificationError(
+                "size_bytes 必须是 None 或非负 builtin int（bool/子类拒绝）")
         # Patch 3 B5：artifact_id 也是公开身份字段——canonical 拒绝秘密形态，
         # 绝不清洗后继续作为身份；路径记录面统一脱敏（解析层已拒绝秘密形态
         # 路径——纵深防御）。
@@ -977,20 +1002,20 @@ class ArtifactObservation:
                            validate_identity(self.artifact_id, "artifact_id"))
         # P5-C：observed_mime 是严格格式值——封闭 MIME 词表（完整内容识别
         # 真值只可能来自 full_content_verdict 的封闭输出集），词表外值（含
-        # 秘密形态）构造面直接拒绝，绝不脱敏后继续导出。P8-B4：入口已精确
-        # builtin str（子类 __eq__/__hash__/__str__ 零调用），拒绝消息不再
-        # 包装 str()。
+        # 秘密形态）构造面直接拒绝，绝不脱敏后继续导出。P8-B4/P9-B3：入口已
+        # 精确 builtin str（子类 __eq__/__hash__/__str__ 零调用）。
         if self.observed_mime != "" and self.observed_mime not in SUPPORTED_MIME_TYPES:
             raise VerificationError(
                 f"observed_mime 必须是封闭 MIME 词表值或空，得到 "
                 f"{scrub_secrets(self.observed_mime)[:64]!r}")
         # P5-C：observed_sha256 是严格格式值——空或 64 位小写 hex。
-        # P7-D：先验证确为 str（绝不调用非字符串输入的 __eq__/__str__），
-        # 合法字符串但格式非法才在脱敏后报告。
-        if not isinstance(self.observed_sha256, str):
+        # P8-B4 + P9-B3：**exact builtin str**（reviewer 复现面：LyingStr
+        # 重载 __ne__ 使非空非法内容绕过空串比较——子类在入口即拒绝，
+        # 绝不调用其 __ne__/__eq__/__str__）。
+        if type(self.observed_sha256) is not str:
             raise VerificationError(
-                f"observed_sha256 必须是 str，得到 "
-                f"{type(self.observed_sha256).__name__}")
+                f"observed_sha256 必须是 builtin str，得到 "
+                f"{_safe_type_name(type(self.observed_sha256))}")
         if self.observed_sha256 != "" \
                 and not _SHA256_PATTERN.match(self.observed_sha256):
             raise VerificationError(
@@ -1006,7 +1031,7 @@ class ArtifactObservation:
         # （拒绝消息只用安全类型名）；合法字符串但词表外才在脱敏后报告。
         if type(self.source) is not str:
             raise VerificationError(
-                f"source 必须是 builtin str，得到 {type(self.source).__name__}")
+                f"source 必须是 builtin str，得到 {_safe_type_name(type(self.source))}")
         if self.source not in ARTIFACT_SOURCE_VALUES:
             raise VerificationError(
                 f"source 必须是 expectation|declared（类型封闭），得到 "
@@ -1032,28 +1057,29 @@ class EvidenceBundle:
     diagnostics: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        # P6-C：公开模型按**真实运行时类型**逐字段封闭——容器字段必须是
-        # tuple（向容器字段注入标量/字符串绝不静默拆解或通过）。
-        if not isinstance(self.terminal, tuple) or not isinstance(self.artifacts, tuple) \
-                or not isinstance(self.diagnostics, tuple):
-            raise VerificationError("evidence 容器字段必须是 tuple（封闭导出树）")
+        # P6-C + P9-B3：公开模型按**真实运行时类型**逐字段封闭——容器字段必须
+        # 是 **builtin tuple**（tuple 子类与标量/字符串注入一律拒绝）。
+        if type(self.terminal) is not tuple or type(self.artifacts) is not tuple \
+                or type(self.diagnostics) is not tuple:
+            raise VerificationError("evidence 容器字段必须是 builtin tuple（封闭导出树）")
         if len(self.terminal) > MAX_EVIDENCE_EVENTS:
             raise VerificationError("evidence 终态事件数量超界")
         if len(self.artifacts) > MAX_DECLARED_ARTIFACTS:
             raise VerificationError("evidence artifact 观察数量超界")
         if len(self.diagnostics) > MAX_DIAGNOSTICS:
             raise VerificationError("evidence 诊断数量超界")
-        # P5-C：封闭导出树——contract_hash 是严格格式值（64 位小写 hex），
-        # 元素类型封闭（TerminalObservation/ArtifactObservation），诊断面
-        # 必须全为 str；任何词表外/格式外值构造面直接拒绝。
-        if not isinstance(self.contract_hash, str) \
+        # P5-C + P9-B3：封闭导出树——contract_hash 是 **builtin str** 且严格
+        # 格式值（64 位小写 hex），元素类型封闭（TerminalObservation/
+        # ArtifactObservation 精确类型——子类不得进入冻结对象或导出树），
+        # 诊断面必须全为 builtin str；任何词表外/格式外值构造面直接拒绝。
+        if type(self.contract_hash) is not str \
                 or not _SHA256_PATTERN.match(self.contract_hash):
             raise VerificationError("contract_hash 必须是 64 位小写 hex")
-        if not all(isinstance(t, TerminalObservation) for t in self.terminal) \
-                or not all(isinstance(a, ArtifactObservation) for a in self.artifacts):
+        if not all(type(t) is TerminalObservation for t in self.terminal) \
+                or not all(type(a) is ArtifactObservation for a in self.artifacts):
             raise VerificationError("evidence 元素类型非法（封闭导出树）")
-        if not all(isinstance(d, str) for d in self.diagnostics):
-            raise VerificationError("diagnostics 必须全为 str（封闭导出树）")
+        if not all(type(d) is str for d in self.diagnostics):
+            raise VerificationError("diagnostics 必须全为 builtin str（封闭导出树）")
         # Patch 3 B5：公开模型身份字段走 canonical validate_identity——秘密
         # 形态/词法非法直接拒绝（绝不清洗后继续作为身份），raw secret 不可能
         # 进入 evidence digest payload / 报告导出。
@@ -1163,39 +1189,42 @@ class VerificationCheck:
         if len(kind) > 64:
             raise VerificationError("check kind 超界 64")
         object.__setattr__(self, "kind", kind)
-        # P6-C：真实运行时类型逐字段封闭——required 严格 bool、explanation
-        # 确为 str、inputs 是 (str, str) 二元组的 tuple；result 的枚举字符串
-        # 转换错误（ValueError 回显 raw value）必须捕获并脱敏。
+        # P6-C + P9-B3：真实运行时类型逐字段封闭——required 严格 bool、
+        # explanation **builtin str**、inputs 是 **builtin tuple** 且元素为
+        # **builtin tuple** 的 (builtin str, builtin str) 二元组；result 的
+        # 枚举字符串转换错误（ValueError 回显 raw value）必须捕获并脱敏；
+        # result 子类一律拒绝（exact CheckResult）。
         if not isinstance(self.required, bool):
             raise VerificationError(f"check {cid} required 必须是严格 bool")
-        if not isinstance(self.explanation, str):
+        if type(self.explanation) is not str:
             raise VerificationError(
-                f"check {cid} explanation 必须是 str，得到 "
-                f"{type(self.explanation).__name__}")
+                f"check {cid} explanation 必须是 builtin str，得到 "
+                f"{_safe_type_name(type(self.explanation))}")
         result = self.result
-        if isinstance(result, str):
+        if type(result) is str:
             try:
                 result = CheckResult(result)
             except ValueError:
                 raise VerificationError(
                     f"check {cid} result 非法: "
                     f"{scrub_secrets(result)[:64]!r}") from None
-        if not isinstance(result, CheckResult):
-            # P7-D：非字符串、非枚举的非法 result 绝不调用其 __str__/
-            # __repr__（拒绝消息只用安全类型名）。
+        if type(result) is not CheckResult:
+            # P7-D + P9-B3：非字符串、非枚举（含 CheckResult 子类）的非法
+            # result 绝不调用其 __str__/__repr__（拒绝消息只经 _safe_type_name
+            # 给出安全类型名）。
             raise VerificationError(
                 f"check {cid} result 非法（类型封闭），得到 "
-                f"{type(self.result).__name__}")
+                f"{_safe_type_name(type(self.result))}")
         object.__setattr__(self, "result", result)
-        object.__setattr__(self, "explanation", _bounded_text(self.explanation or "",
+        object.__setattr__(self, "explanation", _bounded_text(self.explanation,
                                                               MAX_EXPLANATION_CHARS))
-        if not isinstance(self.inputs, tuple):
-            raise VerificationError(f"check {cid} inputs 必须是 tuple")
+        if type(self.inputs) is not tuple:
+            raise VerificationError(f"check {cid} inputs 必须是 builtin tuple")
         frozen_inputs = []
         for pair in self.inputs:
-            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            if type(pair) is not tuple or len(pair) != 2:
                 raise VerificationError(
-                    f"check {cid} input 必须是 (键, 值) 二元组")
+                    f"check {cid} input 必须是 (键, 值) builtin tuple 二元组")
             k, v = pair
             # P8-B4：键与值都必须是 **builtin str**（type(x) is str）——非
             # 字符串值一律拒绝（P7 的"非 str 且 str() 失败才拒绝"留有
@@ -1203,7 +1232,8 @@ class VerificationCheck:
             # 该强转，拒绝消息只用安全类型名，绝不调用其 __str__/__eq__）。
             if type(k) is not str:
                 raise VerificationError(
-                    f"check {cid} input 键必须是 builtin str，得到 {type(k).__name__}")
+                    f"check {cid} input 键必须是 builtin str，得到 "
+                    f"{_safe_type_name(type(k))}")
             if not k.strip() or len(k) > 64:
                 raise VerificationError(
                     f"check {cid} input 键非法: {scrub_secrets(k)[:64]!r}")
@@ -1213,7 +1243,7 @@ class VerificationCheck:
             if type(v) is not str:
                 raise VerificationError(
                     f"check {cid} input 值必须是 builtin str（非字符串一律拒绝，"
-                    f"绝不 str() 强转），得到 {type(v).__name__}")
+                    f"绝不 str() 强转），得到 {_safe_type_name(type(v))}")
             frozen_inputs.append((k, _bounded_text(v, MAX_INPUT_VALUE_CHARS)))
         object.__setattr__(self, "inputs", tuple(frozen_inputs))
 
@@ -1241,6 +1271,11 @@ def compute_report_digest(*, report_id: str, verifier_id: str, contract_id: str,
     纯函数 —— verifier 在构造报告前用同一输入调用得到 digest 并据此签发 seal，
     ``VerificationReport.__post_init__`` 用自身字段重算；两侧必须一致。
     """
+    # P9-B3：verdict 只接受 **exact** VerificationVerdict——绝不对其余对象
+    # 调用 str() 强转（敌意 __str__ 零调用，非法输入在 digest 面即拒绝）。
+    if type(verdict) is not VerificationVerdict:
+        raise VerificationError(
+            f"verdict 必须是 VerificationVerdict，得到 {_safe_type_name(type(verdict))}")
     payload = {
         "report_id": report_id,
         "verifier_id": verifier_id,
@@ -1249,7 +1284,7 @@ def compute_report_digest(*, report_id: str, verifier_id: str, contract_id: str,
         "standard_hash": standard_hash,
         "run_id": run_id,
         "backend_id": backend_id,
-        "verdict": verdict.value if isinstance(verdict, VerificationVerdict) else str(verdict),
+        "verdict": verdict.value,
         "checks": [c.to_dict() for c in checks],
         "diagnostics": list(diagnostics),
         "evidence_digest": evidence_digest,
@@ -1291,21 +1326,23 @@ class VerificationReport:
 
     # -------------------------------------------------- 校验
     def __post_init__(self) -> None:
-        # P6-C：report_id 拒绝异常回显先脱敏——raw secret 绝不进入异常消息。
-        # P7-D：先验证确为 str（非字符串输入绝不调用其 __str__/__eq__，
-        # 拒绝消息只用安全类型名）；合法字符串词法非法才在脱敏后报告。
-        if not isinstance(self.report_id, str):
+        # P6-C + P9-B3：report_id 拒绝异常回显先脱敏——raw secret 绝不进入
+        # 异常消息。P7-D/P8-B4/P9-B3：先验证 **exact builtin str**（str 子类
+        # 一律拒绝——重载 __ne__ 无法再绕过任何空值/格式比较），非字符串输入
+        # 绝不调用其 __str__/__eq__（拒绝消息只经 _safe_type_name）。
+        if type(self.report_id) is not str:
             raise VerificationError(
-                f"report_id 必须是 str，得到 {type(self.report_id).__name__}")
+                f"report_id 必须是 builtin str，得到 "
+                f"{_safe_type_name(type(self.report_id))}")
         if not _REPORT_ID_PATTERN.match(self.report_id):
             raise VerificationError(
                 f"report_id 词法非法: {scrub_secrets(self.report_id)[:64]!r}")
         # P4-E：verifier_id 同样走 canonical validate_identity——秘密形态/
         # 词法非法（含 600 字符长秘密值）构造面直接拒绝，绝不脱敏后继续导出。
-        if not isinstance(self.verifier_id, str):
+        if type(self.verifier_id) is not str:
             raise VerificationError(
-                f"verifier_id 必须是 str（canonical identity），得到 "
-                f"{type(self.verifier_id).__name__}")
+                f"verifier_id 必须是 builtin str（canonical identity），得到 "
+                f"{_safe_type_name(type(self.verifier_id))}")
         validate_identity(self.verifier_id, "verifier_id")
         # Patch 3 B5：公开身份字段（contract_id/run_id/backend_id）走 canonical
         # validate_identity——秘密形态直接拒绝，to_dict()/to_json() 因此不可能
@@ -1315,10 +1352,10 @@ class VerificationReport:
         validate_identity(self.backend_id, "backend_id")
         for name in ("contract_hash", "standard_hash"):
             v = getattr(self, name)
-            if not isinstance(v, str) or not _SHA256_PATTERN.match(v):
+            if type(v) is not str or not _SHA256_PATTERN.match(v):
                 raise VerificationError(f"{name} 必须是 64 位小写 hex")
         verdict = self.verdict
-        if isinstance(verdict, str):
+        if type(verdict) is str:
             # P6-C：枚举字符串转换错误（ValueError 回显 raw value）必须捕获
             # 并脱敏——raw secret 绝不进入异常消息。
             try:
@@ -1326,34 +1363,36 @@ class VerificationReport:
             except ValueError:
                 raise VerificationError(
                     f"verdict 非法: {scrub_secrets(verdict)[:64]!r}") from None
-        if not isinstance(verdict, VerificationVerdict):
-            # P7-D：非字符串、非枚举的非法 verdict 绝不调用其 __str__/
-            # __repr__（拒绝消息只用安全类型名）。
+        if type(verdict) is not VerificationVerdict:
+            # P7-D + P9-B3：非字符串、非枚举（含子类）的非法 verdict 绝不调用
+            # 其 __str__/__repr__（拒绝消息只经 _safe_type_name）。
             raise VerificationError(
-                f"verdict 非法（类型封闭），得到 {type(self.verdict).__name__}")
+                f"verdict 非法（类型封闭），得到 {_safe_type_name(type(self.verdict))}")
         object.__setattr__(self, "verdict", verdict)
 
-        # P6-C：真实运行时类型逐字段封闭——checks/diagnostics 容器类型与元素
-        # 类型构造面拒绝（绝不静默丢弃或拆解非 str 诊断）。
-        if not isinstance(self.checks, (tuple, list)):
-            raise VerificationError("checks 必须是 tuple/list（封闭导出树）")
+        # P6-C + P9-B3：容器类型与元素类型构造面拒绝（容器接受 builtin
+        # tuple/list、元素 exact VerificationCheck / builtin str——子类不得
+        # 进入冻结对象或导出树；绝不静默丢弃或拆解）。
+        if type(self.checks) not in (tuple, list):
+            raise VerificationError("checks 必须是 builtin tuple/list（封闭导出树）")
         checks = tuple(self.checks)
-        if not all(isinstance(c, VerificationCheck) for c in checks):
+        if not all(type(c) is VerificationCheck for c in checks):
             raise VerificationError("checks 必须全部是 VerificationCheck")
         if len(checks) > MAX_REPORT_CHECKS:
             raise VerificationError("报告检查数量超界")
         object.__setattr__(self, "checks", checks)
-        if not isinstance(self.diagnostics, (tuple, list)):
-            raise VerificationError("diagnostics 必须是 tuple/list（封闭导出树）")
-        if not all(isinstance(d, str) for d in self.diagnostics):
-            raise VerificationError("diagnostics 必须全为 str（封闭导出树）")
+        if type(self.diagnostics) not in (tuple, list):
+            raise VerificationError("diagnostics 必须是 builtin tuple/list（封闭导出树）")
+        if not all(type(d) is str for d in self.diagnostics):
+            raise VerificationError("diagnostics 必须全为 builtin str（封闭导出树）")
         diags = tuple(_bounded_text(d, MAX_DIAGNOSTIC_CHARS) for d in self.diagnostics
                       if d.strip())
         if len(diags) > MAX_DIAGNOSTICS:
             diags = diags[:MAX_DIAGNOSTICS]
         object.__setattr__(self, "diagnostics", diags)
 
-        if not isinstance(self.evidence, EvidenceBundle):
+        # P9-B3：evidence 必须 exact EvidenceBundle（子类不得冒充）。
+        if type(self.evidence) is not EvidenceBundle:
             raise VerificationError("evidence 必须是 EvidenceBundle")
         if self.evidence.contract_id != self.contract_id \
                 or self.evidence.contract_hash != self.contract_hash \
@@ -1363,7 +1402,7 @@ class VerificationReport:
 
         for name in ("started_at_epoch", "finished_at_epoch"):
             v = getattr(self, name)
-            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+            if type(v) not in (int, float) \
                     or not math.isfinite(float(v)):
                 raise VerificationError(f"{name} 必须是有限数值")
         if float(self.started_at_epoch) > float(self.finished_at_epoch):
@@ -1382,14 +1421,16 @@ class VerificationReport:
         )
         object.__setattr__(self, "report_digest", digest)
 
-        # P7-C：authority_seal 按真实运行时类型封闭——**所有 verdict** 下先
-        # 验证为 str（0/False/None/空容器/falsey 自定义对象一律拒绝——绝不
-        # 因 truthiness 通过，绝不调用其 __str__/__bool__）；VERIFIED：严格
-        # 64 位小写 hex；非 VERIFIED：必须精确等于 ""。
-        if not isinstance(self.authority_seal, str):
+        # P7-C + P9-B3：authority_seal 按真实运行时类型封闭——**所有 verdict**
+        # 下先验证为 **exact builtin str**（0/False/None/空容器/falsey 自定义
+        # 对象/str 子类一律拒绝——reviewer 复现面：LyingStr 重载 __ne__ 返回
+        # False 使非空非法 seal 绕过空值比较并从 to_dict 导出——子类在入口
+        # 即拒绝，绝不因 truthiness 通过、绝不调用其 __str__/__bool__/__ne__）；
+        # VERIFIED：严格 64 位小写 hex；非 VERIFIED：必须精确等于 ""。
+        if type(self.authority_seal) is not str:
             raise VerificationAuthorityError(
-                f"authority_seal 必须是 str，得到 "
-                f"{type(self.authority_seal).__name__}")
+                f"authority_seal 必须是 builtin str，得到 "
+                f"{_safe_type_name(type(self.authority_seal))}")
         if verdict is VerificationVerdict.VERIFIED:
             if self.verifier_id != VERIFIER_ID:
                 raise VerificationAuthorityError(

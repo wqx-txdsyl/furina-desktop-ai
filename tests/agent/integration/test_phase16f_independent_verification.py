@@ -746,6 +746,7 @@ def test_repair_succeeds_only_after_fresh_evidence(env):
         return _submission(c, run_id, declared=[_declared(art, sha_hex=good_sha)])
 
     loop = BoundedRepairLoop(contract=c, verifier=v, collect_evidence=collector2,
+                             now_fn=FakeClock(500.0),
                              boundary_snapshot=_BoundarySource(c).snapshot)
     out = loop.run()
     assert out.stop_reason is RepairStopReason.VERIFIED
@@ -3821,11 +3822,15 @@ def test_p5_a_unprovable_snapshot_fail_closed(env):
     final_report=None，VERIFIED 绝不成为成功结果。"""
     tmp, work, work_real, outside, outside_real = env
     (work_real / "summary.md").write_bytes(b"ok")
+    # P9-B4 时钟协议适配：repair 时钟（FakeClock 990）与快照时钟（now=1000）
+    # 同一可比时间轴——快照 now ∈ [可信时钟, deadline]，时钟回退否证只考察
+    # 快照内部两次读取的单调性（语义断言零改动）。
     # (a) 权威读取内快照源回调抛异常 → 传播 → UNSTABLE_BOUNDARY
     c = _contract(work_real, contract_id="wc_16f_p5a_g_0001", budget=ExecutionBudget(
         max_duration_seconds=15.0, cost_limit=CostBudget(amount=5.0), max_attempts=5))
     out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
                             collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            now_fn=FakeClock(990.0),
                             boundary_snapshot=_BoundarySource(
                                 c, fail_reads=(2,)).snapshot).run()
     assert out.attempts[0].verdict == "VERIFIED"
@@ -3838,6 +3843,7 @@ def test_p5_a_unprovable_snapshot_fail_closed(env):
     c2 = _verified_summary_contract(work_real, "wc_16f_p5a_h_0001")
     out2 = BoundedRepairLoop(contract=c2, verifier=IndependentVerifier(c2),
                              collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+                             now_fn=FakeClock(990.0),
                              boundary_snapshot=_BoundarySource(
                                  c2, bump_on_read=(2,)).snapshot).run()
     assert out2.attempts[0].verdict == "VERIFIED"
@@ -3854,6 +3860,7 @@ def test_p5_a_unprovable_snapshot_fail_closed(env):
 
     out3 = BoundedRepairLoop(contract=c3, verifier=IndependentVerifier(c3),
                              collect_evidence=lambda a, r: _ok_summary_submission(c3, r),
+                             now_fn=FakeClock(990.0),
                              boundary_snapshot=_BoundarySource(
                                  c3, on_read=now_backwards).snapshot).run()
     assert out3.attempts[0].verdict == "VERIFIED"
@@ -3870,6 +3877,7 @@ def test_p5_a_unprovable_snapshot_fail_closed(env):
 
     out4 = BoundedRepairLoop(contract=c4, verifier=IndependentVerifier(c4),
                              collect_evidence=lambda a, r: _ok_summary_submission(c4, r),
+                             now_fn=FakeClock(990.0),
                              boundary_snapshot=_BoundarySource(
                                  c4, on_read=swap_contract).snapshot).run()
     assert out4.attempts[0].verdict == "VERIFIED"
@@ -4784,7 +4792,8 @@ def test_p7_c_exact_immutable_snapshot_positive(env):
     out = BoundedRepairLoop(
         contract=c, verifier=IndependentVerifier(c),
         collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-        boundary_snapshot=source).run()
+        now_fn=FakeClock(100.0),           # P9-B4 时钟协议适配：快照 now(500)
+        boundary_snapshot=source).run()    # ∈ [可信时钟 100, deadline 700]
     assert out.stop_reason is RepairStopReason.VERIFIED
     assert out.final_report is not None
     assert out.finished_at_epoch == 500.0
@@ -5374,6 +5383,7 @@ def test_p8_b2_builtin_int_inputs_normalized_still_verifies(env):
 
     out = BoundedRepairLoop(contract=c, verifier=IndependentVerifier(c),
                             collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+                            now_fn=FakeClock(100.0),   # P9-B4 时钟协议适配
                             boundary_snapshot=source).run()
     assert out.stop_reason is RepairStopReason.VERIFIED
     assert out.final_report is not None
@@ -5646,3 +5656,484 @@ def test_p8_b4_check_input_non_string_value_rejected():
         VerificationCheck(check_id="check_p8b4_v_0002", kind="artifact_file_exists",
                           required=True, result=CheckResult.PASS,
                           inputs=((123, "x"),))
+
+
+# ================================================================
+# Reviewer Patch 9 — B1 optional callback is-None / B2 敌意异常属性观察 /
+# B3 公开值模型 exact-builtin 全扫描 / B4 时钟防回退（reviewer-locked）
+# ================================================================
+
+class _P9FalseyCallable:
+    """__bool__ 返回 False 的可调用对象（P9-B1：不得被 `or` 静默替换）。"""
+
+    def __init__(self, result):
+        self._result = result
+        self.calls = 0
+        self.bools = 0
+
+    def __bool__(self):
+        self.bools += 1
+        return False
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return self._result
+
+
+class _P9BoolBoom:
+    """__bool__ 主动抛出携密异常的可调用对象（P9-B1：构造与运行零触发）。"""
+
+    def __init__(self, result=False):
+        self._result = result
+        self.bools = 0
+
+    def __bool__(self):
+        self.bools += 1
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    def __call__(self, *args, **kwargs):
+        return self._result
+
+
+class _P9ArgsBoom(Exception):
+    """P9-B2 reviewer 反例：``args`` 是 property，访问即抛携密 RuntimeError。"""
+
+    def __init__(self):
+        super().__init__("static-marker")
+
+    @property
+    def args(self):          # 敌意形态本体：数据描述符优先于实例字典
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+
+def _p9_lying(value, calls):
+    """按基底值的 builtin 类型构造对应"谎言子类"实例——比较/转换/迭代/长度
+    方法全部计数并撒谎（P9-B3：子类在拒绝前任何魔术方法都必须零调用）。
+    bool 不可子类化、枚举字段另行覆盖——返回 None 表示跳过。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        class _LyingStr(str):
+            def __eq__(s, o):
+                calls["eq"] = calls.get("eq", 0) + 1
+                return False
+
+            def __ne__(s, o):
+                calls["ne"] = calls.get("ne", 0) + 1
+                return False
+
+            def __hash__(s):
+                calls["hash"] = calls.get("hash", 0) + 1
+                return str.__hash__(s)
+
+            def __str__(s):
+                calls["str"] = calls.get("str", 0) + 1
+                return "x"
+
+            def __bool__(s):
+                calls["bool"] = calls.get("bool", 0) + 1
+                return False
+        return _LyingStr(value)
+    if isinstance(value, tuple):
+        class _LyingTuple(tuple):
+            def __iter__(s):
+                calls["iter"] = calls.get("iter", 0) + 1
+                return iter(())
+
+            def __len__(s):
+                calls["len"] = calls.get("len", 0) + 1
+                return 0
+
+            def __eq__(s, o):
+                calls["eq"] = calls.get("eq", 0) + 1
+                return False
+
+            def __bool__(s):
+                calls["bool"] = calls.get("bool", 0) + 1
+                return False
+        return _LyingTuple(value)
+    if isinstance(value, int):
+        class _LyingInt(int):
+            def __lt__(s, o):
+                calls["cmp"] = calls.get("cmp", 0) + 1
+                return False
+
+            def __gt__(s, o):
+                calls["cmp"] = calls.get("cmp", 0) + 1
+                return False
+
+            def __float__(s):
+                calls["float"] = calls.get("float", 0) + 1
+                return 0.0
+
+            def __eq__(s, o):
+                calls["eq"] = calls.get("eq", 0) + 1
+                return False
+        return _LyingInt(value)
+    if isinstance(value, float):
+        class _LyingFloat(float):
+            def __lt__(s, o):
+                calls["cmp"] = calls.get("cmp", 0) + 1
+                return False
+
+            def __gt__(s, o):
+                calls["cmp"] = calls.get("cmp", 0) + 1
+                return False
+
+            def __float__(s):
+                calls["float"] = calls.get("float", 0) + 1
+                return 0.0
+
+            def __eq__(s, o):
+                calls["eq"] = calls.get("eq", 0) + 1
+                return False
+        return _LyingFloat(value)
+    return None
+
+
+def test_p9_b1_falsey_cancel_callable_not_replaced(env):
+    """P9-B1 锁定（reviewer 反例）：falsey callable 的 __call__ 返回 True
+    （取消）——旧实现 `cancel_requested or default` 调用其 __bool__ 后把它
+    静默替换为默认函数（结果 ATTEMPTS_EXHAUSTED 且烧掉 1 次 attempt）；新
+    实现必须 CANCELLED、零 attempt、__bool__ 零调用。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p9b1_cnl_0001")
+    cancel = _P9FalseyCallable(True)
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cancel_requested=cancel).run()
+    assert out.stop_reason is RepairStopReason.CANCELLED
+    assert len(out.attempts) == 0 and out.final_report is None
+    assert cancel.calls >= 1 and cancel.bools == 0
+
+
+def test_p9_b1_falsey_run_id_factory_actually_called(env):
+    """P9-B1 锁定：falsey run_id_factory 必须被真实调用（绝不换成默认
+    factory）——其产出 run_id 原样进入 attempt 记录。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p9b1_fac_0001")
+    factory = _P9FalseyCallable("run_p9_falsey_factory_0001")
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        run_id_factory=factory, now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.attempts[0].run_id == "run_p9_falsey_factory_0001"
+    assert factory.calls == 1 and factory.bools == 0
+
+
+def test_p9_b1_bool_boom_callable_never_triggered(env):
+    """P9-B1 锁定：__bool__ 主动抛携密异常的 callable 在构造与运行全程零
+    触发——optional 回调只经 is None 判定、经 __call__ 调用。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p9b1_boom_0001")
+    boom = _P9BoolBoom(result=False)
+    loop = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        cancel_requested=boom, now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot)
+    assert boom.bools == 0
+    out = loop.run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert boom.bools == 0
+
+
+def test_p9_b2_hostile_args_property_cannot_escape(env):
+    """P9-B2 reviewer 反例锁定：args 为 property（访问即抛携密 RuntimeError）
+    的异常从 collect / approval / cancel / boundary source 四个入口注入 →
+    全部类型化 fail-closed——诊断零 args 观察、零秘密、零异常逃逸。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=1))
+    v = IndependentVerifier(c)
+    # (a) collect 抛敌意 args 异常 → 有界失败收尾（不逃逸、零秘密）
+    def boom_collect(attempt_id, run_id):
+        raise _P9ArgsBoom()
+
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=boom_collect).run()
+    assert out.stop_reason is RepairStopReason.ATTEMPTS_EXHAUSTED
+    blob = out.diagnostic + (out.attempts[0].diagnostic if out.attempts else "")
+    assert _P8_SECRET not in blob and "leak:" not in blob
+
+    # (b) approval 回调抛敌意 args 异常 → APPROVAL_DENIED 静态 fail-closed
+    def boom_authority(attempt_id, run_id):
+        raise _P9ArgsBoom()
+
+    out2 = BoundedRepairLoop(contract=c, verifier=v,
+                             collect_evidence=lambda a, r: _submission(c, r),
+                             approval_authority=boom_authority).run()
+    assert out2.stop_reason is RepairStopReason.APPROVAL_DENIED
+    assert _P8_SECRET not in out2.diagnostic and "leak:" not in out2.diagnostic
+
+    # (c) cancel 回调抛敌意 args 异常 → UNSTABLE_BOUNDARY（绝不当作 False）
+    def boom_cancel():
+        raise _P9ArgsBoom()
+
+    out3 = BoundedRepairLoop(contract=c, verifier=v,
+                             collect_evidence=lambda a, r: _submission(c, r),
+                             cancel_requested=boom_cancel).run()
+    assert out3.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert _P8_SECRET not in out3.diagnostic and "leak:" not in out3.diagnostic
+
+    # (d) 权威快照源抛敌意 args 异常 → UNSTABLE_BOUNDARY（零秘密）
+    def boom_snap():
+        raise _P9ArgsBoom()
+
+    c9 = _verified_summary_contract(work_real, "wc_16f_p9b2_snap_0001")
+    out4 = BoundedRepairLoop(contract=c9, verifier=IndependentVerifier(c9),
+                             collect_evidence=lambda a, r: _ok_summary_submission(c9, r),
+                             boundary_snapshot=boom_snap).run()
+    assert out4.attempts[0].verdict == "VERIFIED"
+    assert out4.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert "boundary_snapshot_error" in out4.diagnostic
+    assert _P8_SECRET not in out4.diagnostic and "leak:" not in out4.diagnostic
+
+
+def test_p9_b2_hostile_exception_class_name_sanitized():
+    """P9-B2 锁定：动态异常类名未经清洗不得进入诊断——元类把 __name__ 做成
+    抛密 property → 占位符；类名字面携带秘密 token → 占位符。"""
+    from furina.agent.verification.repair import _safe_exc_diag
+
+    class _P9Meta(type):
+        @property
+        def __name__(cls):
+            raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    class _BoomName(Exception, metaclass=_P9Meta):
+        pass
+
+    d1 = _safe_exc_diag(_BoomName("x"))
+    assert _P8_SECRET not in d1 and "leak:" not in d1
+
+    _SecretNamed = type("token_abc123_secret", (Exception,), {})
+    d2 = _safe_exc_diag(_SecretNamed("x"))
+    assert "token_abc123_secret" not in d2
+    assert "abc123" not in d2
+
+
+def test_p9_b3_lying_str_authority_seal_rejected():
+    """P9-B3 reviewer 反例锁定：FAILED 报告的 authority_seal 注入重载
+    __ne__ 的非空 LyingStr → 构造拒绝（VerificationAuthorityError），
+    __ne__/__eq__ 零调用——非空内容绝不进入导出树。"""
+    from furina.agent.verification import VerificationReport
+    calls = {}
+    lying = _p9_lying("f" * 64, calls)
+    kw = dict(_p6_base_kwargs()[VerificationReport])
+    kw["authority_seal"] = lying
+    with pytest.raises(VerificationError):
+        VerificationReport(**kw)
+    assert calls == {}
+
+
+def test_p9_b3_lying_str_observed_sha256_rejected():
+    """P9-B3 reviewer 反例锁定：observed_sha256 注入 LyingStr → 构造拒绝、
+    比较魔术方法零调用（绝不从 to_dict/digest 导出）。"""
+    from furina.agent.verification import ArtifactObservation
+    calls = {}
+    base = dict(source="expectation", artifact_id="doc", claimed_path="/p/a.md",
+                resolved_path="/p/a.md", target_exists=True, is_regular_file=True,
+                within_workspace=True, size_bytes=3, observed_mime="text/plain",
+                observed_sha256=_p9_lying("0" * 64, calls), rejection="")
+    with pytest.raises(VerificationError):
+        ArtifactObservation(**base)
+    assert calls == {}
+
+
+def test_p9_b3_hostile_verdict_str_zero_calls():
+    """P9-B3 锁定：非法 verdict（敌意对象）——compute_report_digest 绝不
+    str() 强转（构造面在 digest 之前拒绝）、__str__/__repr__ 零调用。"""
+    from furina.agent.verification import VerificationReport
+    hostile = _P8Hostile(_P8_SECRET)
+    kw = dict(_p6_base_kwargs()[VerificationReport])
+    kw["verdict"] = hostile
+    with pytest.raises(VerificationError) as ei:
+        VerificationReport(**kw)
+    assert hostile.calls["str"] == 0 and hostile.calls["repr"] == 0
+    assert _P8_SECRET not in str(ei.value)
+
+
+def test_p9_b3_hostile_diagnostic_zero_calls():
+    """P9-B3 锁定：AttemptRecord/RepairOutcome 的 diagnostic 注入 falsey
+    敌意对象 → 构造拒绝（绝不 `value or ""` truthiness）、__bool__/__str__
+    零调用。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    hostile = _P8Hostile(_P8_SECRET)
+    with pytest.raises(VerificationError):
+        AttemptRecord(attempt_id="att_p9_diag_0001", run_id="run_p9_diag_0001",
+                      contract_hash="0" * 64, verdict="", report_id="",
+                      failure_signature="", started_at_epoch=1.0,
+                      finished_at_epoch=2.0, diagnostic=hostile)
+    assert hostile.calls["bool"] == 0 and hostile.calls["str"] == 0
+    with pytest.raises(VerificationError):
+        RepairOutcome(stop_reason=RepairStopReason.ATTEMPTS_EXHAUSTED,
+                      contract_id="wc_16f_p9_diag_0001", contract_hash="0" * 64,
+                      attempts=(), final_report=None, started_at_epoch=1.0,
+                      finished_at_epoch=2.0, diagnostic=hostile)
+    assert hostile.calls["bool"] == 0 and hostile.calls["str"] == 0
+
+
+def test_p9_b3_exact_builtin_subclass_matrix():
+    """P9-B3 系统审计锁定：七个公开冻结值模型逐字段注入对应 builtin 类型的
+    "谎言子类"——构造一律拒绝（report_digest 派生字段除外：无条件重算、
+    零泄漏），且任何魔术方法在拒绝之前零调用。"""
+    import dataclasses as _dc
+
+    from furina.agent.verification import (
+        ArtifactObservation,
+        EvidenceBundle,
+        TerminalObservation,
+        VerificationCheck,
+        VerificationReport,
+    )
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+
+    bases = dict(_p6_base_kwargs())
+    bases[AttemptRecord] = dict(
+        attempt_id="att_p9m_0001", run_id="run_p9m_0001", contract_hash="0" * 64,
+        verdict="FAILED", report_id="", failure_signature="1" * 64,
+        started_at_epoch=1.0, finished_at_epoch=2.0, diagnostic="")
+    bases[RepairOutcome] = dict(
+        stop_reason=RepairStopReason.ATTEMPTS_EXHAUSTED,
+        contract_id="wc_16f_p9m_0001", contract_hash="0" * 64, attempts=(),
+        final_report=None, started_at_epoch=1.0, finished_at_epoch=2.0,
+        diagnostic="")
+    for model, base in bases.items():
+        for f in _dc.fields(model):
+            base_val = base.get(f.name)
+            if base_val is None and f.name == "authority_seal":
+                base_val = ""                 # 缺省字段按 str 契约注入子类
+            calls = {}
+            lying = _p9_lying(base_val, calls)
+            if lying is None:
+                continue                      # bool（不可子类化）/None/枚举派生
+            kw = dict(base)
+            kw[f.name] = lying
+            try:
+                obj = model(**kw)
+            except VerificationError:
+                assert calls == {}, (model.__name__, f.name, calls)
+                continue
+            # 仅派生字段（report_digest——__post_init__ 无条件重算）可构造成功
+            assert calls == {}, (model.__name__, f.name, calls)
+            if hasattr(obj, "to_dict"):
+                assert lying not in str(obj.to_dict())
+
+
+def test_p9_b4_lock_a_construct_100_run_0_never_verified(env):
+    """P9-B4 锁定 A：构造期时钟 100、run 起点时钟 0（回退）→ UNSTABLE_
+    BOUNDARY / final_report=None / 零 attempt——绝不 VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p9b4_a_0001")
+    reads = {"n": 0}
+
+    def now_fn():
+        reads["n"] += 1
+        return 100.0 if reads["n"] == 1 else 0.0
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=now_fn,
+        boundary_snapshot=_BoundarySource(c, cost=0.0, now=0.0).snapshot).run()
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None and len(out.attempts) == 0
+    assert "clock_read_failed" in out.diagnostic
+
+
+def test_p9_b4_lock_b_mid_attempt_regression_unstable(env):
+    """P9-B4 锁定 B：attempt 中途时钟回退（attempt_finished=100 之后新鲜
+    时间 50）→ UNSTABLE_BOUNDARY / final_report=None / 不启动下一 attempt。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=3))
+    v = IndependentVerifier(c)
+    seq = [0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 50.0]
+
+    def now_fn():
+        return seq.pop(0) if seq else 0.0
+
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=_failing_collector(c, distinct=True),
+                            now_fn=now_fn).run()
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None and len(out.attempts) == 1
+    assert "clock_regressed" in out.diagnostic
+
+
+def test_p9_b4_lock_c_final_snapshot_now_regressed_never_verified(env):
+    """P9-B4 锁定 C：repair 时钟正常但最终 BoundarySnapshot.now 早于最后
+    可信时钟（回退）→ UNSTABLE_BOUNDARY / 绝不 VERIFIED；见证读取即拦截、
+    零第二读取。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p9b4_c_0001")
+    clock = FakeClock(1000.0)
+    src = _BoundarySource(c, cost=0.0, now=0.0)     # 快照时钟回退到 0
+    out = BoundedRepairLoop(
+        contract=c, verifier=IndependentVerifier(c),
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=clock, boundary_snapshot=src.snapshot).run()
+    assert out.attempts[0].verdict == "VERIFIED"
+    assert out.stop_reason is RepairStopReason.UNSTABLE_BOUNDARY
+    assert out.final_report is None
+    assert "clock_regressed" in out.diagnostic
+    assert src.reads == 1
+
+
+def test_p9_b4_lock_d_verifier_finished_before_started_rejected(env):
+    """P9-B4 锁定 D：verifier finished < started → 类型化拒绝、零报告零
+    seal。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p9b4_d_0001")
+    seq = [100.0, 50.0]
+
+    def now_fn():
+        return seq.pop(0) if seq else 0.0
+
+    v = IndependentVerifier(c, now_fn=now_fn)
+    with pytest.raises(VerificationError) as ei:
+        v.verify(_ok_summary_submission(c, "run_p9b4_d_0001"))
+    assert "verifier_clock_regressed" in str(ei.value)
+
+
+def test_p9_b4_lock_e_process_timeout_subclass_rejected(env):
+    """P9-B4 锁定 E：process_timeout_seconds 注入数值子类 → 构造拒绝且其
+    __float__/比较/__bool__ 魔术方法零调用（错误消息零 repr）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    calls = {"n": 0}
+
+    class _LyingFloat(float):
+        def __float__(self):
+            calls["n"] += 1
+            return 30.0
+
+        def __gt__(self, other):
+            calls["n"] += 1
+            return False
+
+        def __lt__(self, other):
+            calls["n"] += 1
+            return False
+
+        def __ge__(self, other):
+            calls["n"] += 1
+            return False
+
+        def __le__(self, other):
+            calls["n"] += 1
+            return False
+
+        def __bool__(self):
+            calls["n"] += 1
+            return True
+
+    with pytest.raises(VerificationError) as ei:
+        IndependentVerifier(c, process_timeout_seconds=_LyingFloat(30.0))
+    assert calls["n"] == 0
+    # 错误消息零 repr：清洗后的类型名（安全词法 token）可出现，但对象值
+    # （30.0）与动态消息绝不出现
+    assert "30.0" not in str(ei.value)

@@ -230,6 +230,126 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.0000000 Patch 9 回执（Reviewer Patch 9 专用）
+
+```text
+BASE_SHA                         = 2cad267e82dc7359a2ed0cefb4500977dcaf4605
+                                   （PATCH8_FINAL_SHA；Patch 9 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+BRANCH                           = feature/phase16-16f-independent-verification-
+                                   patch2-clean
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–8 惯例）
+CHANGED_FILES                    = furina/agent/verification/models.py,
+                                   repair.py, verifier.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（checks.py/__init__.py 零改动）
+OPTIONAL_CALLBACK_TRUTHINESS_USED = false（B1：BoundedRepairLoop 内全部
+                                   optional callback/default 赋值审计——
+                                   cancel_requested / run_id_factory 由
+                                   `callback or default` 改为 `is None` 判定
+                                   （falsey callable 不再被静默替换、其
+                                   __bool__ 绝不触发）；approval_authority/
+                                   cost_used/boundary_snapshot 本就直接赋值
+                                   + is None 判定。锁定：falsey cancel
+                                   callable __call__ 返回 True → CANCELLED、
+                                   零 attempt（reviewer 反例旧实现
+                                   ATTEMPTS_EXHAUSTED + 烧 1 attempt）；
+                                   falsey run_id_factory 真实调用且其产出
+                                   run_id 进入记录；__bool__ 抛携密异常的
+                                   callable 构造与运行全程零触发）
+HOSTILE_EXCEPTION_ATTRIBUTES_OBSERVED = false（B2：_safe_exc_diag 重写——
+                                   绝不对不可信异常 getattr(args)/str()/
+                                   repr()/bool()（args property 劫持通道
+                                   关闭）；仅 exact 白名单类型
+                                   VerificationError/VerificationInputError/
+                                   HardBackendFailure 经直接属性访问导出
+                                   脱敏静态码；其余外部异常固定
+                                   external_exception 安全码 + _safe_type_name
+                                   清洗类型名（词法安全 + 脱敏不变 + 秘密
+                                   关键词黑名单，否则 <type> 占位符——元类
+                                   __name__ property 与秘密形态类名均被
+                                   清洗）；诊断全程 try/except 包裹零逃逸。
+                                   锁定：args property 抛密异常从 collect/
+                                   approval/cancel/boundary source 四入口
+                                   注入全部 fail-closed；敌意元类与秘密
+                                   类名零泄漏；repair.py 全部 {type(x).
+                                   __name__} 插值改经 _safe_type_name）
+EXPORTED_MODELS_EXACT_BUILTINS   = true（B3：七个公开冻结值模型系统审计——
+                                   TerminalObservation/ArtifactObservation/
+                                   EvidenceBundle/VerificationCheck/
+                                   VerificationReport/AttemptRecord/
+                                   RepairOutcome 全部字符串/数值/容器字段
+                                   按 exact builtin 类型封闭（str/int/
+                                   float/tuple/list 子类不得进入冻结对象或
+                                   导出树）；authority_seal 与 observed_
+                                   sha256 改 type(x) is str（reviewer 的
+                                   LyingStr __ne__ 绕过面关闭）；AttemptRecord/
+                                   RepairOutcome 字符串字段与 diagnostic
+                                   exact str（绝不 `value or ""` truthiness）；
+                                   compute_report_digest verdict 仅接受
+                                   exact VerificationVerdict（str() 强转
+                                   删除）；合法 builtin 输入保持兼容）
+STR_SUBCLASS_SECRET_EXPORT       = false（锁定：LyingStr 非空 authority_seal
+                                   不得进入 FAILED/INCONCLUSIVE 报告；
+                                   LyingStr observed_sha256 不得构造或导出；
+                                   hostile verdict __str__ 零调用；falsey
+                                   hostile diagnostic __bool__/__str__ 零
+                                   调用；七模型逐字段"谎言子类"矩阵——构造
+                                   拒绝发生在任何魔术方法调用之前）
+CLOCK_REGRESSION_BLOCKED         = true（B4：_read_clock 从构造期第一次读
+                                   钟起维护最后可信时间——任何后续读取早于
+                                   可信值 → clock_regressed → UNSTABLE_
+                                   BOUNDARY / final_report=None / 不启动
+                                   下一 attempt；VERIFIED 最终 BoundarySnapshot
+                                   .now 早于最后可信时钟 → clock_regressed
+                                   （见证读取即拦截、零第二读取）；快照两次
+                                   读取间单调性检查保留；时钟回退不得延长
+                                   预算或产生 VERIFIED。锁定 A：构造 100 →
+                                   run 0 不能 VERIFIED；B：attempt 中途
+                                   回退 → UNSTABLE_BOUNDARY；C：快照 now
+                                   回退 → 绝不 VERIFIED）
+VERIFIER_TIME_STRICT             = true（B4：IndependentVerifier started/
+                                   finished 统一 _strict_now 严格入口——
+                                   exact builtin int/float、finite、
+                                   finished >= started 否则类型化拒绝零
+                                   seal；process_timeout_seconds exact
+                                   builtin、finite、范围封闭——数值子类
+                                   拒绝且魔术方法零调用、错误消息零 repr）
+OLD_TESTS_PRESERVED              = true（228 项既有专项测试全保留——P8 的
+                                   33 项与 P1–P7 全部否证零弱化、零 skip、
+                                   零 xfail；5 处时钟 setup 按可比时间轴
+                                   协议适配（语义断言零改动））
+NEW_P9_TESTS                     = 15 项（B1 falsey cancel/factory/bool-
+                                   boom + B2 敌意 args property 四入口/敌意
+                                   类名清洗 + B3 LyingStr authority_seal/
+                                   observed_sha256/hostile verdict/hostile
+                                   diagnostic/七模型子类矩阵 + B4 锁定
+                                   A–E）
+TARGETED                         = 243 passed / 0 failed / 0 skipped（16F 专项：
+                                   原 228 全保留 + 15 项 P9 reviewer-locked
+                                   否证/正例；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 650 passed（tests/agent 全目录一次；
+                                   = Patch 8 基线 635 + P9 新增 15）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1932 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 243 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；本补丁全部测试尝试零 flaky 零
+                                   重跑）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 models.py + repair.py +
+                                   verifier.py + 1 测试文件 + 本 closeout
+                                   ——16A–16E frozen contracts 与 C1–C7 零
+                                   改动，checks.py/__init__.py 零改动）
+GIT_DIFF_CHECK                   = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+STATUS                           = READY_FOR_REVIEW
+```
+
 ## 0.000000 Patch 8 回执（Reviewer Patch 8 专用）
 
 ```text
