@@ -230,6 +230,111 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.000000000 Patch 11 回执（Reviewer Patch 11 专用）
+
+**权限声明（任务书要求明确）：RepairOutcome 只负责结构绑定，不是第二验证
+权威——16G 未来只能依据 IndependentVerifier.outcome_is_authentic() 这一
+verifier-owned fail-closed API 晋升 outcome，不得只看 stop_reason 或
+final_report.verdict。**
+
+```text
+BASE_SHA                         = 651e341af83f24b5237a4295cbea723a8610a324
+                                   （PATCH10_FINAL_SHA；Patch 11 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+BRANCH                           = feature/phase16-16f-independent-verification-
+                                   patch2-clean
+MODEL                            = GLM-5.3-Flash（任务书推荐模型）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–10 惯例）
+CHANGED_FILES                    = furina/agent/verification/repair.py,
+                                   verifier.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（models.py/__init__.py/
+                                   checks.py 零改动）
+OUTCOME_FULL_IDENTITY_BOUND      = true（B1：final_report 非 None 时（无论
+                                   stop_reason）与终局/最后 attempt 完整身份
+                                   绑定——contract_id、contract_hash、
+                                   run_id、report_id、verdict 全部一致；
+                                   携带 final_report 必须包含最后 attempt；
+                                   最后 attempt 契约 hash 与终局一致。锁定：
+                                   真实报告 + 跨 contract_id → 构造拒绝）
+VERIFIED_OUTCOME_AUTHENTICATED_BY_VERIFIER = true（B1：新增公开 fail-closed
+                                   IndependentVerifier.outcome_is_authentic()
+                                   ——只接受 exact RepairOutcome，验证
+                                   stop_reason==VERIFIED + 当前 verifier 契约
+                                   身份/standard_hash + final_report 与最后
+                                   attempt 完整一致 + seal_is_authentic(
+                                   final_report)==True；任意异常（含
+                                   object.__new__ 旁路）→ False 零泄漏绝不
+                                   抛出。closeout 明确：16G 只能依据该
+                                   verifier-owned API 晋升，不得只看
+                                   stop_reason 或 final_report.verdict）
+FORGED_SEAL_OUTCOME_ACCEPTED     = false（锁定：假 64-hex seal + 全部结构
+                                   字段一致 → 结构可构造（结构绑定语义），
+                                   但 outcome_is_authentic == false）
+CROSS_CONTRACT_OUTCOME_ACCEPTED  = false（跨契约 outcome 构造拒绝 + API
+                                   false）
+FAILURE_SIGNATURE_REQUIRED       = true（B2：FAILED/INCONCLUSIVE 必须携带
+                                   64 位小写 hex failure_signature——空签名
+                                   缺口关闭（reviewer 实测 FAILED+"" 曾可
+                                   构造）；VERIFIED 零签名、collect 层
+                                   verdict="" 仍要求 report_id=""+64-hex
+                                   签名）
+ATTEMPT_TIMELINE_CLOSED          = true（B2：attempt 账本语义闭合——每个
+                                   attempt 完全落在 outcome 时间窗内、
+                                   attempts 按时间非递减、attempt_id/run_id
+                                   分别唯一；锁定：attempt=[100,200] vs
+                                   outcome=[0,10] 拒绝、未排序拒绝、重复
+                                   身份拒绝；不改变 repair loop 真实合法
+                                   输出）
+EVIDENCE_SNAPSHOT_BOUNDED        = true（B3：顶层 evidence 与 claim 条目
+                                   先做 O(1) 固定 schema 数量前置检查再遍历
+                                   键——大量未知键快速拒绝、诊断有界（未知键
+                                   至多回显 8 个）；terminal_events/
+                                   declared_artifacts 通过首次长度检查后立即
+                                   复制为 builtin tuple 快照并复核上限——
+                                   后续只遍历快照，调用方可变 list 再被追加
+                                   不进入本轮解析、总处理量保持上界；
+                                   Mapping/list/tuple 子类拒绝规则保持；
+                                   plain dict/list 正例无回归；不保存不导出
+                                   输入中的秘密）
+SECRET_STORED_OR_EXPORTED        = false（秘密边界保持——P4–P10 全部拒绝
+                                   路径纵深 + P11 有界诊断）
+OLD_TESTS_PRESERVED              = true（252 项既有专项测试全保留——P10 的
+                                   9 项与 P1–P9 全部否证零弱化、零 skip、
+                                   零 xfail；P10 outcome 正例基线按完整身份
+                                   绑定协议适配（contract_id 对齐报告），语义
+                                   断言零改动）
+NEW_P11_TESTS                    = 7 项（B1 跨契约 outcome 构造拒绝/假 seal
+                                   结构可构造但 authenticity=false/外来
+                                   verifier outcome false/旁路畸形 outcome
+                                   False 零异常 + B2 attempt 账本反例全表 +
+                                   B3 大量未知键有界快速拒绝/并发追加快照
+                                   有界）
+TARGETED                         = 259 passed / 0 failed / 0 skipped（16F 专项：
+                                   原 252 全保留 + 7 项 P11 reviewer-locked
+                                   否证/正例；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 666 passed（tests/agent 全目录一次；
+                                   = Patch 10 基线 659 + P11 新增 7）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1948 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 259 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；本补丁全部测试尝试零 flaky 零
+                                   重跑）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 repair.py + verifier.py +
+                                   1 测试文件 + 本 closeout——16A–16E frozen
+                                   contracts 与 C1–C7 零改动，models.py/
+                                   checks.py/__init__.py 零改动）
+GIT_DIFF_CHECK                   = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+STATUS                           = READY_FOR_REVIEW
+```
+
 ## 0.00000000 Patch 10 回执（Reviewer Patch 10 专用）
 
 **权限声明（任务书要求明确）：RepairOutcome 是结构化执行结果，不是第二验证

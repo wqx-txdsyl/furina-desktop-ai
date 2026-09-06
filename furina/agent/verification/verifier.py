@@ -345,6 +345,44 @@ class IndependentVerifier:
         except Exception:
             return False
 
+    def outcome_is_authentic(self, outcome: Any) -> bool:
+        """P11-B1：公开、fail-closed 的 RepairOutcome 真实性复核——**16G 晋升
+        的唯一权威通道**（stop_reason / final_report.verdict 都不是验证权威，
+        不得只看其值晋升）。
+
+        只接受 **exact** RepairOutcome，并验证：
+        - stop_reason == VERIFIED；
+        - outcome/final_report 的 contract_id、contract_hash 与**当前
+          verifier** 绑定契约一致，standard_hash 与当前验证标准一致；
+        - final_report 与最后 attempt 完整一致（run_id/report_id/verdict）；
+        - ``seal_is_authentic(final_report) == True``（当前实例密钥）。
+
+        任意异常（含 object.__new__ 旁路畸形对象）→ False：零泄漏、绝不抛出。
+        """
+        try:
+            from .repair import RepairOutcome   # 延迟导入（repair → verifier）
+            if type(outcome) is not RepairOutcome:
+                return False
+            if getattr(outcome.stop_reason, "value", None) != "VERIFIED":
+                return False
+            if outcome.contract_id != self._contract.contract_id                     or outcome.contract_hash != self._contract.content_hash:
+                return False
+            rep = outcome.final_report
+            if type(rep) is not VerificationReport:
+                return False
+            if rep.contract_id != self._contract.contract_id                     or rep.contract_hash != self._contract.content_hash:
+                return False
+            if rep.standard_hash != self.standard_hash:
+                return False
+            if not outcome.attempts:
+                return False
+            last = outcome.attempts[-1]
+            if last.verdict != "VERIFIED" or last.run_id != rep.run_id                     or last.report_id != rep.report_id:
+                return False
+            return self.seal_is_authentic(rep)
+        except Exception:
+            return False
+
     # -- 输入 exact-schema 解析（fail-closed + defensive-copy 冻结） --------------
     def _parse_submission(self, evidence: Any) -> Dict[str, Any]:
         # P10-B3：transport 输入只接受任务书允许的 **exact builtin JSON 容器**
@@ -356,6 +394,12 @@ class IndependentVerifier:
             raise VerificationInputError(
                 f"evidence 提交必须是 builtin dict，得到 "
                 f"{_safe_type_name(type(evidence))}")
+        # P11-B3：O(1) schema 数量上界检查先于任何键遍历——大量未知键快速
+        # 拒绝，诊断有界（绝不枚举全部敌意键）。
+        if len(evidence) != len(VERIFICATION_INPUT_KEYS):
+            raise VerificationInputError(
+                f"输入键数必须恰为 {len(VERIFICATION_INPUT_KEYS)}"
+                f"（先封数量再遍历，诊断有界）")
         keys = set()
         for k in evidence.keys():
             # P8-B4：只接受 builtin str 键——拒绝消息只用安全类型名（绝不
@@ -368,7 +412,8 @@ class IndependentVerifier:
         missing = sorted(set(VERIFICATION_INPUT_KEYS) - keys)
         if unknown:
             raise VerificationInputError(
-                f"输入拒绝未知键: {[scrub_secrets(k)[:64] for k in unknown]}")
+                f"输入拒绝未知键（共 {len(unknown)} 个）: "
+                f"{[scrub_secrets(k)[:64] for k in unknown[:8]]}")
         if missing:
             raise VerificationInputError(f"输入缺失必需键: {missing}")
 
@@ -388,9 +433,16 @@ class IndependentVerifier:
         if len(events_raw) > MAX_EVIDENCE_EVENTS:
             raise VerificationInputError(
                 f"terminal_events 数量 {len(events_raw)} 超界 {MAX_EVIDENCE_EVENTS}")
+        # P11-B3：通过首次长度检查后立即复制为 builtin tuple 快照并复核上限
+        # ——后续只遍历快照，调用方持有的可变 list 再被追加也不进入本轮解析
+        # （总处理量保持上界）。
+        events_snapshot = tuple(events_raw)
+        if len(events_snapshot) > MAX_EVIDENCE_EVENTS:
+            raise VerificationInputError(
+                f"terminal_events 快照数量超界 {MAX_EVIDENCE_EVENTS}")
         terminal: List[Mapping[str, Any]] = []
         seen_event_ids = set()
-        for item in events_raw:
+        for item in events_snapshot:
             d = self._parse_terminal_claim(item)
             if d["event_id"] in seen_event_ids:
                 raise VerificationInputError(f"terminal_events 重复 event_id: {d['event_id']!r}")
@@ -407,9 +459,14 @@ class IndependentVerifier:
         if len(arts_raw) > MAX_DECLARED_ARTIFACTS:
             raise VerificationInputError(
                 f"declared_artifacts 数量 {len(arts_raw)} 超界 {MAX_DECLARED_ARTIFACTS}")
+        # P11-B3：同型快照——declared_artifacts 只遍历 builtin tuple 快照。
+        arts_snapshot = tuple(arts_raw)
+        if len(arts_snapshot) > MAX_DECLARED_ARTIFACTS:
+            raise VerificationInputError(
+                f"declared_artifacts 快照数量超界 {MAX_DECLARED_ARTIFACTS}")
         declared: List[Mapping[str, Any]] = []
         seen_artifact_ids = set()
-        for item in arts_raw:
+        for item in arts_snapshot:
             d = self._parse_artifact_claim(item)
             if d["artifact_id"] in seen_artifact_ids:
                 raise VerificationInputError(
@@ -478,6 +535,12 @@ class IndependentVerifier:
         if type(item) is not dict:  # P10-B3：Mapping 子类零调用
             raise VerificationInputError(
                 f"terminal_events 条目必须是 builtin dict，得到 {_safe_type_name(type(item))}")
+        # P11-B3：O(1) 固定 schema 数量前置——大量未知 claim 键快速拒绝、
+        # 诊断有界（未知键至多回显 8 个）。
+        if len(item) != len(TERMINAL_CLAIM_KEYS):
+            raise VerificationInputError(
+                f"terminal claim 键数必须恰为 {len(TERMINAL_CLAIM_KEYS)}"
+                f"（先封数量再遍历，诊断有界）")
         keys = set()
         for k in item.keys():
             # P8-B4：拒绝消息只用安全类型名（绝不 {k!r} 调用敌意 __repr__）。
@@ -488,7 +551,8 @@ class IndependentVerifier:
         if keys != set(TERMINAL_CLAIM_KEYS):
             raise VerificationInputError(
                 f"terminal claim 键集必须恰为 {sorted(TERMINAL_CLAIM_KEYS)}，"
-                f"未知 {[scrub_secrets(k)[:64] for k in sorted(keys - set(TERMINAL_CLAIM_KEYS))]} / "
+                f"未知（共 {len(keys - set(TERMINAL_CLAIM_KEYS))} 个）"
+                f"{[scrub_secrets(k)[:64] for k in sorted(keys - set(TERMINAL_CLAIM_KEYS))[:8]]} / "
                 f"缺失 {sorted(set(TERMINAL_CLAIM_KEYS) - keys)}")
         event_id = validate_identity(item["event_id"], "event_id")
         kind = item["kind"]
@@ -523,6 +587,11 @@ class IndependentVerifier:
         if type(item) is not dict:  # P10-B3：Mapping 子类零调用
             raise VerificationInputError(
                 f"declared_artifacts 条目必须是 builtin dict，得到 {_safe_type_name(type(item))}")
+        # P11-B3：O(1) 固定 schema 数量前置（同 terminal claim）。
+        if len(item) != len(ARTIFACT_CLAIM_KEYS):
+            raise VerificationInputError(
+                f"artifact claim 键数必须恰为 {len(ARTIFACT_CLAIM_KEYS)}"
+                f"（先封数量再遍历，诊断有界）")
         keys = set()
         for k in item.keys():
             # P8-B4：拒绝消息只用安全类型名（绝不 {k!r} 调用敌意 __repr__）。
@@ -533,7 +602,8 @@ class IndependentVerifier:
         if keys != set(ARTIFACT_CLAIM_KEYS):
             raise VerificationInputError(
                 f"artifact claim 键集必须恰为 {sorted(ARTIFACT_CLAIM_KEYS)}，"
-                f"未知 {[scrub_secrets(k)[:64] for k in sorted(keys - set(ARTIFACT_CLAIM_KEYS))]} / "
+                f"未知（共 {len(keys - set(ARTIFACT_CLAIM_KEYS))} 个）"
+                f"{[scrub_secrets(k)[:64] for k in sorted(keys - set(ARTIFACT_CLAIM_KEYS))[:8]]} / "
                 f"缺失 {sorted(set(ARTIFACT_CLAIM_KEYS) - keys)}")
         aid = validate_identity(item["artifact_id"], "artifact_id")
         path = item["path"]

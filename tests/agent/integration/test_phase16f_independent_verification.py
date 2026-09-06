@@ -6284,7 +6284,7 @@ def test_p10_b2_repair_outcome_semantic_closure(env):
 
     def outcome(**over):
         base = dict(stop_reason=RepairStopReason.VERIFIED,
-                    contract_id="wc_16f_p10b2_0001",
+                    contract_id=verfied_rep.contract_id,
                     contract_hash=verfied_rep.contract_hash,
                     attempts=(good_attempt,), final_report=verfied_rep,
                     started_at_epoch=1.0, finished_at_epoch=2.0, diagnostic="")
@@ -6457,3 +6457,202 @@ def test_p10_b3_collect_non_dict_closed_in_loop(env):
     assert len(out.attempts) == 1
     assert out.attempts[0].verdict == ""
     assert "collect_not_mapping" in out.attempts[0].diagnostic
+
+
+# ================================================================
+# Reviewer Patch 11 — B1 outcome 完整身份绑定 + verifier 真实性 API /
+# B2 attempt 账本语义闭合 / B3 evidence 有界快照（reviewer-locked）
+# ================================================================
+
+def test_p11_b1_cross_contract_outcome_rejected(env):
+    """P11-B1 锁定（reviewer 反例）：真实报告 + 跨 contract_id → 构造拒绝
+    （final_report 与终局的完整身份绑定）。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c_v = _verified_summary_contract(work_real, "wc_16f_p11b1_v_0001")
+    rep = _p10_verified_report(c_v)
+    other = _verified_summary_contract(work_real, "wc_16f_p11b1_other_0001")
+    good_attempt = AttemptRecord(
+        attempt_id="att_p11b1_0001", run_id=rep.run_id,
+        contract_hash=rep.contract_hash, verdict="VERIFIED",
+        report_id=rep.report_id, failure_signature="",
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+    with pytest.raises(VerificationError):
+        RepairOutcome(stop_reason=RepairStopReason.VERIFIED,
+                      contract_id=other.contract_id,
+                      contract_hash=other.content_hash,
+                      attempts=(good_attempt,), final_report=rep,
+                      started_at_epoch=1.0, finished_at_epoch=2.0)
+
+
+def test_p11_b1_forged_seal_outcome_authenticity_false(env):
+    """P11-B1 锁定（reviewer 反例）：假 64-hex seal + 全部结构字段一致 →
+    结构可构造（RepairOutcome 只负责结构绑定），但
+    verifier.outcome_is_authentic == false；当前 verifier 的真实 outcome
+    → true（FORGED_SEAL_OUTCOME_ACCEPTED=false）。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p11b1_forged_0001")
+    v = IndependentVerifier(c)
+    real = _p10_verified_report(c)
+    forged = VerificationReport(
+        report_id=real.report_id, verifier_id=real.verifier_id,
+        contract_id=real.contract_id, contract_hash=real.contract_hash,
+        standard_hash=real.standard_hash, run_id=real.run_id,
+        backend_id=real.backend_id, verdict=VerificationVerdict.VERIFIED,
+        checks=real.checks, diagnostics=real.diagnostics, evidence=real.evidence,
+        started_at_epoch=real.started_at_epoch,
+        finished_at_epoch=real.finished_at_epoch,
+        authority_seal="b" * 64)          # 假 64-hex seal：格式合法、内容伪造
+    attempt = AttemptRecord(
+        attempt_id="att_p11b1f_0001", run_id=forged.run_id,
+        contract_hash=forged.contract_hash, verdict="VERIFIED",
+        report_id=forged.report_id, failure_signature="",
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+    outcome = RepairOutcome(
+        stop_reason=RepairStopReason.VERIFIED,
+        contract_id=forged.contract_id, contract_hash=forged.contract_hash,
+        attempts=(attempt,), final_report=forged,
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+    assert v.outcome_is_authentic(outcome) is False
+    # 当前 verifier 真实 run 产出 → 真实 outcome → true
+    out = BoundedRepairLoop(
+        contract=c, verifier=v,
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert v.outcome_is_authentic(out) is True
+
+
+def test_p11_b1_foreign_verifier_outcome_false(env):
+    """P11-B1 锁定：外来验证器（另一密钥）签发报告组成的 outcome →
+    当前 verifier 真实性复核 false。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p11b1_foreign_0001")
+    foreign = IndependentVerifier(c)          # 另一密钥、同一契约
+    rep = foreign.verify(_ok_summary_submission(c, "run_p11b1_f_0001"))
+    attempt = AttemptRecord(
+        attempt_id="att_p11b1fo_0001", run_id=rep.run_id,
+        contract_hash=rep.contract_hash, verdict="VERIFIED",
+        report_id=rep.report_id, failure_signature="",
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+    outcome = RepairOutcome(
+        stop_reason=RepairStopReason.VERIFIED,
+        contract_id=c.contract_id, contract_hash=c.content_hash,
+        attempts=(attempt,), final_report=rep,
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+    assert IndependentVerifier(c).outcome_is_authentic(outcome) is False
+
+
+def test_p11_b1_malformed_outcome_false_no_raise(env):
+    """P11-B1 锁定：object.__new__ 旁路畸形 outcome / 任意对象 / None →
+    outcome_is_authentic 一律 False，绝不抛异常。"""
+    from furina.agent.verification.repair import RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    bypass_outcome = object.__new__(RepairOutcome)
+    assert v.outcome_is_authentic(bypass_outcome) is False
+    assert v.outcome_is_authentic(object()) is False
+    assert v.outcome_is_authentic(None) is False
+
+
+def test_p11_b2_attempt_ledger_semantic_closure(env):
+    """P11-B2 锁定（reviewer 反例全表）：FAILED/INCONCLUSIVE 空签名、
+    attempt 时间窗外（[100,200] vs [0,10]）、未按时间非递减、attempt_id/
+    run_id 重复——全部构造拒绝。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p11b2_0001")
+    rep = _p10_verified_report(c)
+
+    def attempt(**over):
+        base = dict(attempt_id="att_p11b2_0001", run_id=rep.run_id,
+                    contract_hash=rep.contract_hash, verdict="VERIFIED",
+                    report_id=rep.report_id, failure_signature="",
+                    started_at_epoch=1.0, finished_at_epoch=2.0)
+        base.update(over)
+        return AttemptRecord(**base)
+
+    def outcome(attempts, **over):
+        base = dict(stop_reason=RepairStopReason.VERIFIED,
+                    contract_id=rep.contract_id, contract_hash=rep.contract_hash,
+                    attempts=attempts, final_report=rep,
+                    started_at_epoch=0.0, finished_at_epoch=10.0, diagnostic="")
+        base.update(over)
+        return RepairOutcome(**base)
+
+    outcome((attempt(),))                     # 一致的正例可构造
+    with pytest.raises(VerificationError):
+        attempt(verdict="FAILED", report_id="vrp_" + "c" * 32,
+                failure_signature="")         # FAILED 空签名（reviewer 反例）
+    with pytest.raises(VerificationError):
+        attempt(verdict="INCONCLUSIVE", report_id="vrp_" + "c" * 32,
+                failure_signature="")         # INCONCLUSIVE 空签名
+    with pytest.raises(VerificationError):
+        outcome((attempt(started_at_epoch=100.0,
+                         finished_at_epoch=200.0),))   # 时间窗外（reviewer 反例）
+    a_early = attempt(attempt_id="att_p11b2_0002",
+                      started_at_epoch=5.0, finished_at_epoch=6.0)
+    a_late = attempt(attempt_id="att_p11b2_0003",
+                     started_at_epoch=3.0, finished_at_epoch=4.0)
+    with pytest.raises(VerificationError):
+        outcome((a_early, a_late))            # 未按时间非递减
+    with pytest.raises(VerificationError):
+        outcome((attempt(), attempt()))       # attempt_id/run_id 重复
+    with pytest.raises(VerificationError):
+        outcome((attempt(),
+                 attempt(attempt_id="att_p11b2_0009")))   # run_id 重复
+
+
+def test_p11_b3_unknown_keys_fast_reject_bounded_diag(env):
+    """P11-B3 锁定：大量未知顶层键 / 大量未知 claim 键 → O(1) 数量前置
+    快速拒绝、诊断有界（绝不枚举全部敌意键）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    hostile = {f"unknown_key_{i:04d}": i for i in range(500)}
+    with pytest.raises(VerificationInputError) as ei:
+        v.verify(hostile)
+    assert len(str(ei.value)) < 600
+    claim = {f"claim_key_{i:04d}": "x" for i in range(500)}
+    sub = {"run_id": "run_p11b3_0001", "backend_id": "native_agent",
+           "terminal_events": [claim], "declared_artifacts": []}
+    with pytest.raises(VerificationInputError) as ei2:
+        v.verify(sub)
+    assert len(str(ei2.value)) < 600
+
+
+def test_p11_b3_snapshot_bounded_under_mutation(env):
+    """P11-B3 锁定：解析期间原始 list 被并发追加超过上限——追加项不进入
+    本轮解析、总处理量保持上界（builtin tuple 快照语义；若追加先于快照
+    落地，则数量前置检查拒绝——两条路径都有界）。"""
+    import threading
+
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p11b3_0001")
+    v = IndependentVerifier(c)
+    events = [dict(_bound_terminal(c, f"run_p11b3_m_{i:04d}"),
+                   event_id=f"lev_p11_m_{i:04d}_deadbeef") for i in range(64)]
+    sub = {"run_id": "run_p11b3_m_0000", "backend_id": "native_agent",
+           "terminal_events": events, "declared_artifacts": []}
+
+    def append_more():
+        for i in range(300):
+            events.append(dict(events[0],
+                               event_id=f"lev_p11_x_{i:04d}_deadbeef"))
+
+    t = threading.Thread(target=append_more)
+    t.start()
+    try:
+        rep = v.verify(sub)
+    except VerificationInputError as exc:
+        t.join()
+        assert "超界" in str(exc)          # 追加先于快照 → 数量前置拒绝
+        return
+    t.join()
+    assert rep.verdict is VerificationVerdict.VERIFIED
+    assert len(rep.evidence.terminal) <= 64   # 追加项绝不进入本轮解析
+    assert len(rep.evidence.terminal) == 64

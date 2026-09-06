@@ -222,9 +222,13 @@ class AttemptRecord:
             if self.verdict == "VERIFIED":
                 if self.failure_signature != "":
                     raise VerificationError("VERIFIED 记录不得携带失败签名")
-            elif self.failure_signature != "" \
-                    and not _SHA256_PATTERN.match(self.failure_signature):
-                raise VerificationError("failure_signature 必须是空或 64 位小写 hex")
+            else:
+                # P11-B2：FAILED/INCONCLUSIVE 必须携带 64 位小写 hex 失败签名
+                #（空签名缺口关闭——reviewer 实测 FAILED + failure_signature=""
+                # 曾可构造）。
+                if not _SHA256_PATTERN.match(self.failure_signature):
+                    raise VerificationError(
+                        "FAILED/INCONCLUSIVE 记录必须携带 64 位小写 hex 失败签名")
         # P8-B3：时间戳有限数值结构校验（bool/子类/NaN/Inf 拒绝）+ float 规范。
         object.__setattr__(self, "started_at_epoch",
                            _finite_epoch(self.started_at_epoch, "started_at_epoch"))
@@ -298,17 +302,49 @@ class RepairOutcome:
                 raise VerificationError("VERIFIED 终局的 final_report verdict 非法")
             if not self.attempts:
                 raise VerificationError("VERIFIED 终局必须携带非空 attempts")
-            last = self.attempts[-1]
-            if last.verdict != "VERIFIED" \
-                    or last.report_id != self.final_report.report_id \
-                    or last.run_id != self.final_report.run_id \
-                    or last.contract_hash != self.final_report.contract_hash:
-                raise VerificationError(
-                    "最后 attempt 与 final_report 身份不一致")
         elif self.final_report is not None \
                 and self.final_report.verdict is VerificationVerdict.VERIFIED:
             raise VerificationError(
                 "非 VERIFIED 终局不得携带 VERIFIED final_report")
+        # P11-B1：final_report 非 None 时（无论 stop_reason）与终局/最后
+        # attempt 的**完整身份绑定**——contract_id、contract_hash、run_id、
+        # report_id、verdict 全部一致（RepairOutcome 本身只负责结构绑定；
+        # seal 真实性只能经 IndependentVerifier 的 outcome 真实性 API 复核）。
+        if self.final_report is not None:
+            rep = self.final_report
+            if rep.contract_id != self.contract_id:
+                raise VerificationError(
+                    "final_report contract_id 与终局不一致（跨契约报告拒绝）")
+            if rep.contract_hash != self.contract_hash:
+                raise VerificationError(
+                    "final_report contract_hash 与终局不一致")
+            if not self.attempts:
+                raise VerificationError(
+                    "携带 final_report 的终局必须包含最后 attempt")
+            last = self.attempts[-1]
+            if rep.run_id != last.run_id or rep.report_id != last.report_id \
+                    or rep.verdict.value != last.verdict:
+                raise VerificationError(
+                    "final_report 与最后 attempt 身份不一致")
+            if last.contract_hash != self.contract_hash:
+                raise VerificationError("最后 attempt 契约 hash 与终局不一致")
+        # P11-B2：attempt 账本语义闭合——身份唯一、时间窗封闭、按时间非递减。
+        seen_attempt_ids: set = set()
+        seen_attempt_runs: set = set()
+        prev_finish = self.started_at_epoch
+        for a in self.attempts:
+            if a.attempt_id in seen_attempt_ids or a.run_id in seen_attempt_runs:
+                raise VerificationError("attempt 身份重复（attempt_id/run_id）")
+            seen_attempt_ids.add(a.attempt_id)
+            seen_attempt_runs.add(a.run_id)
+            if a.started_at_epoch < prev_finish:
+                raise VerificationError(
+                    "attempt 时间轴非法（未按时间非递减排列）")
+            if a.finished_at_epoch > self.finished_at_epoch \
+                    or a.started_at_epoch < self.started_at_epoch:
+                raise VerificationError(
+                    "attempt 时间完全/部分落在 outcome 时间窗之外")
+            prev_finish = a.finished_at_epoch
         # P9-B3：诊断必须是 builtin str（绝不 `value or ""` truthiness）。
         if type(self.diagnostic) is not str:
             raise VerificationError(
