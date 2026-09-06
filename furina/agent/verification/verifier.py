@@ -184,9 +184,12 @@ class IndependentVerifier:
 
     def __init__(self, contract: WorkContract, *, now_fn=time.time,
                  process_timeout_seconds: float = DEFAULT_PROCESS_TIMEOUT_SECONDS) -> None:
-        if not isinstance(contract, WorkContract):
+        # P10-B1：权威装配边界 exact trusted type——WorkContract 子类（可
+        # 覆盖契约事实的属性/方法）不得进入验证权威路径。
+        if type(contract) is not WorkContract:
             raise VerificationError(
-                f"verifier 必须绑定 16A WorkContract，得到 {_safe_type_name(type(contract))}")
+                f"verifier 必须绑定 exact WorkContract（子类不得进入权威路径），"
+                f"得到 {_safe_type_name(type(contract))}")
         pt = process_timeout_seconds
         # P9-B4：exact builtin 数值、有限、范围封闭——数值子类在入口即拒绝
         # （绝不调用其 __float__/比较协议），错误消息绝不 repr 非法对象。
@@ -315,31 +318,44 @@ class IndependentVerifier:
 
     # -- 权威复核 ----------------------------------------------------------------
     def seal_is_authentic(self, report: Any) -> bool:
-        """VERIFIED 报告真实性的唯一复核通道：digest 一致 + seal 与本验证器密钥匹配。"""
-        if not isinstance(report, VerificationReport):
+        """VERIFIED 报告真实性的唯一复核通道：digest 一致 + seal 与本验证器
+        密钥匹配。P10-B1：只接受 **exact** VerificationReport（子类/伪造/
+        ``object.__new__`` 旁路的畸形报告一律 False——全程 try/except 包裹，
+        绝不抛异常、绝不部分信任）。"""
+        if type(report) is not VerificationReport:
             return False
-        if report.verdict is not VerificationVerdict.VERIFIED:
+        try:
+            if report.verdict is not VerificationVerdict.VERIFIED:
+                return False
+            recomputed = compute_report_digest(
+                report_id=report.report_id, verifier_id=report.verifier_id,
+                contract_id=report.contract_id, contract_hash=report.contract_hash,
+                standard_hash=report.standard_hash, run_id=report.run_id,
+                backend_id=report.backend_id, verdict=report.verdict,
+                checks=report.checks, diagnostics=report.diagnostics,
+                evidence_digest=report.evidence.evidence_digest(),
+                started_at_epoch=report.started_at_epoch,
+                finished_at_epoch=report.finished_at_epoch)
+            if not hmac.compare_digest(recomputed, report.report_digest):
+                return False
+            expected = hmac.new(self._seal_key,
+                                report.report_digest.encode("utf-8"),
+                                hashlib.sha256).hexdigest()
+            return hmac.compare_digest(expected, report.authority_seal)
+        except Exception:
             return False
-        recomputed = compute_report_digest(
-            report_id=report.report_id, verifier_id=report.verifier_id,
-            contract_id=report.contract_id, contract_hash=report.contract_hash,
-            standard_hash=report.standard_hash, run_id=report.run_id,
-            backend_id=report.backend_id, verdict=report.verdict,
-            checks=report.checks, diagnostics=report.diagnostics,
-            evidence_digest=report.evidence.evidence_digest(),
-            started_at_epoch=report.started_at_epoch,
-            finished_at_epoch=report.finished_at_epoch)
-        if not hmac.compare_digest(recomputed, report.report_digest):
-            return False
-        expected = hmac.new(self._seal_key, report.report_digest.encode("utf-8"),
-                            hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, report.authority_seal)
 
     # -- 输入 exact-schema 解析（fail-closed + defensive-copy 冻结） --------------
     def _parse_submission(self, evidence: Any) -> Dict[str, Any]:
-        if not isinstance(evidence, Mapping):
+        # P10-B3：transport 输入只接受任务书允许的 **exact builtin JSON 容器**
+        # ——Mapping/list/tuple 子类（LyingList：__len__=0 但 __iter__ 产出
+        # 65 条、keys 无限或抛携密异常）在**任何** keys/len/iter/getitem/
+        # bool/str/repr 调用之前即拒绝；cardinality 检查因此建立在可信
+        # builtin 容器上（先封容器、后查数量、再逐项解析）。
+        if type(evidence) is not dict:
             raise VerificationInputError(
-                f"evidence 提交必须是 Mapping，得到 {_safe_type_name(type(evidence))}")
+                f"evidence 提交必须是 builtin dict，得到 "
+                f"{_safe_type_name(type(evidence))}")
         keys = set()
         for k in evidence.keys():
             # P8-B4：只接受 builtin str 键——拒绝消息只用安全类型名（绝不
@@ -363,9 +379,12 @@ class IndependentVerifier:
         backend_id = validate_identity(evidence["backend_id"], "backend_id")
 
         events_raw = evidence["terminal_events"]
-        if not isinstance(events_raw, (list, tuple)):
+        # P10-B3：list/tuple 子类拒绝——cardinality 检查只在 exact builtin
+        # 容器上执行（可信 len 先于逐项解析）。
+        if type(events_raw) not in (list, tuple):
             raise VerificationInputError(
-                f"terminal_events 必须是序列，得到 {_safe_type_name(type(events_raw))}")
+                f"terminal_events 必须是 builtin list/tuple，得到 "
+                f"{_safe_type_name(type(events_raw))}")
         if len(events_raw) > MAX_EVIDENCE_EVENTS:
             raise VerificationInputError(
                 f"terminal_events 数量 {len(events_raw)} 超界 {MAX_EVIDENCE_EVENTS}")
@@ -379,9 +398,12 @@ class IndependentVerifier:
             terminal.append(MappingProxyType(dict(d)))   # defensive copy + 冻结
 
         arts_raw = evidence["declared_artifacts"]
-        if not isinstance(arts_raw, (list, tuple)):
+        # P10-B3：同型攻击面封闭——declared_artifacts 亦只接受 exact builtin
+        # list/tuple。
+        if type(arts_raw) not in (list, tuple):
             raise VerificationInputError(
-                f"declared_artifacts 必须是序列，得到 {_safe_type_name(type(arts_raw))}")
+                f"declared_artifacts 必须是 builtin list/tuple，得到 "
+                f"{_safe_type_name(type(arts_raw))}")
         if len(arts_raw) > MAX_DECLARED_ARTIFACTS:
             raise VerificationInputError(
                 f"declared_artifacts 数量 {len(arts_raw)} 超界 {MAX_DECLARED_ARTIFACTS}")
@@ -453,9 +475,9 @@ class IndependentVerifier:
     @staticmethod
     def _parse_terminal_claim(item: Any) -> Dict[str, Any]:
         from .models import TERMINAL_CLAIM_KEYS
-        if not isinstance(item, Mapping):
+        if type(item) is not dict:  # P10-B3：Mapping 子类零调用
             raise VerificationInputError(
-                f"terminal_events 条目必须是 Mapping，得到 {_safe_type_name(type(item))}")
+                f"terminal_events 条目必须是 builtin dict，得到 {_safe_type_name(type(item))}")
         keys = set()
         for k in item.keys():
             # P8-B4：拒绝消息只用安全类型名（绝不 {k!r} 调用敌意 __repr__）。
@@ -498,9 +520,9 @@ class IndependentVerifier:
     @staticmethod
     def _parse_artifact_claim(item: Any) -> Dict[str, Any]:
         from .models import ARTIFACT_CLAIM_KEYS, _SHA256_PATTERN
-        if not isinstance(item, Mapping):
+        if type(item) is not dict:  # P10-B3：Mapping 子类零调用
             raise VerificationInputError(
-                f"declared_artifacts 条目必须是 Mapping，得到 {_safe_type_name(type(item))}")
+                f"declared_artifacts 条目必须是 builtin dict，得到 {_safe_type_name(type(item))}")
         keys = set()
         for k in item.keys():
             # P8-B4：拒绝消息只用安全类型名（绝不 {k!r} 调用敌意 __repr__）。

@@ -230,6 +230,126 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.00000000 Patch 10 回执（Reviewer Patch 10 专用）
+
+**权限声明（任务书要求明确）：RepairOutcome 是结构化执行结果，不是第二验证
+权威——final_report 的 seal 真实性仍只能由当前 IndependentVerifier 复核；
+stop_reason 本身不构成 16G 的验证权威。**
+
+```text
+BASE_SHA                         = fdc8533f45e319026483a3e1dfc5b78971c9bd9d
+                                   （PATCH9_FINAL_SHA；Patch 10 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+BRANCH                           = feature/phase16-16f-independent-verification-
+                                   patch2-clean
+MODEL                            = GLM-5.3-Flash（任务书 FALLBACK_MODEL；
+                                   推荐模型 GLM-5.3 额度不可用，按任务书
+                                   fallback 执行）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–9 惯例）
+CHANGED_FILES                    = furina/agent/verification/repair.py,
+                                   verifier.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（models.py 本轮零改动——
+                                   exact-builtin 扫描已在 Patch 9 完成；
+                                   checks.py/__init__.py 零改动）
+VERIFIER_SUBSTITUTION_BLOCKED    = true（B1：reviewer 反例 ForgingVerifier
+                                   （覆盖 verify 返回零 checks 伪 VERIFIED +
+                                   假 64-hex seal、seal_is_authentic 固定
+                                   True）在装配阶段即被 exact trusted type
+                                   拒绝，绝不能 VERIFIED）
+EXACT_WORKCONTRACT_REQUIRED      = true（WorkContract 子类在 IndependentVerifier
+                                   与 BoundedRepairLoop 两个权威装配边界都被
+                                   exact type 拒绝）
+EXACT_VERIFIER_REQUIRED          = true（B1：repair 只接受 exact
+                                   IndependentVerifier；安全关键 verify/
+                                   seal_is_authentic/standard_hash 调用经
+                                   **类级**绑定（__get__/fget）取得——实例
+                                   属性 shadowing 与子类 override 都无法
+                                   替换权威行为（锁定：shadowing 注入伪
+                                   verify/固定 True seal 后 loop 仍走真实
+                                   权威、外来报告仍被真实 seal 复核拒绝、
+                                   魔术调用零发生）；既有 foreign signer/
+                                   replay/subclass 测试升级为"装配阶段即
+                                   拒绝"或经真实验证器 + 接受门直接复核继续
+                                   证明（零弱化、零删除）；安全面边界声明：
+                                   只封闭公开组合/API 面，不宣称抵抗进程内
+                                   任意代码篡改）
+FORGED_ZERO_CHECK_REPORT_VERIFIED = false（伪 VERIFIED 绝无通道——伪报告
+                                   生成者本身被装配期拒绝；seal_is_authentic
+                                   只接受 exact VerificationReport 且全程
+                                   try/except——object.__new__ 旁路畸形
+                                   报告/任意对象/None 一律 False 绝不抛异常）
+REPAIR_OUTCOME_SEMANTICALLY_CLOSED = true（B2：AttemptRecord——attempt_id/
+                                   run_id canonical identity、contract_hash
+                                   64-hex、verdict 封闭词表（""/VERIFIED/
+                                   FAILED/INCONCLUSIVE）、verdict↔report_id·
+                                   failure_signature 一致性（"" ⇒ 无
+                                   report_id + 64-hex 签名；VERIFIED ⇒ 零
+                                   签名）、finished>=started；
+                                   RepairOutcome——contract_id canonical、
+                                   contract_hash 64-hex、时序单调、attempts
+                                   契约 hash 一致、VERIFIED 终局必须携带与
+                                   最后 attempt 精确一致的 VERIFIED 报告且
+                                   attempts 非空、非 VERIFIED 终局绝不携带
+                                   VERIFIED final_report）
+VERIFIED_OUTCOME_REQUIRES_AUTHENTIC_REPORT = true（VERIFIED 终局的
+                                   final_report 必须存在且 verdict=VERIFIED
+                                   且与最后 attempt 身份一致；seal 真实性
+                                   仍只能由当前 IndependentVerifier 复核——
+                                   stop_reason 不构成验证权威）
+EVIDENCE_CONTAINER_SUBCLASS_REJECTED = true（B3：transport 输入只接受 exact
+                                   builtin JSON 容器——顶层 evidence 必须
+                                   builtin dict、terminal/artifact 条目必须
+                                   builtin dict、terminal_events/
+                                   declared_artifacts 必须 builtin list/
+                                   tuple；collect_evidence 返回值在调用
+                                   get()/解析前封闭为 exact dict）
+CARDINALITY_CHECKED_BEFORE_ITERATION = true（容器子类在任何 keys/len/iter/
+                                   getitem/bool/str/repr 调用之前拒绝——
+                                   cardinally 检查建立在可信 builtin 容器上
+                                   （先封容器、后查数量、再逐项解析），绝不
+                                   先遍历后查长度。锁定：LyingList（len=0/
+                                   iter 65 条）双注入零魔术调用拒绝；
+                                   keys 即抛密 Mapping 子类零调用拒绝；
+                                   嵌套条目 dict 子类零调用拒绝；plain
+                                   dict/list 正例不回归）
+OLD_TESTS_PRESERVED              = true（243 项既有专项测试全保留——P9 的
+                                   15 项与 P1–P8 全部否证零弱化、零 skip、
+                                   零 xfail；4 处 subclass-verifier 测试按
+                                   "装配阶段即拒绝/类级 spy"协议适配（P2-K/
+                                   P2-L/P3-H/P7-D），语义断言零删除）
+NEW_P10_TESTS                    = 9 项（B1 ForgingVerifier 装配拒绝/
+                                   WorkContract 子类拒绝/实例属性 shadowing
+                                   不可替换权威/seal 旁路畸形报告 False 零
+                                   异常 + B2 RepairOutcome 语义闭环反例全表/
+                                   AttemptRecord 语义闭环 + B3 LyingList 双
+                                   注入/Mapping 子类与嵌套条目/collect 非
+                                   dict 循环内封闭）
+TARGETED                         = 252 passed / 0 failed / 0 skipped（16F 专项：
+                                   原 243 全保留 + 9 项 P10 reviewer-locked
+                                   否证/正例；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 659 passed（tests/agent 全目录一次；
+                                   = Patch 9 基线 650 + P10 新增 9）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1941 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 252 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；本补丁全部测试尝试零 flaky 零
+                                   重跑）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 models.py + repair.py +
+                                   verifier.py + 1 测试文件 + 本 closeout
+                                   ——16A–16E frozen contracts 与 C1–C7 零
+                                   改动，checks.py/__init__.py 零改动）
+GIT_DIFF_CHECK                   = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+STATUS                           = READY_FOR_REVIEW
+```
+
 ## 0.0000000 Patch 9 回执（Reviewer Patch 9 专用）
 
 ```text

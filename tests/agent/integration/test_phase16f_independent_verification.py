@@ -2342,42 +2342,55 @@ def _verified_summary_contract(work_real: Path, cid: str) -> WorkContract:
         max_attempts=5))
 
 
-def test_p2_k_foreign_verifier_seal_rejected_by_repair_loop(env):
-    """P2-K 否证：子类代理把另一 IndependentVerifier 实例签发的有效格式
-    VERIFIED 报告递给 RepairLoop → REPORT_REJECTED / final_report=None，
-    绝不修补或重签。"""
+def test_p2_k_foreign_verifier_subclass_rejected_at_assembly(env):
+    """P2-K 否证（P10-B1 装配期拒绝协议适配）：子类代理 verifier（可覆盖
+    verify()/seal_is_authentic()）在装配阶段即被 exact trusted type 拒绝；
+    外来签发的 VERIFIED 报告也无法通过绑定验证器的 seal 复核——绝不修补或
+    重签外来报告，本验证器正常验证路径不受影响。"""
     tmp, work, work_real, outside, outside_real = env
     c = _verified_summary_contract(work_real, "wc_16f_p2k_0001")
     foreign = IndependentVerifier(c)          # 另一密钥的真实验证器
-    loop = BoundedRepairLoop(
-        contract=c, verifier=_ForeignSignerVerifier(c, foreign),
-        collect_evidence=lambda a, r: _ok_summary_submission(c, r))
-    out = loop.run()
-    assert out.stop_reason is RepairStopReason.REPORT_REJECTED
-    assert out.final_report is None
-    assert out.attempts[0].verdict == "VERIFIED"     # 报告本身格式真实产出
-    assert "seal_not_authentic_for_current_verifier" in out.diagnostic
+    with pytest.raises(VerificationError):
+        BoundedRepairLoop(
+            contract=c, verifier=_ForeignSignerVerifier(c, foreign),
+            collect_evidence=lambda a, r: _ok_summary_submission(c, r))
+    # 外来签发的 VERIFIED 报告无法通过绑定验证器 seal 复核
+    bound = IndependentVerifier(c)
+    foreign_rep = foreign.verify(_ok_summary_submission(c, "run_p2k_0001"))
+    assert foreign_rep.verdict is VerificationVerdict.VERIFIED
+    assert bound.seal_is_authentic(foreign_rep) is False
+    # 绑定验证器自身的权威路径正常工作
+    out = BoundedRepairLoop(
+        contract=c, verifier=bound,
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.final_report is not None
+    assert bound.seal_is_authentic(out.final_report) is True
 
 
 def test_p2_l_stale_or_foreign_contract_report_rejected(env):
-    """P2-L 否证：seal 真实但 run_id 属旧 attempt 的报告、以及异契约验证器
-    签发的报告都被精确身份复核拒绝（REPORT_REJECTED / final_report=None）。"""
+    """P2-L 否证（P10-B1 协议适配）：seal 真实但 run_id 属旧 attempt 的
+    报告、以及异契约验证器签发的报告，都在精确身份复核面被拒绝（经真实验
+    证器产出报告 + 接受门直接复核证明；子类代理已在装配期拒绝）。"""
     tmp, work, work_real, outside, outside_real = env
     c = _verified_summary_contract(work_real, "wc_16f_p2l_0001")
-    # (a) 陈旧 run：报告由 loop 绑定验证器真实签发（seal 可过），但
-    #     run_id 是早前 attempt 的 → run_id 精确不一致拒绝。
-    proxy = _ReplayVerifier(c)
-    stale = IndependentVerifier.verify(proxy, _ok_summary_submission(c, "run_stale_0001"))
+    v = IndependentVerifier(c)
+    # (a) 陈旧 run：报告由绑定验证器真实签发（seal 可过），但 run_id 不属于
+    #     本次 attempt → run_id 精确不一致拒绝。
+    stale = v.verify(_ok_summary_submission(c, "run_stale_0001"))
     assert stale.verdict is VerificationVerdict.VERIFIED
-    proxy._replay = stale
-    out = BoundedRepairLoop(
-        contract=c, verifier=proxy,
-        collect_evidence=lambda a, r: _ok_summary_submission(c, r)).run()
-    assert out.stop_reason is RepairStopReason.REPORT_REJECTED
-    assert out.final_report is None
-    assert "run_id_mismatch" in out.diagnostic
+    loop = BoundedRepairLoop(
+        contract=c, verifier=v,
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot)
+    accepted, why = loop._accept_verified_report(stale, "run_actual_0001")
+    assert accepted is False
+    assert "run_id_mismatch" in why
     # (b) 异契约：另一契约验证器签发的 VERIFIED 报告（seal/契约身份全不符；
-    #     c2 使用不同判据 → standard_hash 也不一致）。
+    #     c2 使用不同判据 → standard_hash 也不一致）——经接受门直接复核拒绝。
     c2 = _contract(work_real, contract_id="wc_16f_p2l_other_0001",
                    budget=ExecutionBudget(max_duration_seconds=600.0,
                                           cost_limit=CostBudget(amount=5.0),
@@ -2391,15 +2404,11 @@ def test_p2_l_stale_or_foreign_contract_report_rejected(env):
     foreign_rep = IndependentVerifier(c2).verify(_ok_summary_submission(c2, "run_p2l_x"))
     assert foreign_rep.verdict is VerificationVerdict.VERIFIED
     assert foreign_rep.standard_hash != IndependentVerifier(c).standard_hash
-    proxy2 = _ReplayVerifier(c, replay=foreign_rep)
-    out2 = BoundedRepairLoop(
-        contract=c, verifier=proxy2,
-        collect_evidence=lambda a, r: _ok_summary_submission(c, r)).run()
-    assert out2.stop_reason is RepairStopReason.REPORT_REJECTED
-    assert out2.final_report is None
-    assert "contract_id_mismatch" in out2.diagnostic \
-        and "standard_hash_mismatch" in out2.diagnostic \
-        and "run_id_mismatch" in out2.diagnostic
+    accepted2, why2 = loop._accept_verified_report(foreign_rep, "run_actual_0001")
+    assert accepted2 is False
+    assert "contract_id_mismatch" in why2 \
+        and "standard_hash_mismatch" in why2 \
+        and "run_id_mismatch" in why2
 
 
 # ================================================================
@@ -2998,13 +3007,12 @@ def test_p3_g_cancellation_mutates_cost_before_accept(env):
 
 
 def test_p3_h_authentication_mutates_deadline_or_cancel(env):
-    """P3-H 否证：接受门（seal 认证 / standard_hash 属性访问）内的回调副作用
-    必须被最终边界（P6-A 单一权威快照源）捕获——(a) seal_is_authentic 翻转
-    取消标志 → 快照读取原子看见 → CANCELLED / final_report=None；
-    (b) standard_hash 属性推进时钟越过 deadline → 快照时间越界 → TIMEOUT /
-    final_report=None。"""
+    """P3-H 否证（P10-B1 装配期拒绝协议适配）：seal 认证 / standard_hash 的
+    子类 override 副作用通道已在装配阶段被 exact trusted type 关闭——两类
+    攻击 verifier 均拒绝进入权威路径（接受门内的残余副作用面由 P6-A/P7-D
+    单一权威快照协议锁定保持：认证只发生在快照之前，其后零回调）。"""
     tmp, work, work_real, outside, outside_real = env
-    # (a) seal 认证回调翻转 cancellation
+    # (a) seal 认证回调翻转 cancellation 的攻击 verifier
     c = _verified_summary_contract(work_real, "wc_16f_p3h_a_0001")
     flags = {"cancel": False}
 
@@ -3015,16 +3023,14 @@ def test_p3_h_authentication_mutates_deadline_or_cancel(env):
 
     src = _BoundarySource(c)
     src.on_read = lambda s: setattr(s, "cancel", flags["cancel"])
-    out = BoundedRepairLoop(
-        contract=c, verifier=_SealSideEffectVerifier(c),
-        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
-        cancel_requested=lambda: flags["cancel"],
-        boundary_snapshot=src.snapshot).run()
-    assert out.attempts[0].verdict == "VERIFIED"
-    assert out.stop_reason is RepairStopReason.CANCELLED
-    assert out.final_report is None
+    with pytest.raises(VerificationError):
+        BoundedRepairLoop(
+            contract=c, verifier=_SealSideEffectVerifier(c),
+            collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+            cancel_requested=lambda: flags["cancel"],
+            boundary_snapshot=src.snapshot)
 
-    # (b) standard_hash 属性回调推进时钟越过 deadline（接受门内访问时触发）
+    # (b) standard_hash 属性回调推进时钟越过 deadline 的攻击 verifier
     clock = FakeClock(1000.0)
     c2 = _verified_summary_contract(work_real, "wc_16f_p3h_b_0001")
 
@@ -3044,13 +3050,11 @@ def test_p3_h_authentication_mutates_deadline_or_cancel(env):
     v2 = _HashAdvancingVerifier(c2, clock)
     src2 = _BoundarySource(c2)
     src2.on_read = lambda s: setattr(s, "now", clock.t)
-    out2 = BoundedRepairLoop(
-        contract=c2, verifier=v2,
-        collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
-        now_fn=clock, boundary_snapshot=src2.snapshot).run()
-    assert out2.attempts[0].verdict == "VERIFIED"
-    assert out2.stop_reason is RepairStopReason.TIMEOUT
-    assert out2.final_report is None
+    with pytest.raises(VerificationError):
+        BoundedRepairLoop(
+            contract=c2, verifier=v2,
+            collect_evidence=lambda a, r: _ok_summary_submission(c2, r),
+            now_fn=clock, boundary_snapshot=src2.snapshot)
 
 
 # ================================================================
@@ -4800,11 +4804,11 @@ def test_p7_c_exact_immutable_snapshot_positive(env):
     assert calls["n"] == 2
 
 
-def test_p7_d_post_snapshot_zero_callbacks_preserved(env):
-    """P7-A 锁定：权威快照（精确类型）之后的零回调语义保持——恰两次快照
-    读取（见证 + 权威），第一次快照之后零 now/cost/cancel 回调、零快照
-    读取、零 verifier 回调（seal 认证只发生在接受门内、快照之前）；完成
-    时间取快照时间。"""
+def test_p7_d_post_snapshot_zero_callbacks_preserved(env, monkeypatch):
+    """P7-A 锁定（P10-B1 类级 spy 协议适配）：权威快照（精确类型）之后的零
+    回调语义保持——恰两次快照读取（见证 + 权威），第一次快照之后零 now/
+    cost/cancel 回调、零快照读取、零 verifier 回调（seal 认证只发生在接受
+    门内、快照之前）；完成时间取快照时间。"""
     tmp, work, work_real, outside, outside_real = env
     (work_real / "summary.md").write_bytes(b"ok")
     c = _verified_summary_contract(work_real, "wc_16f_p7d_0001")
@@ -4822,17 +4826,20 @@ def test_p7_d_post_snapshot_zero_callbacks_preserved(env):
         events.append("cancel")
         return False
 
-    class _SealSpyVerifier(IndependentVerifier):
-        def __init__(self, contract):
-            super().__init__(contract)
-            self.seal_calls = 0
+    # P10-B1：verifier 必须 exact trusted type——seal spy 改为类级
+    # monkeypatch（在 loop 构造之前安装，类级绑定即取得 spy；语义与子类
+    # spy 等价）。
+    seal_calls = {"n": 0}
+    original_seal = IndependentVerifier.seal_is_authentic
 
-        def seal_is_authentic(self, report):
-            self.seal_calls += 1
-            events.append("seal")
-            return super().seal_is_authentic(report)
+    def _counting_seal(self, report):
+        seal_calls["n"] += 1
+        events.append("seal")
+        return original_seal(self, report)
 
-    v = _SealSpyVerifier(c)
+    monkeypatch.setattr(IndependentVerifier, "seal_is_authentic", _counting_seal)
+
+    v = IndependentVerifier(c)
     src = _BoundarySource(c, cost=0.0, now=500.0)
 
     def snap(_s):
@@ -4846,7 +4853,7 @@ def test_p7_d_post_snapshot_zero_callbacks_preserved(env):
     assert out.stop_reason is RepairStopReason.VERIFIED
     assert out.final_report is not None
     # seal 认证只发生在接受门内（快照之前恰一次）
-    assert v.seal_calls == 1
+    assert seal_calls["n"] == 1
     # 恰两次快照读取；第一次快照之后只剩第二次快照——零回调再发生
     assert src.reads == 2
     after_first_snap = events[events.index("snap"):]
@@ -6137,3 +6144,316 @@ def test_p9_b4_lock_e_process_timeout_subclass_rejected(env):
     # 错误消息零 repr：清洗后的类型名（安全词法 token）可出现，但对象值
     # （30.0）与动态消息绝不出现
     assert "30.0" not in str(ei.value)
+
+
+# ================================================================
+# Reviewer Patch 10 — B1 verifier 权威替换封闭 / B2 AttemptRecord·
+# RepairOutcome 语义闭环 / B3 evidence 容器 exact builtin（reviewer-locked）
+# ================================================================
+
+def test_p10_b1_forging_verifier_subclass_rejected(env):
+    """P10-B1 锁定（reviewer 反例）：ForgingVerifier 子类覆盖 verify（返回
+    正确 contract/run/hash、假 64-hex seal、零 checks 的伪 VERIFIED）与
+    seal_is_authentic（固定 True）→ 装配阶段即拒绝，绝不能 VERIFIED。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p10b1_0001")
+
+    class ForgingVerifier(IndependentVerifier):
+        def verify(self, evidence):
+            from furina.agent.verification import EvidenceBundle
+            bundle = EvidenceBundle(
+                contract_id=c.contract_id, contract_hash=c.content_hash,
+                run_id="run_p10b1_0001", backend_id="native_agent",
+                terminal=(), artifacts=())
+            return VerificationReport(
+                report_id="vrp_" + "0" * 32, verifier_id=VERIFIER_ID,
+                contract_id=c.contract_id, contract_hash=c.content_hash,
+                standard_hash=self.standard_hash, run_id="run_p10b1_0001",
+                backend_id="native_agent", verdict=VerificationVerdict.VERIFIED,
+                checks=(), diagnostics=(), evidence=bundle,
+                started_at_epoch=1.0, finished_at_epoch=2.0,
+                authority_seal="a" * 64)
+
+        def seal_is_authentic(self, report):
+            return True
+
+    with pytest.raises(VerificationError):
+        BoundedRepairLoop(contract=c, verifier=ForgingVerifier(c),
+                          collect_evidence=lambda a, r: _ok_summary_submission(c, r))
+
+
+def test_p10_b1_work_contract_subclass_rejected(env):
+    """P10-B1 锁定：WorkContract 子类（伪造契约身份状态）在 verifier 与
+    repair 两个权威装配边界都被 exact trusted type 拒绝。"""
+    import dataclasses as _dc
+
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p10b1_wc_0001")
+
+    class _SubContract(WorkContract):
+        pass
+
+    sub = _SubContract.__new__(_SubContract)
+    sub.__dict__.update(c.__dict__)
+    with pytest.raises(VerificationError):
+        IndependentVerifier(sub)
+    with pytest.raises(VerificationError):
+        BoundedRepairLoop(contract=sub, verifier=IndependentVerifier(c),
+                          collect_evidence=lambda a, r: _ok_summary_submission(c, r))
+
+
+def test_p10_b1_instance_attribute_shadowing_cannot_replace_authority(env):
+    """P10-B1 锁定：exact IndependentVerifier 实例上的 verify/seal_is_authentic
+    实例属性 shadowing 无法替换权威行为——repair 经类级绑定调用真实验证；
+    shadowing 存在时伪造/外来报告仍被真实 seal 复核拒绝。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p10b1_sh_0001")
+    v = IndependentVerifier(c)
+    calls = {"verify": 0, "seal": 0}
+
+    def _fake_verify(evidence):
+        calls["verify"] += 1
+        raise AssertionError("shadowed verify must not be used")
+
+    def _fake_seal(report):
+        calls["seal"] += 1
+        return True
+
+    v.verify = _fake_verify
+    v.seal_is_authentic = _fake_seal
+    out = BoundedRepairLoop(
+        contract=c, verifier=v,
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert out.final_report is not None
+    assert IndependentVerifier.seal_is_authentic(v, out.final_report) is True
+    assert calls == {"verify": 0, "seal": 0}
+    # shadowing 存在时外来签发报告仍被真实 seal 复核拒绝
+    foreign = IndependentVerifier(c)
+    foreign_rep = foreign.verify(_ok_summary_submission(c, "run_p10b1_x_0001"))
+    loop = BoundedRepairLoop(
+        contract=c, verifier=v,
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot)
+    ok, why = loop._accept_verified_report(foreign_rep, "run_other_0001")
+    assert ok is False and calls["seal"] == 0
+    assert "seal_not_authentic_for_current_verifier" in why
+
+
+def test_p10_b1_seal_check_malformed_report_false_no_raise(env):
+    """P10-B1 锁定：seal_is_authentic 对 object.__new__ 旁路畸形报告 /
+    非报告对象 / None 一律返回 False，绝不抛异常。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    bypass = object.__new__(VerificationReport)
+    assert v.seal_is_authentic(bypass) is False
+    assert v.seal_is_authentic(object()) is False
+    assert v.seal_is_authentic(None) is False
+
+
+def _p10_failed_report(c):
+    v = IndependentVerifier(c)
+    return v.verify(_submission(c, "run_p10b2_f_0001"))
+
+
+def _p10_verified_report(c):
+    v = IndependentVerifier(c)
+    return v.verify(_ok_summary_submission(c, "run_p10b2_v_0001"))
+
+
+def test_p10_b2_repair_outcome_semantic_closure(env):
+    """P10-B2 锁定（reviewer 反例全表）：VERIFIED+final_report=None /
+    VERIFIED+FAILED 报告 / 非 VERIFIED 终局携带 VERIFIED 报告 / bad
+    contract hash / finished<started / 最后 attempt 与报告身份不一致 /
+    空 attempts——全部构造拒绝。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    verfied_rep = _p10_verified_report(_verified_summary_contract(
+        work_real, "wc_16f_p10b2_v_0001"))
+    failed_rep = _p10_failed_report(_contract(work_real))
+    # 正例基线：attempt 身份与 VERIFIED 报告精确一致（run/report/hash）
+    good_attempt = AttemptRecord(
+        attempt_id="att_p10b2_0001", run_id=verfied_rep.run_id,
+        contract_hash=verfied_rep.contract_hash, verdict="VERIFIED",
+        report_id=verfied_rep.report_id, failure_signature="",
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+
+    def outcome(**over):
+        base = dict(stop_reason=RepairStopReason.VERIFIED,
+                    contract_id="wc_16f_p10b2_0001",
+                    contract_hash=verfied_rep.contract_hash,
+                    attempts=(good_attempt,), final_report=verfied_rep,
+                    started_at_epoch=1.0, finished_at_epoch=2.0, diagnostic="")
+        base.update(over)
+        return RepairOutcome(**base)
+
+    outcome()                                     # 一致的正例可构造
+    with pytest.raises(VerificationError):
+        outcome(final_report=None)                # VERIFIED + final_report=None
+    with pytest.raises(VerificationError):
+        outcome(final_report=failed_rep)          # VERIFIED + FAILED 报告
+    with pytest.raises(VerificationError):
+        outcome(stop_reason=RepairStopReason.ATTEMPTS_EXHAUSTED,
+                final_report=verfied_rep)         # 非 VERIFIED 终局携带 VERIFIED
+    with pytest.raises(VerificationError):
+        outcome(stop_reason=RepairStopReason.UNSTABLE_BOUNDARY,
+                final_report=verfied_rep)
+    with pytest.raises(VerificationError):
+        outcome(contract_hash="not-a-hash")       # bad contract hash
+    with pytest.raises(VerificationError):
+        outcome(started_at_epoch=2.0, finished_at_epoch=1.0)   # finished < started
+    with pytest.raises(VerificationError):
+        outcome(attempts=())                      # VERIFIED + 空 attempts
+    stale_attempt = AttemptRecord(
+        attempt_id="att_p10b2_0002", run_id="run_other_0001",
+        contract_hash=verfied_rep.contract_hash, verdict="VERIFIED",
+        report_id="vrp_" + "a" * 32,
+        failure_signature="", started_at_epoch=1.0, finished_at_epoch=2.0)
+    with pytest.raises(VerificationError):
+        outcome(attempts=(stale_attempt,))        # 最后 attempt 与报告 run 不一致
+
+
+def test_p10_b2_attempt_record_semantic_closure():
+    """P10-B2 锁定：AttemptRecord 的 canonical identity / 64-hex contract
+    hash / verdict 封闭词表 / verdict↔report_id·failure_signature 一致性 /
+    时序单调——全部构造拒绝面。"""
+    from furina.agent.verification.repair import AttemptRecord
+
+    def rec(**over):
+        base = dict(attempt_id="att_p10b2r_0001", run_id="run_p10b2r_0001",
+                    contract_hash="0" * 64, verdict="FAILED",
+                    report_id="vrp_" + "b" * 32, failure_signature="1" * 64,
+                    started_at_epoch=1.0, finished_at_epoch=2.0, diagnostic="")
+        base.update(over)
+        return AttemptRecord(**base)
+
+    rec()                                         # 一致的正例可构造
+    with pytest.raises(VerificationError):
+        rec(run_id=" run_x ")                     # canonical identity
+    with pytest.raises(VerificationError):
+        rec(contract_hash="not-a-hash")
+    with pytest.raises(VerificationError):
+        rec(verdict="MAYBE")                      # verdict 封闭词表
+    with pytest.raises(VerificationError):
+        rec(verdict="", report_id="", failure_signature="")   # 失败记录需签名
+    with pytest.raises(VerificationError):
+        rec(verdict="", report_id="vrp_" + "b" * 32, failure_signature="1" * 64)
+    with pytest.raises(VerificationError):
+        rec(verdict="VERIFIED", failure_signature="1" * 64)   # VERIFIED 零签名
+    with pytest.raises(VerificationError):
+        rec(started_at_epoch=2.0, finished_at_epoch=1.0)      # 时序
+
+
+def test_p10_b3_lying_list_container_subclass_rejected(env):
+    """P10-B3 锁定（reviewer 反例）：LyingList（__len__=0、__iter__ 产出
+    65 条）注入 terminal_events / declared_artifacts → VerificationInputError
+    且 len/iter/bool/getitem 零调用——cardinality 建立在 exact builtin
+    容器上，绝不经"先遍历后查长度"实现有界。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+
+    class _LyingList(list):
+        def __init__(self, items, calls):
+            super().__init__(items)
+            self._calls = calls
+
+        def __len__(self):
+            self._calls["len"] += 1
+            return 0
+
+        def __iter__(self):
+            self._calls["iter"] += 1
+            return list.__iter__(self)
+
+        def __bool__(self):
+            self._calls["bool"] += 1
+            return False
+
+        def __getitem__(self, index):
+            self._calls["getitem"] += 1
+            raise AssertionError("getitem must not be called")
+
+    events = [dict(_bound_terminal(c, f"run_p10b3_t_{i:04d}"),
+                   event_id=f"lev_p10b3_{i:04d}_deadbeef")
+              for i in range(65)]
+    calls = {"len": 0, "iter": 0, "bool": 0, "getitem": 0}
+    sub = _submission(c, "run_p10b3_t_0000")
+    sub["terminal_events"] = _LyingList(events, calls)
+    with pytest.raises(VerificationInputError):
+        v.verify(sub)
+    assert calls == {"len": 0, "iter": 0, "bool": 0, "getitem": 0}
+
+    declares = [dict(_declared(work_real / "ghost.md", artifact_id=f"lie_{i:04d}"))
+                for i in range(65)]
+    calls2 = {"len": 0, "iter": 0, "bool": 0, "getitem": 0}
+    sub2 = _submission(c, "run_p10b3_d_0000")
+    sub2["declared_artifacts"] = _LyingList(declares, calls2)
+    with pytest.raises(VerificationInputError):
+        v.verify(sub2)
+    assert calls2 == {"len": 0, "iter": 0, "bool": 0, "getitem": 0}
+
+
+def test_p10_b3_mapping_subclass_and_nested_entry_rejected(env):
+    """P10-B3 锁定：顶层 evidence 的 Mapping 子类（keys 访问即抛密）与
+    嵌套条目 dict 子类 → 全部在敌意魔术方法零调用下 fail-closed；plain
+    dict/list 正例不回归。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+
+    class _BoomKeysDict(dict):
+        def __init__(self, *a, calls=None, **k):
+            super().__init__(*a, **k)
+            self._calls = calls if calls is not None else {"keys": 0}
+
+        @property
+        def keys(self):
+            self._calls["keys"] += 1
+            raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    hostile = _BoomKeysDict({"run_id": "run_x"}, calls={"keys": 0})
+    with pytest.raises(VerificationInputError) as ei:
+        v.verify(hostile)
+    assert hostile._calls["keys"] == 0
+    assert _P8_SECRET not in str(ei.value)
+
+    class _LyingEventDict(dict):
+        def __init__(self, *a, calls=None, **k):
+            super().__init__(*a, **k)
+            self._calls = calls if calls is not None else {"keys": 0}
+
+        def keys(self):
+            self._calls["keys"] += 1
+            return iter(())
+
+    calls = {"keys": 0}
+    ev = _LyingEventDict(_bound_terminal(c, "run_p10b3_n_0001"), calls=calls)
+    sub = _submission(c, "run_p10b3_n_0001", terminal=[ev])
+    with pytest.raises(VerificationInputError):
+        v.verify(sub)
+    assert calls["keys"] == 0
+    # plain dict/list 正例不回归
+    v.verify(_submission(c, "run_p10b3_ok_0001",
+                         terminal=[dict(_bound_terminal(c, "run_p10b3_ok_0001"))]))
+
+
+def test_p10_b3_collect_non_dict_closed_in_loop(env):
+    """P10-B3 锁定：collect_evidence 返回非 builtin dict（MappingProxyType）
+    → 在调用 get()/解析前封闭为 collect 层失败（零 verify 调用、有界收尾）。"""
+    from types import MappingProxyType
+
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real, budget=ExecutionBudget(
+        max_duration_seconds=600.0, cost_limit=CostBudget(amount=5.0), max_attempts=1))
+    v = IndependentVerifier(c)
+    out = BoundedRepairLoop(contract=c, verifier=v,
+                            collect_evidence=lambda a, r: MappingProxyType({})).run()
+    assert out.stop_reason is RepairStopReason.ATTEMPTS_EXHAUSTED
+    assert len(out.attempts) == 1
+    assert out.attempts[0].verdict == ""
+    assert "collect_not_mapping" in out.attempts[0].diagnostic

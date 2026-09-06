@@ -116,9 +116,11 @@ from .models import (
     VerificationInputError,
     VerificationReport,
     VerificationVerdict,
+    _REPORT_ID_PATTERN,
     _SHA256_PATTERN,
     _safe_type_name,
     scrub_secrets,
+    validate_identity,
 )
 from .verifier import IndependentVerifier
 
@@ -171,6 +173,8 @@ def _finite_epoch(value: Any, field_name: str) -> float:
 
 _ATTEMPT_STR_FIELDS = ("attempt_id", "run_id", "contract_hash", "verdict",
                        "report_id", "failure_signature")
+#: P10-B2：AttemptRecord.verdict 封闭词表（"" = collect 层失败）。
+_ATTEMPT_VERDICTS = ("", "VERIFIED", "FAILED", "INCONCLUSIVE")
 
 
 @dataclass(frozen=True)
@@ -195,11 +199,40 @@ class AttemptRecord:
                 raise VerificationError(
                     f"{_name} 必须是 builtin str，得到 "
                     f"{_safe_type_name(type(getattr(self, _name)))}")
+        # P10-B2：语义一致性——attempt_id/run_id 走 canonical identity；
+        # contract_hash 严格 64 位小写 hex；verdict 封闭词表；
+        # verdict="" ⇒ report_id="" 且 failure_signature 为 64-hex 签名；
+        # verdict≠"" ⇒ report_id 为 vrp_ 报告身份且 VERIFIED ⇒ 签名为 ""。
+        validate_identity(self.attempt_id, "attempt_id")
+        validate_identity(self.run_id, "run_id")
+        if not _SHA256_PATTERN.match(self.contract_hash):
+            raise VerificationError("attempt contract_hash 必须是 64 位小写 hex")
+        if self.verdict not in _ATTEMPT_VERDICTS:
+            raise VerificationError(
+                f"attempt verdict 必须是封闭词表值，得到 "
+                f"{scrub_secrets(self.verdict)[:32]!r}")
+        if self.verdict == "":
+            if self.report_id != "" \
+                    or not _SHA256_PATTERN.match(self.failure_signature):
+                raise VerificationError(
+                    "collect 层失败记录必须 report_id=\"\" 且携带 64-hex 签名")
+        else:
+            if not _REPORT_ID_PATTERN.match(self.report_id):
+                raise VerificationError("attempt report_id 词法非法")
+            if self.verdict == "VERIFIED":
+                if self.failure_signature != "":
+                    raise VerificationError("VERIFIED 记录不得携带失败签名")
+            elif self.failure_signature != "" \
+                    and not _SHA256_PATTERN.match(self.failure_signature):
+                raise VerificationError("failure_signature 必须是空或 64 位小写 hex")
         # P8-B3：时间戳有限数值结构校验（bool/子类/NaN/Inf 拒绝）+ float 规范。
         object.__setattr__(self, "started_at_epoch",
                            _finite_epoch(self.started_at_epoch, "started_at_epoch"))
         object.__setattr__(self, "finished_at_epoch",
                            _finite_epoch(self.finished_at_epoch, "finished_at_epoch"))
+        # P10-B2：attempt 时序一致。
+        if self.finished_at_epoch < self.started_at_epoch:
+            raise VerificationError("attempt 时序非法：finished < started")
         # P9-B3：诊断必须是 builtin str——非字符串拒绝（绝不 `value or ""`
         # truthiness、绝不调用其 __bool__/__str__）；秘密边界（blocker 6）：
         # 诊断字符串面统一脱敏后限长。
@@ -239,11 +272,43 @@ class RepairOutcome:
         if self.final_report is not None \
                 and type(self.final_report) is not VerificationReport:
             raise VerificationError("final_report 必须是 None 或 VerificationReport")
+        # P10-B2：语义一致性——contract_id canonical、contract_hash 64-hex、
+        # 时序单调、VERIFIED 终局必须携带与最后 attempt 精确一致的 VERIFIED
+        # 报告；非 VERIFIED 终局绝不携带 VERIFIED 报告。（closeout 明确：
+        # RepairOutcome 是结构化执行结果，不是第二验证权威——final_report 的
+        # seal 真实性仍只能由当前 IndependentVerifier 复核。）
+        validate_identity(self.contract_id, "contract_id")
+        if not _SHA256_PATTERN.match(self.contract_hash):
+            raise VerificationError("contract_hash 必须是 64 位小写 hex")
         # P8-B3：时间戳有限数值结构校验——RepairOutcome 不得包含 NaN/Inf。
         object.__setattr__(self, "started_at_epoch",
                            _finite_epoch(self.started_at_epoch, "started_at_epoch"))
         object.__setattr__(self, "finished_at_epoch",
                            _finite_epoch(self.finished_at_epoch, "finished_at_epoch"))
+        if self.finished_at_epoch < self.started_at_epoch:
+            raise VerificationError("终局时序非法：finished < started")
+        for a in self.attempts:
+            if a.contract_hash != self.contract_hash:
+                raise VerificationError("attempt 契约 hash 与终局不一致")
+        if self.stop_reason is RepairStopReason.VERIFIED:
+            if self.final_report is None:
+                raise VerificationError(
+                    "VERIFIED 终局必须携带 final_report（不得为 None）")
+            if self.final_report.verdict is not VerificationVerdict.VERIFIED:
+                raise VerificationError("VERIFIED 终局的 final_report verdict 非法")
+            if not self.attempts:
+                raise VerificationError("VERIFIED 终局必须携带非空 attempts")
+            last = self.attempts[-1]
+            if last.verdict != "VERIFIED" \
+                    or last.report_id != self.final_report.report_id \
+                    or last.run_id != self.final_report.run_id \
+                    or last.contract_hash != self.final_report.contract_hash:
+                raise VerificationError(
+                    "最后 attempt 与 final_report 身份不一致")
+        elif self.final_report is not None \
+                and self.final_report.verdict is VerificationVerdict.VERIFIED:
+            raise VerificationError(
+                "非 VERIFIED 终局不得携带 VERIFIED final_report")
         # P9-B3：诊断必须是 builtin str（绝不 `value or ""` truthiness）。
         if type(self.diagnostic) is not str:
             raise VerificationError(
@@ -386,12 +451,18 @@ class BoundedRepairLoop:
                  now_fn: Callable[[], float] = time.time,
                  boundary_snapshot: Optional[Callable[[], BoundarySnapshot]] = None
                  ) -> None:
-        if not isinstance(contract, WorkContract):
+        # P10-B1：权威装配边界 exact trusted type——WorkContract 与
+        # IndependentVerifier 的子类（可覆盖 verify()/seal_is_authentic()/
+        # standard_hash 伪造零 checks VERIFIED 或固定 True 认证）不得进入
+        # verifier/repair 权威路径。
+        if type(contract) is not WorkContract:
             raise VerificationError(
-                f"repair 必须绑定 16A WorkContract，得到 "
-                f"{_safe_type_name(type(contract))}")
-        if not isinstance(verifier, IndependentVerifier):
-            raise VerificationError("repair 必须绑定 IndependentVerifier（验证权威唯一）")
+                f"repair 必须绑定 exact WorkContract（子类不得进入权威路径），"
+                f"得到 {_safe_type_name(type(contract))}")
+        if type(verifier) is not IndependentVerifier:
+            raise VerificationError(
+                f"repair 必须绑定 exact IndependentVerifier（子类不得进入权威"
+                f"路径），得到 {_safe_type_name(type(verifier))}")
         if verifier.contract_id != contract.contract_id \
                 or verifier.contract_hash != contract.content_hash:
             raise VerificationError("verifier 与 repair 绑定的契约身份不一致")
@@ -409,6 +480,14 @@ class BoundedRepairLoop:
 
         self._contract = contract
         self._verifier = verifier
+        # P10-B1：安全关键 verifier 调用经**类级**绑定取得（verify /
+        # seal_is_authentic / standard_hash）——exact trusted type + 类级取用
+        # 使实例属性 shadowing 与子类 override 都无法替换权威行为。
+        self._verify_submission = IndependentVerifier.verify.__get__(verifier)
+        self._seal_is_authentic = IndependentVerifier.seal_is_authentic.__get__(
+            verifier)
+        self._verifier_standard_hash = IndependentVerifier.standard_hash.fget(
+            verifier)
         self._collect = collect_evidence
         # P9-B1：optional callback 一律 **只**用 `is None` 判断是否采用默认值
         # ——`callback or default` 会调用回调对象的 __bool__：falsey callable
@@ -533,12 +612,14 @@ class BoundedRepairLoop:
             hard = False
             try:
                 submission = self._collect(attempt_id, run_id)
-                if not isinstance(submission, Mapping):
+                # P10-B3：collect 返回值在调用 get()/解析前封闭为 exact
+                # builtin dict（容器子类的 keys/len/iter/getitem 零调用）。
+                if type(submission) is not dict:
                     diagnostic = "collect_not_mapping"
                 elif submission.get("run_id") != run_id:
                     diagnostic = "run_id_mismatch"
                 else:
-                    report = self._verifier.verify(submission)
+                    report = self._verify_submission(submission)
             except HardBackendFailure as exc:
                 # 硬失败信号：记录该 attempt 后**立即停止**（绝不重试）；
                 # P8-B4：诊断面封闭——args 全为 builtin str 才脱敏导出，否则
@@ -696,7 +777,10 @@ class BoundedRepairLoop:
         绝不修补或重新签署外来报告。
         """
         reasons: List[str] = []
-        if not self._verifier.seal_is_authentic(report):
+        # P10-B1：seal/standard_hash 复核经类级绑定的权威实现（不可被子类/
+        # 实例属性替换）；报告对象必须是 exact VerificationReport（伪造/
+        # 旁路报告在身份复核面拒绝）。
+        if not self._seal_is_authentic(report):
             reasons.append("seal_not_authentic_for_current_verifier")
         if report.contract_id != self._contract.contract_id:
             reasons.append("contract_id_mismatch")
@@ -704,7 +788,7 @@ class BoundedRepairLoop:
             reasons.append("run_id_mismatch")
         if report.contract_hash != self._contract.content_hash:
             reasons.append("contract_hash_mismatch")
-        if report.standard_hash != self._verifier.standard_hash:
+        if report.standard_hash != self._verifier_standard_hash:
             reasons.append("standard_hash_mismatch")
         return (not reasons), ":".join(reasons)
 
