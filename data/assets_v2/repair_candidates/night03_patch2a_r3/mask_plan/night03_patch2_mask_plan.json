@@ -1,0 +1,1160 @@
+{
+ "MASK_PLAN_SHA256": "f80ae22ccf6ee78c7d6e56206cd133aa288b4dc001e3c3236096a1cd24d78e5a",
+ "assets": {
+  "a01": {
+   "allowed_terms": [
+    "old_tail_removal",
+    "tail_destination",
+    "seam_reconstruction",
+    "authorized_cleanup"
+   ],
+   "allowed_union_eq": true,
+   "boundary_residual_px": 1291,
+   "destination_on_transparent_only": true,
+   "intersections": {
+    "allowed_edit^protected_costume": 0,
+    "allowed_edit^protected_identity": 0,
+    "allowed_edit^protected_props": 0,
+    "old_tail_removal^authorized_cleanup": 0,
+    "old_tail_removal^seam_reconstruction": 0,
+    "old_tail_removal^tail_destination": 0,
+    "seam_reconstruction^authorized_cleanup": 0,
+    "tail_destination^authorized_cleanup": 0,
+    "tail_destination^seam_reconstruction": 172
+   },
+   "masks": {
+    "allowed_edit": {
+     "bbox": [
+      184,
+      714,
+      839,
+      1363
+     ],
+     "px": 49941,
+     "sha256": "a89353b604a036ae6d31939947694978d9a98d13c45d1a62c7aaf82eed9be61c"
+    },
+    "authorized_cleanup": {
+     "bbox": [
+      363,
+      714,
+      363,
+      715
+     ],
+     "px": 2,
+     "sha256": "9ca2440fc9bc56024992928f3ced50598e0a36b71d9917e471cc76bfb2477a89"
+    },
+    "old_tail_removal": {
+     "bbox": [
+      184,
+      1047,
+      317,
+      1363
+     ],
+     "px": 24368,
+     "sha256": "ff741143e8bc74ad6a07e195a74b473da09a005935f90d7bc64402e9d5819f68"
+    },
+    "protected_costume": {
+     "bbox": [
+      260,
+      820,
+      699,
+      1467
+     ],
+     "px": 203199,
+     "sha256": "627cce49b0b3cd08ae60778bf06590eaf39800ff62892bf8bed99d850bf98640"
+    },
+    "protected_identity": {
+     "bbox": [
+      229,
+      60,
+      699,
+      999
+     ],
+     "px": 320071,
+     "sha256": "cab00defd7842e65c846c2ba247862d81e0fa53aabe8ff0ca4237afdbd99c4c1"
+    },
+    "protected_props": {
+     "bbox": [
+      280,
+      1029,
+      331,
+      1406
+     ],
+     "px": 2578,
+     "sha256": "fd1cf738337878cc86398e5db87e00059e50ec4ae700554922584d5edaa42cf1"
+    },
+    "seam_reconstruction": {
+     "bbox": [
+      318,
+      1008,
+      739,
+      1199
+     ],
+     "px": 2053,
+     "sha256": "dd01dc2541af0c6b32abb18d4e1ad169a06f2b6108a0f84de0f4d320b863f0a9"
+    },
+    "tail_destination": {
+     "bbox": [
+      706,
+      1047,
+      839,
+      1363
+     ],
+     "px": 23690,
+     "sha256": "a814d44010be1adeaee864522163bffb3bbe2a7fb087143b54f72c8c8628875d"
+    },
+    "tail_source": {
+     "bbox": [
+      184,
+      1047,
+      317,
+      1363
+     ],
+     "px": 24368,
+     "sha256": "ff741143e8bc74ad6a07e195a74b473da09a005935f90d7bc64402e9d5819f68"
+    }
+   },
+   "master_file": "data/assets_v2/masters/furina_v2_a01_stand_neutral_front.png",
+   "master_sha256": "c3ed763c7eed3bfc620e4847e0028e5c6eae83a8170f41a1152915e7885172a6",
+   "residual_class_px": {
+    "cane_boundary_AA": 282,
+    "corridor_boundary_AA": 7,
+    "lining_boundary_AA": 996,
+    "upper_fringe": 6
+   },
+   "residual_components": [
+    {
+     "bbox": [
+      294,
+      1026,
+      295,
+      1026
+     ],
+     "class": "upper_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      294,
+      1028,
+      296,
+      1029
+     ],
+     "class": "upper_fringe",
+     "px": 4
+    },
+    {
+     "bbox": [
+      313,
+      1036,
+      317,
+      1067
+     ],
+     "class": "lining_boundary_AA",
+     "px": 110
+    },
+    {
+     "bbox": [
+      309,
+      1046,
+      310,
+      1058
+     ],
+     "class": "lining_boundary_AA",
+     "px": 14
+    },
+    {
+     "bbox": [
+      303,
+      1049,
+      307,
+      1062
+     ],
+     "class": "lining_boundary_AA",
+     "px": 59
+    },
+    {
+     "bbox": [
+      279,
+      1070,
+      279,
+      1071
+     ],
+     "class": "corridor_boundary_AA",
+     "px": 2
+    },
+    {
+     "bbox": [
+      236,
+      1081,
+      239,
+      1084
+     ],
+     "class": "corridor_boundary_AA",
+     "px": 4
+    },
+    {
+     "bbox": [
+      307,
+      1090,
+      317,
+      1135
+     ],
+     "class": "lining_boundary_AA",
+     "px": 321
+    },
+    {
+     "bbox": [
+      297,
+      1131,
+      308,
+      1152
+     ],
+     "class": "cane_boundary_AA",
+     "px": 141
+    },
+    {
+     "bbox": [
+      292,
+      1136,
+      297,
+      1148
+     ],
+     "class": "cane_boundary_AA",
+     "px": 33
+    },
+    {
+     "bbox": [
+      290,
+      1151,
+      290,
+      1151
+     ],
+     "class": "corridor_boundary_AA",
+     "px": 1
+    },
+    {
+     "bbox": [
+      297,
+      1175,
+      307,
+      1180
+     ],
+     "class": "cane_boundary_AA",
+     "px": 14
+    },
+    {
+     "bbox": [
+      300,
+      1178,
+      309,
+      1194
+     ],
+     "class": "cane_boundary_AA",
+     "px": 94
+    },
+    {
+     "bbox": [
+      314,
+      1229,
+      314,
+      1233
+     ],
+     "class": "lining_boundary_AA",
+     "px": 5
+    },
+    {
+     "bbox": [
+      306,
+      1230,
+      306,
+      1233
+     ],
+     "class": "lining_boundary_AA",
+     "px": 4
+    },
+    {
+     "bbox": [
+      307,
+      1235,
+      317,
+      1340
+     ],
+     "class": "lining_boundary_AA",
+     "px": 472
+    },
+    {
+     "bbox": [
+      315,
+      1239,
+      315,
+      1246
+     ],
+     "class": "lining_boundary_AA",
+     "px": 8
+    },
+    {
+     "bbox": [
+      309,
+      1312,
+      309,
+      1313
+     ],
+     "class": "lining_boundary_AA",
+     "px": 2
+    },
+    {
+     "bbox": [
+      309,
+      1315,
+      309,
+      1315
+     ],
+     "class": "lining_boundary_AA",
+     "px": 1
+    }
+   ],
+   "residual_total_equals_classes": true
+  },
+  "a05": {
+   "allowed_terms": [
+    "old_tail_removal",
+    "tail_destination",
+    "seam_reconstruction",
+    "authorized_cleanup"
+   ],
+   "allowed_union_eq": true,
+   "boundary_residual_px": 209,
+   "destination_on_transparent_only": true,
+   "intersections": {
+    "allowed_edit^protected_costume": 0,
+    "allowed_edit^protected_identity": 0,
+    "allowed_edit^protected_props": 0,
+    "old_tail_removal^authorized_cleanup": 0,
+    "old_tail_removal^seam_reconstruction": 0,
+    "old_tail_removal^tail_destination": 0,
+    "seam_reconstruction^authorized_cleanup": 0,
+    "tail_destination^authorized_cleanup": 0,
+    "tail_destination^seam_reconstruction": 0
+   },
+   "masks": {
+    "allowed_edit": {
+     "bbox": [
+      151,
+      916,
+      872,
+      1314
+     ],
+     "px": 72590,
+     "sha256": "71c5e5119fa9a10053bc1a252080aa95de8bde81da94e074fbc171d66ff8ca15"
+    },
+    "authorized_cleanup": {
+     "bbox": [
+      623,
+      1283,
+      662,
+      1314
+     ],
+     "px": 465,
+     "sha256": "1bb099b4d75dcab3ad534f42e13d447f171c41aa32e0d12d8e7e10f3875b57ef"
+    },
+    "old_tail_removal": {
+     "bbox": [
+      151,
+      916,
+      389,
+      1293
+     ],
+     "px": 46616,
+     "sha256": "18f3ac33ef606c189f01bd68badc3c99ed4109aad1f63b1c75bc188366d4493a"
+    },
+    "protected_costume": {
+     "bbox": [
+      380,
+      795,
+      799,
+      1467
+     ],
+     "px": 170165,
+     "sha256": "ef9c4a4b18045254d58d879bf08754a92d0747219e0faa39dc5f4b7b2c944d41"
+    },
+    "protected_identity": {
+     "bbox": [
+      238,
+      60,
+      699,
+      904
+     ],
+     "px": 291901,
+     "sha256": "1b6848732b6a792738141d98c1f110d92db317978d4594e737254c88a7d91b6c"
+    },
+    "protected_props": {
+     "bbox": [
+      691,
+      770,
+      867,
+      1368
+     ],
+     "px": 6378,
+     "sha256": "b2d661b9c7823d305b40f24aa6000fdecbde6b202c2328f9da2bc5b5c99faf1d"
+    },
+    "seam_reconstruction": {
+     "bbox": null,
+     "px": 0,
+     "sha256": "0807909bd58a9f929118935c505dde213e4d14ca6a4f9460b3cd408c6d1a6517"
+    },
+    "tail_destination": {
+     "bbox": [
+      640,
+      947,
+      872,
+      1293
+     ],
+     "px": 25509,
+     "sha256": "e9b3a950338e4e0c30799e9a7d1e78e31b1bb5496ca4ebd3a52a3f9cf6a06284"
+    },
+    "tail_source": {
+     "bbox": [
+      151,
+      916,
+      389,
+      1293
+     ],
+     "px": 46616,
+     "sha256": "18f3ac33ef606c189f01bd68badc3c99ed4109aad1f63b1c75bc188366d4493a"
+    }
+   },
+   "master_file": "data/assets_v2/masters/furina_v2_a05_stand_confident_proud.png",
+   "master_sha256": "8ddcfde186fb352ce32381543273902295ceeb3fd3f3db6b064141fcf5199a77",
+   "residual_class_px": {
+    "corridor_fringe": 209
+   },
+   "residual_components": [
+    {
+     "bbox": [
+      353,
+      905,
+      353,
+      905
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      387,
+      905,
+      394,
+      925
+     ],
+     "class": "corridor_fringe",
+     "px": 115
+    },
+    {
+     "bbox": [
+      350,
+      908,
+      351,
+      909
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      348,
+      912,
+      348,
+      912
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      345,
+      915,
+      346,
+      916
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      340,
+      921,
+      341,
+      922
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      380,
+      922,
+      382,
+      934
+     ],
+     "class": "corridor_fringe",
+     "px": 29
+    },
+    {
+     "bbox": [
+      331,
+      926,
+      337,
+      932
+     ],
+     "class": "corridor_fringe",
+     "px": 7
+    },
+    {
+     "bbox": [
+      386,
+      933,
+      387,
+      934
+     ],
+     "class": "corridor_fringe",
+     "px": 4
+    },
+    {
+     "bbox": [
+      389,
+      933,
+      394,
+      935
+     ],
+     "class": "corridor_fringe",
+     "px": 6
+    },
+    {
+     "bbox": [
+      317,
+      937,
+      327,
+      947
+     ],
+     "class": "corridor_fringe",
+     "px": 11
+    },
+    {
+     "bbox": [
+      320,
+      938,
+      320,
+      938
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      311,
+      951,
+      312,
+      952
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      303,
+      958,
+      305,
+      960
+     ],
+     "class": "corridor_fringe",
+     "px": 3
+    },
+    {
+     "bbox": [
+      299,
+      962,
+      300,
+      963
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      295,
+      964,
+      295,
+      964
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      294,
+      966,
+      295,
+      967
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      290,
+      969,
+      291,
+      970
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      284,
+      973,
+      286,
+      975
+     ],
+     "class": "corridor_fringe",
+     "px": 3
+    },
+    {
+     "bbox": [
+      280,
+      977,
+      281,
+      978
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      275,
+      980,
+      277,
+      982
+     ],
+     "class": "corridor_fringe",
+     "px": 3
+    },
+    {
+     "bbox": [
+      272,
+      983,
+      273,
+      984
+     ],
+     "class": "corridor_fringe",
+     "px": 2
+    },
+    {
+     "bbox": [
+      270,
+      985,
+      270,
+      985
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      256,
+      989,
+      256,
+      989
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      253,
+      991,
+      253,
+      991
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      249,
+      994,
+      249,
+      994
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      244,
+      997,
+      244,
+      997
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      238,
+      1285,
+      238,
+      1285
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    }
+   ],
+   "residual_total_equals_classes": true
+  },
+  "a16": {
+   "allowed_terms": [
+    "old_tail_removal",
+    "tail_destination",
+    "seam_reconstruction",
+    "speck_cleanup",
+    "chair_removal",
+    "cane_removal",
+    "hair_reconstruction",
+    "hand_reconstruction"
+   ],
+   "allowed_union_eq": true,
+   "boundary_residual_px": 467,
+   "destination_on_transparent_only": true,
+   "intersections": {
+    "allowed_edit^protected_costume": 0,
+    "allowed_edit^protected_existing_hair": 0,
+    "allowed_edit^protected_glove_gold_cuff": 0,
+    "allowed_edit^protected_quill_paper": 0,
+    "cane_removal^hair_reconstruction": 0,
+    "cane_removal^hand_reconstruction": 853,
+    "chair_removal^cane_removal": 1512,
+    "chair_removal^hair_reconstruction": 0,
+    "chair_removal^hand_reconstruction": 0,
+    "hair_reconstruction^hand_reconstruction": 0,
+    "old_tail_removal^cane_removal": 0,
+    "old_tail_removal^chair_removal": 0,
+    "old_tail_removal^hair_reconstruction": 0,
+    "old_tail_removal^hand_reconstruction": 0,
+    "old_tail_removal^seam_reconstruction": 0,
+    "old_tail_removal^speck_cleanup": 0,
+    "old_tail_removal^tail_destination": 0,
+    "seam_reconstruction^cane_removal": 0,
+    "seam_reconstruction^chair_removal": 0,
+    "seam_reconstruction^hair_reconstruction": 0,
+    "seam_reconstruction^hand_reconstruction": 0,
+    "seam_reconstruction^speck_cleanup": 0,
+    "speck_cleanup^cane_removal": 0,
+    "speck_cleanup^chair_removal": 0,
+    "speck_cleanup^hair_reconstruction": 0,
+    "speck_cleanup^hand_reconstruction": 0,
+    "tail_destination^cane_removal": 0,
+    "tail_destination^chair_removal": 0,
+    "tail_destination^hair_reconstruction": 0,
+    "tail_destination^hand_reconstruction": 0,
+    "tail_destination^seam_reconstruction": 0,
+    "tail_destination^speck_cleanup": 0
+   },
+   "masks": {
+    "allowed_edit": {
+     "bbox": [
+      186,
+      932,
+      837,
+      1449
+     ],
+     "px": 66706,
+     "sha256": "2f60f4b5ba4f79f076383c2b8349b26d0c3277037622821c02bb6a15987e1913"
+    },
+    "cane_removal": {
+     "bbox": [
+      592,
+      932,
+      795,
+      1449
+     ],
+     "px": 13562,
+     "sha256": "2fd5abaf66b6315c60a0537e6c007b411edeafad62856f8f42bfe14c8f908bb4"
+    },
+    "chair_removal": {
+     "bbox": [
+      499,
+      1216,
+      696,
+      1438
+     ],
+     "px": 12560,
+     "sha256": "3eca8ca4f5060c70f68fe641908b06bd973fb28307bf6d6c41e175e68b73fc22"
+    },
+    "hair_reconstruction": {
+     "bbox": null,
+     "px": 0,
+     "sha256": "0807909bd58a9f929118935c505dde213e4d14ca6a4f9460b3cd408c6d1a6517"
+    },
+    "hand_reconstruction": {
+     "bbox": [
+      715,
+      1035,
+      749,
+      1129
+     ],
+     "px": 1013,
+     "sha256": "a7a7d90a7b39715b6429ceebf2627111289853e0a997be536218a344c4f29ab5"
+    },
+    "old_tail_removal": {
+     "bbox": [
+      186,
+      1144,
+      381,
+      1421
+     ],
+     "px": 30231,
+     "sha256": "0f1d636117ad9780b8ea5e1a5e84ba17a427d15a0c14cf7802fd689077f86bea"
+    },
+    "protected_costume": {
+     "bbox": [
+      373,
+      880,
+      836,
+      1465
+     ],
+     "px": 95798,
+     "sha256": "b2612b53e40dd33b08626b806e82b6ec6301ae15c8487c2e9e01f8c4eea3832e"
+    },
+    "protected_existing_hair": {
+     "bbox": [
+      241,
+      540,
+      765,
+      919
+     ],
+     "px": 62279,
+     "sha256": "6025c5518e6bb4ad47e90a8db505521dcf56e3273d7a6dd3f304323b2d5fc519"
+    },
+    "protected_glove_gold_cuff": {
+     "bbox": [
+      600,
+      950,
+      739,
+      1159
+     ],
+     "px": 15854,
+     "sha256": "00d7bbb43582cdb4bc4517efeefcd9917bd6aa61c7d785c3a31e42e597a3118b"
+    },
+    "protected_quill_paper": {
+     "bbox": [
+      325,
+      940,
+      501,
+      1179
+     ],
+     "px": 8802,
+     "sha256": "2ad8ffc6acf65aa4f02dabd63a18e400ad04400679972b3ec36ea97b0ae8cb46"
+    },
+    "seam_reconstruction": {
+     "bbox": [
+      330,
+      1035,
+      394,
+      1114
+     ],
+     "px": 769,
+     "sha256": "c065566f0d441db863bf40433fd708342314eaf60f205b33d681477f807eca99"
+    },
+    "speck_cleanup": {
+     "bbox": [
+      273,
+      953,
+      312,
+      1074
+     ],
+     "px": 135,
+     "sha256": "ad13bc1bb055167f9cfa6b0e8ec8ae46bfdc7240891bea9247a54d9a56b56d6a"
+    },
+    "tail_destination": {
+     "bbox": [
+      642,
+      1144,
+      837,
+      1421
+     ],
+     "px": 10801,
+     "sha256": "519f8ec98c3acfb37a1ac065bd293698ede6b80852b38cf46d62628ab3c33e9f"
+    },
+    "tail_source": {
+     "bbox": [
+      186,
+      1144,
+      381,
+      1421
+     ],
+     "px": 30231,
+     "sha256": "0f1d636117ad9780b8ea5e1a5e84ba17a427d15a0c14cf7802fd689077f86bea"
+    }
+   },
+   "master_file": "data/assets_v2/masters/furina_v2_a16_work_focused.png",
+   "master_sha256": "f4997917453d6a541a08d021132ecad3bd8cffb63773833d31bdcde805d099ab",
+   "residual_class_px": {
+    "corridor_fringe": 5,
+    "paper_quill_boundary_AA": 462
+   },
+   "residual_components": [
+    {
+     "bbox": [
+      336,
+      1130,
+      338,
+      1130
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 3
+    },
+    {
+     "bbox": [
+      327,
+      1131,
+      328,
+      1131
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 2
+    },
+    {
+     "bbox": [
+      320,
+      1132,
+      321,
+      1132
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 2
+    },
+    {
+     "bbox": [
+      314,
+      1133,
+      315,
+      1133
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 2
+    },
+    {
+     "bbox": [
+      309,
+      1134,
+      310,
+      1134
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 2
+    },
+    {
+     "bbox": [
+      303,
+      1135,
+      304,
+      1135
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 2
+    },
+    {
+     "bbox": [
+      361,
+      1135,
+      368,
+      1144
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 20
+    },
+    {
+     "bbox": [
+      299,
+      1136,
+      299,
+      1136
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 1
+    },
+    {
+     "bbox": [
+      295,
+      1137,
+      295,
+      1137
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 1
+    },
+    {
+     "bbox": [
+      291,
+      1138,
+      292,
+      1138
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 2
+    },
+    {
+     "bbox": [
+      288,
+      1139,
+      288,
+      1139
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 1
+    },
+    {
+     "bbox": [
+      285,
+      1140,
+      285,
+      1140
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 1
+    },
+    {
+     "bbox": [
+      281,
+      1141,
+      281,
+      1141
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      278,
+      1142,
+      278,
+      1142
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      275,
+      1143,
+      275,
+      1143
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      270,
+      1145,
+      270,
+      1145
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      268,
+      1146,
+      268,
+      1146
+     ],
+     "class": "corridor_fringe",
+     "px": 1
+    },
+    {
+     "bbox": [
+      330,
+      1171,
+      380,
+      1179
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 321
+    },
+    {
+     "bbox": [
+      380,
+      1320,
+      380,
+      1320
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 1
+    },
+    {
+     "bbox": [
+      370,
+      1331,
+      378,
+      1343
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 37
+    },
+    {
+     "bbox": [
+      386,
+      1334,
+      393,
+      1343
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 57
+    },
+    {
+     "bbox": [
+      381,
+      1344,
+      384,
+      1347
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 6
+    },
+    {
+     "bbox": [
+      381,
+      1348,
+      381,
+      1348
+     ],
+     "class": "paper_quill_boundary_AA",
+     "px": 1
+    }
+   ],
+   "residual_total_equals_classes": true
+  }
+ },
+ "base_sha": "98987c90e260fb4df500c3303c70d2b5ae82dde8",
+ "canvas": [
+  1024,
+  1536
+ ],
+ "inputs": {
+  "BASE": "2f8e10bb17cdc325cf29954bd960e55c90208e84835dddf5b62001a5b922682a",
+  "PATCH1_REVIEW_REPORT": "cb4088eac01ff69cb9fba27a4f960254d6c4a8c9b2ef99da80d7d7af18ca14c2",
+  "_spec/ART_ALPHA_PLAN.md": "1c9481aeee5948ce27aa6e802fbf81855c62b0d94914e1b68e7e28839225ed9c",
+  "_spec/ART_ALPHA_REVIEW_REPORT.md": "ab983d47653c3176b4550175b58a29d665b8e9177f92958303c91277304422c2",
+  "_spec/ASSET_GEOMETRY_AND_ANCHOR_SPEC.md": "a08d875fe5a74d27fb7cb25da8faaab0c3cd4d7de4e756e1ba08b2dcc0e1f018",
+  "_spec/ASSET_STYLE_LOCK.md": "f9d4d597dcc40ba1d3f0d456d9793451be1691f7e56647086683758094f7d54e",
+  "_spec/ASSET_TAXONOMY_AND_MANIFEST.md": "d34b2aae284dc6374455b660934ddc24cb8f3a56ac3ef76f5156b9a25022734c",
+  "_spec/ASSET_TOPOLOGY_MAP.md": "e045b762c69a7c6977804ae9a24d63d2ebba5d9f66312e7106bc79cbe9ff9dcd",
+  "_spec/FURINA_IDENTITY_LOCK.md": "c757eaaa3ae79923d4cf3f454e270b74c0c1751b62beddfee5cace9cc96c8996",
+  "_spec/MASTER_GENERATION_PROMPT_SPEC.md": "ff8d22ccf64d2565d0631e6a601ee8c0b92322065231bb1a7146dc96b2057160"
+ },
+ "task": "NIGHT03_RECOVERY_PATCH2A_R2_MASK_FREEZE"
+}
