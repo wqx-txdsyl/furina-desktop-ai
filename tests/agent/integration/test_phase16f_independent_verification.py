@@ -6656,3 +6656,169 @@ def test_p11_b3_snapshot_bounded_under_mutation(env):
     assert rep.verdict is VerificationVerdict.VERIFIED
     assert len(rep.evidence.terminal) <= 64   # 追加项绝不进入本轮解析
     assert len(rep.evidence.terminal) == 64
+
+
+# ================================================================
+# Reviewer Patch 12 — B1 outcome 权威 API 禁实例 shadowing /
+# B2 attempt 数量双层硬上限（reviewer-locked）
+# ================================================================
+
+def _p12_forged_outcome(c):
+    """构造结构一致、seal 伪造的 VERIFIED outcome（假 64-hex seal）。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    real = _p10_verified_report(c)
+    forged = VerificationReport(
+        report_id=real.report_id, verifier_id=real.verifier_id,
+        contract_id=real.contract_id, contract_hash=real.contract_hash,
+        standard_hash=real.standard_hash, run_id=real.run_id,
+        backend_id=real.backend_id, verdict=VerificationVerdict.VERIFIED,
+        checks=real.checks, diagnostics=real.diagnostics, evidence=real.evidence,
+        started_at_epoch=real.started_at_epoch,
+        finished_at_epoch=real.finished_at_epoch,
+        authority_seal="b" * 64)
+    attempt = AttemptRecord(
+        attempt_id="att_p12_0001", run_id=forged.run_id,
+        contract_hash=forged.contract_hash, verdict="VERIFIED",
+        report_id=forged.report_id, failure_signature="",
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+    return RepairOutcome(
+        stop_reason=RepairStopReason.VERIFIED,
+        contract_id=forged.contract_id, contract_hash=forged.contract_hash,
+        attempts=(attempt,), final_report=forged,
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+
+
+def test_p12_b1_seal_shadowing_cannot_bypass_outcome_authenticity(env):
+    """P12-B1 锁定（reviewer 反例）：实例注入 seal_is_authentic=lambda: True
+    后，普通调用与类入口调用的 outcome_is_authentic 都仍为 false——seal
+    复核经类级绑定，实例 shadowing 无法替换权威行为。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p12b1_0001")
+    v = IndependentVerifier(c)
+    forged = _p12_forged_outcome(c)
+    assert v.outcome_is_authentic(forged) is False      # shadow 之前即 false
+    v.seal_is_authentic = lambda report: True           # 实例 shadowing
+    assert v.outcome_is_authentic(forged) is False      # 普通调用仍 false
+    assert IndependentVerifier.outcome_is_authentic(
+        v, forged) is False                             # 类入口仍 false
+    # shadow 本身确实生效（仅证明注入成功——对比上面的 false）
+    assert v.seal_is_authentic(object.__new__(VerificationReport)) is True
+
+
+def test_p12_b1_class_entry_unaffected_by_verify_shadow(env):
+    """P12-B1 锁定：实例注入 verify/outcome_is_authentic shadow 属性 →
+    类入口对真实 outcome 的判定不受影响（真实 outcome → true）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p12b1_cls_0001")
+    v = IndependentVerifier(c)
+    out = BoundedRepairLoop(
+        contract=c, verifier=v,
+        collect_evidence=lambda a, r: _ok_summary_submission(c, r),
+        now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    v.verify = lambda evidence: None
+    v.outcome_is_authentic = lambda outcome: False
+    assert IndependentVerifier.outcome_is_authentic(v, out) is True
+    assert IndependentVerifier.seal_is_authentic(v, out.final_report) is True
+
+
+def test_p12_b1_hostile_stop_reason_value_property_zero_calls(env):
+    """P12-B1 锁定：object.__new__ 旁路 outcome 携带敌意 stop_reason.value
+    property → false 且 property 调用次数为 0（exact RepairStopReason 先于
+    identity 比较，禁止 getattr 动态分派）。"""
+    from furina.agent.verification.repair import RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c = _contract(work_real)
+    v = IndependentVerifier(c)
+    calls = {"value": 0}
+
+    class _HostileStop:
+        @property
+        def value(self):
+            calls["value"] += 1
+            raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    bypass = object.__new__(RepairOutcome)
+    object.__setattr__(bypass, "stop_reason", _HostileStop())
+    assert v.outcome_is_authentic(bypass) is False
+    assert calls["value"] == 0
+
+
+def test_p12_b2_global_attempt_cap_enforced(env):
+    """P12-B2 锁定（reviewer 反例）：100 个身份唯一、时序合法的 attempts →
+    构造拒绝（WorkContract 全局上限 99）；上限拒绝发生在元素遍历之前
+    （100 个非 AttemptRecord 元素同样以数量错误拒绝）；99 个合法 attempts
+    不因数量误拒。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p12b2_0001")
+    rep = _p10_verified_report(c)
+
+    def mk(i):
+        return AttemptRecord(
+            attempt_id=f"att_p12b2_{i:04d}", run_id=f"run_p12b2_{i:04d}",
+            contract_hash=rep.contract_hash, verdict="FAILED",
+            report_id="vrp_" + f"{i:032d}",
+            failure_signature="2" * 64,
+            started_at_epoch=i * 0.1, finished_at_epoch=i * 0.1 + 0.09)
+
+    hundred = tuple(mk(i) for i in range(100))
+    with pytest.raises(VerificationError) as ei:
+        RepairOutcome(stop_reason=RepairStopReason.ATTEMPTS_EXHAUSTED,
+                      contract_id=rep.contract_id,
+                      contract_hash=rep.contract_hash,
+                      attempts=hundred, final_report=None,
+                      started_at_epoch=0.0, finished_at_epoch=10.0)
+    assert "全局硬上限" in str(ei.value)
+    # 元素遍历之前拒绝：100 个非 AttemptRecord 元素同样以数量错误拒绝
+    with pytest.raises(VerificationError) as ei2:
+        RepairOutcome(stop_reason=RepairStopReason.ATTEMPTS_EXHAUSTED,
+                      contract_id=rep.contract_id,
+                      contract_hash=rep.contract_hash,
+                      attempts=tuple(range(100)), final_report=None,
+                      started_at_epoch=0.0, finished_at_epoch=10.0)
+    assert "全局硬上限" in str(ei2.value)
+    # 全局边界 99 不因数量误拒（其余字段合法）
+    ninetynine = tuple(mk(i) for i in range(99))
+    outcome = RepairOutcome(stop_reason=RepairStopReason.ATTEMPTS_EXHAUSTED,
+                            contract_id=rep.contract_id,
+                            contract_hash=rep.contract_hash,
+                            attempts=ninetynine, final_report=None,
+                            started_at_epoch=0.0, finished_at_epoch=10.0)
+    assert len(outcome.attempts) == 99
+
+
+def test_p12_b2_contract_attempt_cap_in_authenticity(env):
+    """P12-B2 锁定：当前契约 budget.max_attempts=1、outcome 含 2 个
+    attempts → outcome_is_authentic=false；边界内真实 outcome → true。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    (work_real / "summary.md").write_bytes(b"ok")
+    c1 = _contract(work_real, contract_id="wc_16f_p12b2_c1_0001",
+                   budget=ExecutionBudget(max_duration_seconds=600.0,
+                                          cost_limit=CostBudget(amount=5.0),
+                                          max_attempts=1))
+    v = IndependentVerifier(c1)
+    real = v.verify(_ok_summary_submission(c1, "run_p12c1_v_0001"))
+
+    a0 = AttemptRecord(attempt_id="att_p12c1_0001", run_id="run_p12c1_early_0001",
+                       contract_hash=c1.content_hash, verdict="FAILED",
+                       report_id="vrp_" + "d" * 32, failure_signature="3" * 64,
+                       started_at_epoch=1.0, finished_at_epoch=2.0)
+    a1 = AttemptRecord(attempt_id="att_p12c1_0002", run_id=real.run_id,
+                       contract_hash=real.contract_hash, verdict="VERIFIED",
+                       report_id=real.report_id, failure_signature="",
+                       started_at_epoch=3.0, finished_at_epoch=4.0)
+    two = RepairOutcome(stop_reason=RepairStopReason.VERIFIED,
+                        contract_id=c1.contract_id,
+                        contract_hash=c1.content_hash,
+                        attempts=(a0, a1), final_report=real,
+                        started_at_epoch=0.0, finished_at_epoch=10.0)
+    assert v.outcome_is_authentic(two) is False        # 契约级上限（2 > 1）
+    one = RepairOutcome(stop_reason=RepairStopReason.VERIFIED,
+                        contract_id=c1.contract_id,
+                        contract_hash=c1.content_hash,
+                        attempts=(a1,), final_report=real,
+                        started_at_epoch=0.0, finished_at_epoch=10.0)
+    assert v.outcome_is_authentic(one) is True         # 边界内真实 outcome

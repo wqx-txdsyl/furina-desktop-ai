@@ -230,6 +230,90 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.0000000000 Patch 12 回执（Reviewer Patch 12 专用）
+
+```text
+BASE_SHA                         = 21be0ed19d12220b09e710a37ef12c53389c9bca
+                                   （PATCH11_FINAL_SHA；Patch 12 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+BRANCH                           = feature/phase16-16f-independent-verification-
+                                   patch2-clean
+MODEL                            = GLM-5.3-Flash（任务书推荐模型）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–11 惯例）
+CHANGED_FILES                    = furina/agent/verification/repair.py,
+                                   verifier.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（models.py/checks.py/
+                                   __init__.py 零改动）
+CLASS_OWNED_OUTCOME_AUTHORITY    = true（B1：outcome_is_authentic 内的 seal
+                                   复核经**类级绑定**真实实现
+                                   （IndependentVerifier.seal_is_authentic.
+                                   __get__(self)）——禁止 self.seal_is_
+                                   authentic 动态分派；16G 消费契约明确：
+                                   必须调用 IndependentVerifier 类拥有的
+                                   outcome 真实性入口，不得通过可被实例
+                                   shadow 的动态属性决定晋升）
+INSTANCE_SHADOWING_BLOCKED       = true（锁定（reviewer 反例）：实例注入
+                                   seal_is_authentic=lambda: True 后普通调用
+                                   与类入口调用均仍 false（shadow 之前即
+                                   false）；实例注入 verify/outcome_is_
+                                   authentic shadow 属性 → 类入口对真实
+                                   outcome 判定不受影响（true））
+HOSTILE_BYPASS_FIELDS_OBSERVED   = false（B1：字段先做 exact builtin 类型
+                                   证明再做比较/属性访问——stop_reason 必须
+                                   exact RepairStopReason 且 identity 为
+                                   VERIFIED（getattr 动态分派删除）；锁定：
+                                   object.__new__ 旁路 outcome 携带敌意
+                                   stop_reason.value property → false 且
+                                   property 调用次数为 0；foreign verifier/
+                                   跨契约/畸形 report 保持 false；任意异常
+                                   → False 零泄漏绝不抛出）
+GLOBAL_ATTEMPT_CAP_ENFORCED      = true（B2：RepairOutcome 构造时在遍历/
+                                   all() 之前执行 O(1) 数量检查——attempts
+                                   不得超过 WorkContract 全局 MAX_ATTEMPTS
+                                   (99)；锁定：100 个身份唯一、时序合法
+                                   attempts → 构造拒绝；100 个非 AttemptRecord
+                                   元素同样以数量错误拒绝（超限账本零遍历）；
+                                   99 个合法 attempts 不因数量误拒）
+CONTRACT_ATTEMPT_CAP_ENFORCED    = true（B2：outcome_is_authentic 验证
+                                   len(outcome.attempts) <= 当前绑定契约
+                                   budget.max_attempts（O(1)、先于账本遍历）；
+                                   锁定：契约 max_attempts=1 + 2 attempts →
+                                   false；边界内真实 outcome → true）
+FORGED_SEAL_OUTCOME_ACCEPTED     = false（假 64-hex seal outcome 在 shadow
+                                   前后均 false）
+OLD_TESTS_PRESERVED              = true（259 项既有专项测试全保留——P11 的
+                                   7 项与 P1–P10 全部否证零弱化、零 skip、
+                                   零 xfail）
+NEW_P12_TESTS                    = 5 项（B1 seal shadowing 反例/类入口不受
+                                   verify·outcome shadow 影响/敌意 stop_reason
+                                   property 零调用 + B2 全局上限（含元素遍历
+                                   前拒绝与 99 边界正例）/契约级上限）
+TARGETED                         = 264 passed / 0 failed / 0 skipped（16F 专项：
+                                   原 259 全保留 + 5 项 P12 reviewer-locked
+                                   否证/正例；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 671 passed（tests/agent 全目录一次；
+                                   = Patch 11 基线 666 + P12 新增 5）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1953 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 264 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；本补丁全部测试尝试零 flaky 零
+                                   重跑）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 repair.py + verifier.py +
+                                   1 测试文件 + 本 closeout——16A–16E frozen
+                                   contracts 与 C1–C7 零改动，models.py/
+                                   checks.py/__init__.py 零改动）
+GIT_DIFF_CHECK                   = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+STATUS                           = READY_FOR_REVIEW
+```
+
 ## 0.000000000 Patch 11 回执（Reviewer Patch 11 专用）
 
 **权限声明（任务书要求明确）：RepairOutcome 只负责结构绑定，不是第二验证

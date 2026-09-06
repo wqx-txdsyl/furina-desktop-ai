@@ -108,7 +108,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, List, Mapping, Optional, Tuple
 
-from furina.agent.work_contract import WorkContract
+from furina.agent.work_contract import MAX_ATTEMPTS, WorkContract
 
 from .models import (
     MAX_DIAGNOSTIC_CHARS,
@@ -270,9 +270,17 @@ class RepairOutcome:
                 f"{_safe_type_name(type(self.stop_reason))}")
         if type(self.contract_id) is not str or type(self.contract_hash) is not str:
             raise VerificationError("contract_id/contract_hash 必须是 builtin str")
-        if type(self.attempts) is not tuple \
-                or not all(type(a) is AttemptRecord for a in self.attempts):
-            raise VerificationError("attempts 必须是 builtin tuple 且元素为 AttemptRecord")
+        if type(self.attempts) is not tuple:
+            raise VerificationError("attempts 必须是 builtin tuple（封闭导出树）")
+        # P12-B2：O(1) 全局 attempt 数量硬上限——**先封数量再遍历账本**（超限
+        # 账本零遍历、元素级校验不执行；reviewer 实测 100 个身份唯一、时序
+        # 合法的 attempts 曾可构造而 WorkContract 全局上限为 99——通道关闭）。
+        if len(self.attempts) > MAX_ATTEMPTS:
+            raise VerificationError(
+                f"attempts 数量 {len(self.attempts)} 超界全局硬上限 "
+                f"{MAX_ATTEMPTS}（先封数量再遍历）")
+        if not all(type(a) is AttemptRecord for a in self.attempts):
+            raise VerificationError("attempts 必须全部是 AttemptRecord")
         if self.final_report is not None \
                 and type(self.final_report) is not VerificationReport:
             raise VerificationError("final_report 必须是 None 或 VerificationReport")
