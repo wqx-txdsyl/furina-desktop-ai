@@ -1,40 +1,35 @@
-"""Phase 16H — Durable Work Ledger：工作域持久化 / 幂等 / 崩溃恢复 / 背压。
+"""Phase 16H v2 — Durable Work Ledger（Review Patch 1 结构性封闭版）。
 
-权威边界（16H 任务书 §1–3）：
+权威边界（16H 任务书 §1–3 + Reviewer Patch 1 B1–B3/B6）：
 
-- 本 ledger 是**工作执行域**的唯一持久化真值（immutable contract identity、
-  execution claim、attempt/run/backend 绑定、单调 state_version、normalized
-  critical/terminal evidence、cancellation intent、verification/recovery
-  marker、供 16G 使用的 truth-commit claim/marker）。
-- **不是**新的 cognition store，不能成为 Persona/Memory/Relationship truth；
-  WorkExecutionState 只进入本工作域表，UNKNOWN/BLOCKED_APPROVAL/VERIFYING/
-  REPAIRING/BACKEND_DONE_UNVERIFIED 等禁止写入 C7；本阶段 truth-commit 只提供
-  claim/CAS API，不写 C7/C6（16G 拥有最终投影）。
-
-存储决策（Recon Gate 记录）：**独立 work-domain SQLite 数据库**（独立文件、
-独立连接、独立 schema versioning）——与 Phase 15 的 furina.db（C1–C7 归属
-CognitionDB/MemoryStore）零表接触、零 writer 共享；migration additive、
-versioned、幂等（CREATE TABLE IF NOT EXISTS + PRAGMA user_version 单调推进，
-重复 reopen 零副作用）。
-
-硬约束（任务书 §3 / 关键锁定）：
-
-- 同 contract_id、不同 contract_hash → :class:`ContractIdentityConflict`。
-- 每个 contract 最多一个 active execution claim（partial UNIQUE INDEX 硬约束
-  + 应用层前置检查）。
-- 所有 claim/CAS/version 更新在 SQLite 事务内原子完成；stale worker
-  （state_version 不匹配）→ :class:`StaleStateVersion`，零状态修改，终态
-  绝不被覆盖。
-- event_id 同内容重投幂等；同 id 异内容 → :class:`EventContentConflict`。
-- 持久化载荷 exact schema/type、canonical JSON（sort_keys/allow_nan=False）、
-  尺寸有界；只持久化 16E 已清洗数据，不保存 raw secret。
-- 终态（CANCELLED/VERIFIED/FAILED）吸收：终态后零状态迁移。
-
-背压（任务书 §6）：:class:`WorkEventBuffer` 为纯内存 tick 路径安全结构
-（offer 零 DB/vector/network I/O）；critical 永不丢弃——容量耗尽 fail-closed
-抛 :class:`CriticalBufferOverflow`（调用方停止摄取并进入 UNKNOWN/reconcile）；
-progress/token tick 可确定性丢弃、reconnect/unknown 可合并，计数持久化于
-work_counters。
+- 本 ledger 是**工作执行域**的唯一持久化真值；不是 cognition store，不能成为
+  Persona/Memory/Relationship truth；WorkExecutionState 只进入工作域表；
+  truth-commit 只提供 claim/CAS API，零 C7/C6/C3 写入。
+- **VERIFIED 唯一入口**：:meth:`WorkLedger.mark_verified_by_outcome`——verifier
+  必须 exact :class:`IndependentVerifier`、outcome 必须 exact
+  :class:`RepairOutcome`、seal 复核经**类拥有**的
+  ``IndependentVerifier.outcome_is_authentic``（禁止实例动态分派/shadow/
+  subclass override）、outcome contract_id/hash/run_id 与 ledger 冻结身份
+  完全一致、report_digest 64-hex 并与持久化 marker 一致。
+  generic :meth:`transition` **不得**写 VERIFIED、不得写 TOOL_RUNNING
+  primary、不得做 16E 之外的任意迁移（显式合法迁移表）。
+- **truth-commit claim** 仅允许已 VERIFIED（verification_verified=1 且
+  marker 非空）的 execution；claim 绑定 contract_id/hash/report_digest；
+  STARTING/UNKNOWN/FAILED/CANCELLED/BACKEND_DONE_UNVERIFIED 一律拒绝。
+- **跨连接真 CAS**：全部 mutation 为
+  ``UPDATE ... WHERE ... state_version=?``（或状态/认领谓词）并检查
+  ``rowcount == 1``——两个 WorkLedger 实例并发同 version 更新恰一成功；
+  active claim 并发冲突（partial UNIQUE INDEX）折为类型化
+  :class:`DuplicateActiveExecution`，绝不泄漏 sqlite3.IntegrityError。
+- **run/backend 绑定 write-once**：首绑成功；同 run/backend 重放幂等；
+  不同 run/backend 拒绝覆盖。
+- **event 身份按 (execution_id, event_id) 隔离**：不同 execution 同 event_id
+  各自保留；同 execution 同内容幂等、异内容类型化冲突。
+- **payload canonical**：exact builtin dict、16E sanitize_payload 有界脱敏、
+  canonical JSON（allow_nan=False → NaN/Inf fail-closed）、字节上限（安全
+  最大值封顶，不能传 10^12 关闭有界性）。
+- migration 在显式事务中完成：future/未知 user_version 拒绝、必需表结构
+  复核、幂等 reopen。
 """
 from __future__ import annotations
 
@@ -54,6 +49,7 @@ from furina.agent.events.models import (
     sanitize_payload,
 )
 from furina.agent.events.reducer import WorkExecutionState
+from furina.agent.work_contract import WorkContract
 from furina.core import FurinaError
 
 __all__ = [
@@ -64,26 +60,91 @@ __all__ = [
     "EventBufferOutcome",
     "EventContentConflict",
     "ExecutionRecord",
+    "IllegalTransition",
+    "RunBindingConflict",
     "StaleStateVersion",
     "UnknownExecution",
+    "WorkContractReloadError",
     "WorkEventBuffer",
     "WorkLedger",
     "WorkLedgerError",
 ]
 
-#: 终态集合（终态吸收：进入后零状态迁移）。
 _TERMINAL_STATES = frozenset({
     WorkExecutionState.CANCELLED,
     WorkExecutionState.VERIFIED,
     WorkExecutionState.FAILED,
 })
 
-#: 默认有界参数。
-DEFAULT_MAX_EVENTS_PER_RUN = 256
+#: P13-R1/B1：generic transition 的**显式合法迁移表**——VERIFIED 与
+#: TOOL_RUNNING（子相位）永不在目标集内；UNKNOWN 不得恢复 RUNNING。
+_ALLOWED_TRANSITIONS: Dict[WorkExecutionState, frozenset] = {
+    WorkExecutionState.STARTING: frozenset({
+        WorkExecutionState.RUNNING, WorkExecutionState.WAITING_PERMISSION,
+        WorkExecutionState.BLOCKED_APPROVAL, WorkExecutionState.CANCELLING,
+        WorkExecutionState.UNKNOWN, WorkExecutionState.FAILED,
+        WorkExecutionState.BACKEND_DONE_UNVERIFIED, WorkExecutionState.CANCELLED,
+    }),
+    WorkExecutionState.RUNNING: frozenset({
+        WorkExecutionState.WAITING_PERMISSION,
+        WorkExecutionState.BLOCKED_APPROVAL, WorkExecutionState.VERIFYING,
+        WorkExecutionState.REPAIRING, WorkExecutionState.CANCELLING,
+        WorkExecutionState.UNKNOWN, WorkExecutionState.FAILED,
+        WorkExecutionState.BACKEND_DONE_UNVERIFIED, WorkExecutionState.CANCELLED,
+    }),
+    WorkExecutionState.WAITING_PERMISSION: frozenset({
+        WorkExecutionState.RUNNING, WorkExecutionState.BLOCKED_APPROVAL,
+        WorkExecutionState.CANCELLING, WorkExecutionState.UNKNOWN,
+        WorkExecutionState.FAILED, WorkExecutionState.CANCELLED,
+        WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+    }),
+    WorkExecutionState.BLOCKED_APPROVAL: frozenset({
+        WorkExecutionState.RUNNING, WorkExecutionState.CANCELLING,
+        WorkExecutionState.UNKNOWN, WorkExecutionState.FAILED,
+        WorkExecutionState.CANCELLED, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+    }),
+    WorkExecutionState.VERIFYING: frozenset({
+        WorkExecutionState.REPAIRING, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+        WorkExecutionState.FAILED, WorkExecutionState.CANCELLING,
+        WorkExecutionState.UNKNOWN, WorkExecutionState.CANCELLED,
+    }),
+    WorkExecutionState.REPAIRING: frozenset({
+        WorkExecutionState.VERIFYING, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+        WorkExecutionState.FAILED, WorkExecutionState.CANCELLING,
+        WorkExecutionState.UNKNOWN, WorkExecutionState.CANCELLED,
+    }),
+    WorkExecutionState.BACKEND_DONE_UNVERIFIED: frozenset({
+        WorkExecutionState.VERIFYING, WorkExecutionState.REPAIRING,
+        WorkExecutionState.FAILED, WorkExecutionState.CANCELLING,
+        WorkExecutionState.UNKNOWN, WorkExecutionState.CANCELLED,
+    }),
+    WorkExecutionState.CANCELLING: frozenset({
+        WorkExecutionState.CANCELLED, WorkExecutionState.UNKNOWN,
+        WorkExecutionState.FAILED,
+    }),
+    WorkExecutionState.UNKNOWN: frozenset({
+        WorkExecutionState.BACKEND_DONE_UNVERIFIED, WorkExecutionState.FAILED,
+        WorkExecutionState.CANCELLED,
+    }),
+}
+
+#: P13-R1/B6-9：counter 名封闭词表（禁止公开任意 name 制造无界 rows）。
+_COUNTER_NAMES = frozenset({
+    "critical_overflow", "progress_dropped", "coalesced", "duplicates",
+    "progress_upserts",
+})
+
+#: 有界配置的安全最大值（不能传 10^12 关闭有界性）。
+_MAX_EVENTS_PER_RUN_LIMIT = 10_000
+_MAX_GLOBAL_EVENTS_LIMIT = 100_000
+_MAX_PAYLOAD_BYTES_LIMIT = 1 << 20          # 1 MiB
+
+DEFAULT_EVENTS_PER_RUN = 256
 DEFAULT_MAX_GLOBAL_EVENTS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 4096
 
-_SCHEMA_VERSION = "16H.1"
+_SCHEMA_VERSION = "16H.2"
+_KNOWN_USER_VERSIONS = (1, 2)
 
 _WORK_SCHEMA = """
 CREATE TABLE IF NOT EXISTS work_schema_meta(
@@ -93,11 +154,13 @@ CREATE TABLE IF NOT EXISTS work_schema_meta(
 CREATE TABLE IF NOT EXISTS work_contracts(
     contract_id TEXT PRIMARY KEY,
     contract_hash TEXT NOT NULL,
+    transport_json TEXT NOT NULL,
     registered_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS work_executions(
     execution_id INTEGER PRIMARY KEY AUTOINCREMENT,
     contract_id TEXT NOT NULL,
+    contract_hash TEXT NOT NULL,
     attempt_id TEXT NOT NULL,
     run_id TEXT NOT NULL DEFAULT '',
     backend_id TEXT NOT NULL DEFAULT '',
@@ -106,34 +169,62 @@ CREATE TABLE IF NOT EXISTS work_executions(
     is_active INTEGER NOT NULL DEFAULT 1,
     cancel_intent INTEGER NOT NULL DEFAULT 0,
     stop_dispatched INTEGER NOT NULL DEFAULT 0,
+    approval_id TEXT NOT NULL DEFAULT '',
     approval_invalidated INTEGER NOT NULL DEFAULT 0,
     submit_intent_json TEXT NOT NULL DEFAULT '{}',
     submit_intent_at REAL NOT NULL DEFAULT 0,
     run_bound_at REAL NOT NULL DEFAULT 0,
     terminal_evidence_json TEXT NOT NULL DEFAULT '',
     verification_marker TEXT NOT NULL DEFAULT '',
+    verification_verified INTEGER NOT NULL DEFAULT 0,
+    overflow_marker TEXT NOT NULL DEFAULT '',
     truth_commit_owner TEXT NOT NULL DEFAULT '',
+    truth_commit_digest TEXT NOT NULL DEFAULT '',
     truth_commit_status TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_work_one_active
     ON work_executions(contract_id) WHERE is_active = 1;
-CREATE TABLE IF NOT EXISTS work_events(
-    event_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS work_attempts(
+    attempt_id TEXT PRIMARY KEY,
     execution_id INTEGER NOT NULL,
+    contract_id TEXT NOT NULL,
+    contract_hash TEXT NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    backend_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL,
+    state_version INTEGER NOT NULL DEFAULT 1,
+    started_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_attempts_run
+    ON work_attempts(run_id) WHERE run_id <> '';
+CREATE TABLE IF NOT EXISTS work_events(
+    execution_id INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
     kind TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     critical INTEGER NOT NULL,
-    received_at REAL NOT NULL
+    received_at REAL NOT NULL,
+    PRIMARY KEY (execution_id, event_id)
 );
-CREATE INDEX IF NOT EXISTS idx_work_events_execution
-    ON work_events(execution_id);
 CREATE TABLE IF NOT EXISTS work_counters(
     name TEXT PRIMARY KEY,
     value INTEGER NOT NULL DEFAULT 0
 );
 """
+
+#: reopen 时的必需表/关键列结构复核（同名不兼容表 → fail-closed）。
+_REQUIRED_COLUMNS = {
+    "work_contracts": ("contract_id", "contract_hash", "transport_json"),
+    "work_executions": ("execution_id", "contract_id", "contract_hash",
+                        "attempt_id", "state", "state_version", "is_active",
+                        "verification_marker", "overflow_marker"),
+    "work_attempts": ("attempt_id", "execution_id", "run_id"),
+    "work_events": ("execution_id", "event_id", "payload_json"),
+    "work_counters": ("name", "value"),
+}
 
 
 class WorkLedgerError(FurinaError):
@@ -145,15 +236,15 @@ class ContractIdentityConflict(WorkLedgerError):
 
 
 class DuplicateActiveExecution(WorkLedgerError):
-    """同 contract 已存在 active execution claim（复用或拒绝，绝不第二执行）。"""
+    """同 contract 已存在 active execution claim。"""
 
 
 class StaleStateVersion(WorkLedgerError):
-    """CAS 失败：state_version 过期（stale worker 零状态修改）。"""
+    """CAS 失败：跨连接/跨事务 version 过期（零状态修改）。"""
 
 
 class EventContentConflict(WorkLedgerError):
-    """同 event_id、不同内容（类型化冲突）。"""
+    """同 (execution_id, event_id)、不同内容（类型化冲突）。"""
 
 
 class UnknownExecution(WorkLedgerError):
@@ -161,18 +252,42 @@ class UnknownExecution(WorkLedgerError):
 
 
 class CriticalBufferOverflow(WorkLedgerError):
-    """critical 缓冲容量耗尽（fail-closed：停止摄取，进入 UNKNOWN/reconcile）。"""
+    """critical 缓冲容量耗尽（fail-closed + durable overflow marker）。"""
 
 
 class CommitClaimConflict(WorkLedgerError):
-    """truth-commit claim 冲突（已被人认领/stale owner）。"""
+    """truth-commit claim 前置条件不满足（未 VERIFIED/无 marker）或已被认领。"""
+
+
+class IllegalTransition(WorkLedgerError):
+    """generic transition 目标不在合法迁移表内（VERIFIED/TOOL_RUNNING 等）。"""
+
+
+class RunBindingConflict(WorkLedgerError):
+    """run/backend 绑定 write-once 冲突（禁止覆盖为不同身份）。"""
+
+
+class WorkContractReloadError(WorkLedgerError):
+    """持久化契约 transport JSON 损坏/缺字段/未知字段/hash 失配（fail-closed）。"""
+
+
+def _reject_non_finite(value: Any, depth: int = 0) -> None:
+    """P13-R1/B6：NaN/Inf 明确拒绝（16E sanitize 会静默剥离——认证/持久化
+    面要求显式 fail-closed，绝不"stored 也算通过"）。"""
+    if depth > 8:
+        return
+    if isinstance(value, float) and not math.isfinite(value):
+        raise WorkLedgerError("payload 含 NaN/Inf（明确拒绝，绝不静默剥离）")
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _reject_non_finite(v, depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _reject_non_finite(v, depth + 1)
 
 
 def _canonical_json(payload: Any, max_bytes: int) -> str:
-    """exact schema/type、canonical JSON、尺寸有界（绝不 pickle、绝不 repr）。
-
-    敌意 payload（__iter__/__bool__/__str__ 即抛的对象）与 NaN/Inf 在此
-    类型化拒绝——零协议方法调用逃逸、零 NaN/Inf 落库。"""
+    """exact schema/type、canonical JSON、尺寸有界；NaN/Inf/敌意对象 fail-closed。"""
     if payload is None:
         payload = {}
     if type(payload) is not dict:
@@ -180,13 +295,25 @@ def _canonical_json(payload: Any, max_bytes: int) -> str:
     for key in payload:
         if type(key) is not str:
             raise WorkLedgerError("payload 键必须全为 builtin str")
+    _reject_non_finite(payload)
+    try:
+        if len(json.dumps(payload, ensure_ascii=True,
+                          allow_nan=False).encode("utf-8")) > max_bytes:
+            raise WorkLedgerError(
+                f"payload 原始体积超过 {max_bytes} 字节上限（sanitize 截断前"
+                f"拒绝，绝不静默吞大对象）")
+    except WorkLedgerError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise WorkLedgerError(
+            f"payload 无法序列化（{type(exc).__name__}）") from None
     clean = sanitize_payload(payload, max_bytes=max_bytes)
     try:
         blob = json.dumps(clean, sort_keys=True, ensure_ascii=True,
                           allow_nan=False, separators=(",", ":"))
     except (ValueError, TypeError) as exc:
         raise WorkLedgerError(
-            f"payload 无法 canonical 化（{type(exc).__name__}）") from None
+            f"payload 无法 canonical 化（{type(exc).__name__}；NaN/Inf 拒绝）") from None
     return blob
 
 
@@ -200,6 +327,7 @@ class ExecutionRecord:
 
     execution_id: int
     contract_id: str
+    contract_hash: str
     attempt_id: str
     run_id: str
     backend_id: str
@@ -208,30 +336,40 @@ class ExecutionRecord:
     is_active: bool
     cancel_intent: bool
     stop_dispatched: bool
+    approval_id: str
     approval_invalidated: bool
     submit_intent: Dict[str, Any] = field(default_factory=dict)
     submit_intent_at: float = 0.0
     run_bound_at: float = 0.0
     terminal_evidence: Dict[str, Any] = field(default_factory=dict)
     verification_marker: str = ""
+    verification_verified: bool = False
+    overflow_marker: str = ""
     truth_commit_owner: str = ""
+    truth_commit_digest: str = ""
     truth_commit_status: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
 
 
 class WorkLedger:
-    """工作域 durable ledger（独立 SQLite；RLock 串行化；事务原子 CAS）。"""
+    """工作域 durable ledger v2（独立 SQLite；跨连接真 CAS；显式迁移事务）。"""
 
     def __init__(self, db_path, *, now_fn=time.time,
-                 max_events_per_run: int = DEFAULT_MAX_EVENTS_PER_RUN,
+                 max_events_per_run: int = DEFAULT_EVENTS_PER_RUN,
                  max_global_events: int = DEFAULT_MAX_GLOBAL_EVENTS,
                  max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> None:
-        for name, value in (("max_events_per_run", max_events_per_run),
-                            ("max_global_events", max_global_events),
-                            ("max_payload_bytes", max_payload_bytes)):
-            if type(value) is not int or value < 1:
-                raise WorkLedgerError(f"{name} 必须是正 int")
+        for name, value, limit in (
+                ("max_events_per_run", max_events_per_run,
+                 _MAX_EVENTS_PER_RUN_LIMIT),
+                ("max_global_events", max_global_events,
+                 _MAX_GLOBAL_EVENTS_LIMIT),
+                ("max_payload_bytes", max_payload_bytes,
+                 _MAX_PAYLOAD_BYTES_LIMIT)):
+            if type(value) is not int or value < 1 or value > limit:
+                raise WorkLedgerError(
+                    f"{name} 必须是 [1, {limit}] 内的 builtin int（安全最大值"
+                    f"封顶，不能传超大值关闭有界性）")
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._path = Path(db_path)
         self._now = now_fn
@@ -242,18 +380,41 @@ class WorkLedger:
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False,
                                      timeout=30.0)
         self._conn.row_factory = sqlite3.Row
-        with self._lock:
-            self._conn.executescript(_WORK_SCHEMA)
-            # P13-H migration：additive、versioned、幂等——user_version 单调
-            # 推进，重复 reopen 零副作用。
-            if self._conn.execute("PRAGMA user_version").fetchone()[0] < 1:
-                self._conn.execute("PRAGMA user_version = 1")
-            self._conn.execute(
-                "INSERT OR REPLACE INTO work_schema_meta(key,value) "
-                "VALUES('schema_version',?)", (_SCHEMA_VERSION,))
-            self._conn.commit()
+        self._migrate()
 
-    # -------------------------------------------------- 内部工具
+    # -------------------------------------------------- migration（显式事务）
+    def _migrate(self) -> None:
+        with self._lock:
+            try:
+                # P13-R1/B3-6：migration 在显式事务中完成（中途异常整体回滚）。
+                self._conn.execute("BEGIN IMMEDIATE")
+                version = int(self._conn.execute(
+                    "PRAGMA user_version").fetchone()[0])
+                if version > _KNOWN_USER_VERSIONS[-1]:
+                    raise WorkLedgerError(
+                        f"work ledger user_version {version} 高于本实现已知版本"
+                        f" {max(_KNOWN_USER_VERSIONS)}（future schema 拒绝，"
+                        f"绝不降级覆盖）")
+                self._conn.executescript(_WORK_SCHEMA)
+                # 必需表/关键列结构复核（同名但结构不兼容的表 → fail-closed）。
+                for table, columns in _REQUIRED_COLUMNS.items():
+                    cols = {r["name"] for r in self._conn.execute(
+                        f"PRAGMA table_info({table})").fetchall()}
+                    missing = [c for c in columns if c not in cols]
+                    if missing:
+                        raise WorkLedgerError(
+                            f"work 表 {table} 结构不兼容（缺列 {missing}）——"
+                            f"同名异构表拒绝")
+                if version < 2:
+                    self._conn.execute("PRAGMA user_version = 2")
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO work_schema_meta(key,value) "
+                    "VALUES('schema_version',?)", (_SCHEMA_VERSION,))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def _execution_row(self, conn: sqlite3.Connection,
                        execution_id: int) -> sqlite3.Row:
         row = conn.execute(
@@ -277,6 +438,7 @@ class WorkLedger:
         return ExecutionRecord(
             execution_id=int(row["execution_id"]),
             contract_id=str(row["contract_id"]),
+            contract_hash=str(row["contract_hash"]),
             attempt_id=str(row["attempt_id"]),
             run_id=str(row["run_id"]),
             backend_id=str(row["backend_id"]),
@@ -285,13 +447,17 @@ class WorkLedger:
             is_active=bool(row["is_active"]),
             cancel_intent=bool(row["cancel_intent"]),
             stop_dispatched=bool(row["stop_dispatched"]),
+            approval_id=str(row["approval_id"]),
             approval_invalidated=bool(row["approval_invalidated"]),
             submit_intent=_json(str(row["submit_intent_json"])),
             submit_intent_at=float(row["submit_intent_at"]),
             run_bound_at=float(row["run_bound_at"]),
             terminal_evidence=_json(str(row["terminal_evidence_json"])),
             verification_marker=str(row["verification_marker"]),
+            verification_verified=bool(row["verification_verified"]),
+            overflow_marker=str(row["overflow_marker"]),
             truth_commit_owner=str(row["truth_commit_owner"]),
+            truth_commit_digest=str(row["truth_commit_digest"]),
             truth_commit_status=str(row["truth_commit_status"]),
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
@@ -299,15 +465,15 @@ class WorkLedger:
 
     def _incr_counter_locked(self, conn: sqlite3.Connection, name: str,
                              n: int = 1) -> None:
+        # P13-R1/B6-9：counter 名封闭词表（禁止公开任意 name 制造无界 rows）。
+        if name not in _COUNTER_NAMES:
+            raise WorkLedgerError(f"counter name 必须在封闭词表内，得到 {name!r}")
         conn.execute(
             "INSERT INTO work_counters(name,value) VALUES(?,?) "
             "ON CONFLICT(name) DO UPDATE SET value = value + ?",
             (name, n, n))
 
     def incr_counter(self, name: str, n: int = 1) -> None:
-        """持久化计数器（coalesce/drop/overflow 计数可查询且有界）。"""
-        if type(name) is not str or not name or len(name) > 128:
-            raise WorkLedgerError("counter name 必须是非空短 builtin str")
         with self._lock:
             with self._conn:
                 self._incr_counter_locked(self._conn, name, n)
@@ -318,76 +484,109 @@ class WorkLedger:
                 "SELECT value FROM work_counters WHERE name=?", (name,)).fetchone()
             return int(row["value"]) if row is not None else 0
 
-    # -------------------------------------------------- 契约身份（不可变）
-    def register_contract(self, contract_id: str, contract_hash: str) -> None:
-        """注册不可变 (contract_id, contract_hash)；同 id 异 hash → 类型化冲突
-        （幂等：同 id 同 hash 重复注册零副作用）。"""
-        for name, value in (("contract_id", contract_id),
-                            ("contract_hash", contract_hash)):
-            if type(value) is not str or not value or len(value) > 256:
-                raise WorkLedgerError(f"{name} 必须是非空短 builtin str")
+    # -------------------------------------------------- 契约身份（完整持久 + 可重载）
+    def register_contract(self, contract: WorkContract) -> None:
+        """注册完整 canonical WorkContract（transport JSON 持久化）；同 id 异
+        hash → :class:`ContractIdentityConflict`；同 id 同 hash 幂等。"""
+        if type(contract) is not WorkContract:
+            raise WorkLedgerError(
+                f"contract 必须是 exact WorkContract，得到 "
+                f"{type(contract).__name__}")
+        transport = contract.to_transport_json()
         now = self._now()
         with self._lock:
             with self._conn:
                 row = self._conn.execute(
                     "SELECT contract_hash FROM work_contracts WHERE contract_id=?",
-                    (contract_id,)).fetchone()
+                    (contract.contract_id,)).fetchone()
                 if row is not None:
-                    if str(row["contract_hash"]) != contract_hash:
+                    if str(row["contract_hash"]) != contract.content_hash:
                         raise ContractIdentityConflict(
-                            f"contract_id {contract_id} 已绑定不同 contract_hash"
-                            f"（不可变身份冲突）")
-                    return                       # 幂等：同 id 同 hash
+                            f"contract_id {contract.contract_id} 已绑定不同 "
+                            f"contract_hash（不可变身份冲突）")
+                    return
                 self._conn.execute(
                     "INSERT INTO work_contracts(contract_id,contract_hash,"
-                    "registered_at) VALUES(?,?,?)",
-                    (contract_id, contract_hash, now))
+                    "transport_json,registered_at) VALUES(?,?,?,?)",
+                    (contract.contract_id, contract.content_hash, transport, now))
 
-    def contract_hash_of(self, contract_id: str) -> Optional[str]:
+    def load_contract(self, contract_id: str) -> WorkContract:
+        """reopen 后从持久化 transport JSON 重验重建 WorkContract——损坏/
+        缺字段/hash 失配一律 :class:`WorkContractReloadError` fail-closed
+        （绝不带病恢复）。"""
+        if type(contract_id) is not str:
+            raise WorkLedgerError("contract_id 必须是 builtin str")
         with self._lock:
             row = self._conn.execute(
-                "SELECT contract_hash FROM work_contracts WHERE contract_id=?",
-                (contract_id,)).fetchone()
-            return str(row["contract_hash"]) if row is not None else None
+                "SELECT contract_hash, transport_json FROM work_contracts "
+                "WHERE contract_id=?", (contract_id,)).fetchone()
+        if row is None:
+            raise WorkContractReloadError(
+                f"contract {contract_id} 未在 ledger 注册")
+        blob = str(row["transport_json"])
+        try:
+            contract = WorkContract.from_transport_json(blob)
+        except Exception as exc:
+            raise WorkContractReloadError(
+                f"contract {contract_id} transport JSON 损坏"
+                f"（{type(exc).__name__}）——fail-closed 拒绝带病恢复") from None
+        if contract.contract_id != contract_id \
+                or contract.content_hash != str(row["contract_hash"]):
+            raise WorkContractReloadError(
+                f"contract {contract_id} 重载身份失配（fail-closed）")
+        return contract
 
-    # -------------------------------------------------- submit intent（先于远端副作用）
-    def submit_intent(self, contract_id: str, contract_hash: str,
-                      attempt_id: str,
+    # -------------------------------------------------- submit intent
+    def submit_intent(self, contract: WorkContract, attempt_id: str,
                       submit_payload: Optional[Mapping[str, Any]] = None) -> int:
-        """**submit intent 先持久化，再产生远端副作用**（crash window 1/2 的
-        封闭基础）。同 contract 已有 active execution → DuplicateActiveExecution
-        （调用方复用该 execution 或放弃，绝不创建第二执行/绝不自动重发 POST）。
-        返回新 execution_id。"""
-        self.register_contract(contract_id, contract_hash)
+        """submit intent 先持久化（先于远端副作用）。同 contract 已有 active
+        execution（含跨连接并发，partial UNIQUE INDEX 兜底）→
+        :class:`DuplicateActiveExecution`（类型化，绝不泄漏
+        sqlite3.IntegrityError）。"""
+        self.register_contract(contract)
         if type(attempt_id) is not str or not attempt_id or len(attempt_id) > 128:
             raise WorkLedgerError("attempt_id 必须是非空短 builtin str")
-        blob = _canonical_json(dict(submit_payload or {}),
-                               self._max_payload_bytes)
+        blob = _canonical_json(submit_payload, self._max_payload_bytes)
         now = self._now()
         with self._lock:
             with self._conn:
                 row = self._conn.execute(
                     "SELECT execution_id FROM work_executions "
                     "WHERE contract_id=? AND is_active=1",
-                    (contract_id,)).fetchone()
+                    (contract.contract_id,)).fetchone()
                 if row is not None:
                     raise DuplicateActiveExecution(
-                        f"contract {contract_id} 已有 active execution "
+                        f"contract {contract.contract_id} 已有 active execution "
                         f"{int(row['execution_id'])}（reconciliation 结束前禁止"
                         f"二次 submit）")
-                cur = self._conn.execute(
-                    "INSERT INTO work_executions(contract_id,attempt_id,state,"
-                    "state_version,is_active,submit_intent_json,submit_intent_at,"
-                    "created_at,updated_at) VALUES(?,?,?,?,1,?,?,?,?)",
-                    (contract_id, attempt_id,
-                     WorkExecutionState.STARTING.value, 1, blob, now, now, now))
-                return int(cur.lastrowid)
+                try:
+                    cur = self._conn.execute(
+                        "INSERT INTO work_executions(contract_id,contract_hash,"
+                        "attempt_id,state,state_version,is_active,"
+                        "submit_intent_json,submit_intent_at,created_at,"
+                        "updated_at) VALUES(?,?,?,?,?,1,?,?,?,?)",
+                        (contract.contract_id, contract.content_hash, attempt_id,
+                         WorkExecutionState.STARTING.value, 1, blob, now, now,
+                         now))
+                except sqlite3.IntegrityError as exc:
+                    raise DuplicateActiveExecution(
+                        f"contract {contract.contract_id} active claim 并发冲突"
+                        f"（{exc}）") from None
+                eid = int(cur.lastrowid)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO work_attempts(attempt_id,"
+                    "execution_id,contract_id,contract_hash,state,"
+                    "state_version,started_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (attempt_id, eid, contract.contract_id,
+                     contract.content_hash,
+                     WorkExecutionState.STARTING.value, 1, now, now))
+                return eid
 
-    # -------------------------------------------------- run 绑定（POST 成功后）
     def bind_run(self, execution_id: int, run_id: str, backend_id: str, *,
                  expected_version: int) -> int:
-        """POST 成功后绑定 run/backend（crash window 3/4：intent 已落盘、
-        run_id 尚未落盘的窗口由此封闭）。CAS 语义。"""
+        """POST 成功后绑定 run/backend——**write-once**：同 run/backend 重放
+        幂等；不同 run/backend → :class:`RunBindingConflict` 禁止覆盖。CAS。"""
         for name, value in (("run_id", run_id), ("backend_id", backend_id)):
             if type(value) is not str or not value or len(value) > 128:
                 raise WorkLedgerError(f"{name} 必须是非空短 builtin str")
@@ -395,26 +594,52 @@ class WorkLedger:
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
+                bound_run = str(row["run_id"])
+                if bound_run:
+                    if bound_run == run_id \
+                            and str(row["backend_id"]) == backend_id:
+                        return int(row["state_version"])     # 幂等重放
+                    raise RunBindingConflict(
+                        f"execution {execution_id} 已绑定 run={bound_run!r}/"
+                        f"backend={row['backend_id']!r}（write-once，禁止覆盖）")
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion(
                         f"execution {execution_id} CAS 失败："
                         f"expected {expected_version}，"
                         f"actual {int(row['state_version'])}")
-                self._conn.execute(
+                cur = self._conn.execute(
                     "UPDATE work_executions SET run_id=?, backend_id=?, "
                     "run_bound_at=?, state_version=state_version+1, "
                     "updated_at=? WHERE execution_id=? AND state_version=?",
                     (run_id, backend_id, now, now, execution_id,
                      expected_version))
+                if cur.rowcount != 1:
+                    raise StaleStateVersion(
+                        f"execution {execution_id} 跨连接 CAS 失败"
+                        f"（rowcount=0）")
+                self._conn.execute(
+                    "UPDATE work_attempts SET run_id=?, backend_id=?, "
+                    "state_version=state_version+1, updated_at=? "
+                    "WHERE attempt_id=?",
+                    (run_id, backend_id, now, str(row["attempt_id"])))
                 return expected_version + 1
 
-    # -------------------------------------------------- CAS 状态迁移
+    # -------------------------------------------------- CAS 状态迁移（显式合法表）
     def transition(self, execution_id: int, new_state: WorkExecutionState, *,
                    expected_version: int) -> int:
-        """CAS 状态迁移：stale version → :class:`StaleStateVersion`（零状态
-        修改）；终态吸收（终态后零迁移，stale worker 绝不能覆盖终态）。"""
+        """CAS 状态迁移（**显式合法迁移表**）：VERIFIED/TOOL_RUNNING 等非法
+        目标 → :class:`IllegalTransition`；stale/跨连接 →
+        :class:`StaleStateVersion`；终态吸收。VERIFIED 唯一入口是
+        :meth:`mark_verified_by_outcome`。"""
         if not isinstance(new_state, WorkExecutionState):
             raise WorkLedgerError("new_state 必须是 WorkExecutionState")
+        if new_state is WorkExecutionState.VERIFIED:
+            raise IllegalTransition(
+                "generic transition 不得写 VERIFIED（唯一入口 "
+                "mark_verified_by_outcome）")
+        if new_state is WorkExecutionState.TOOL_RUNNING:
+            raise IllegalTransition(
+                "TOOL_RUNNING 是子相位，不得作 primary 状态迁移目标")
         now = self._now()
         with self._lock:
             with self._conn:
@@ -424,57 +649,52 @@ class WorkLedger:
                     raise WorkLedgerError(
                         f"execution {execution_id} 已终态 {current.value}"
                         f"（终态吸收，零迁移）")
+                allowed = _ALLOWED_TRANSITIONS.get(current, frozenset())
+                if new_state not in allowed:
+                    raise IllegalTransition(
+                        f"非法状态迁移 {current.value} → {new_state.value}"
+                        f"（16E 之外的任意迁移拒绝）")
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion(
                         f"execution {execution_id} CAS 失败："
                         f"expected {expected_version}，"
                         f"actual {int(row['state_version'])}")
-                # P13 任务书 §5：取消不可恢复执行——CANCELLING 只能走向终态
-                # 或 reconciliation 收口；approval 失效后迟到 approve 不得
-                # 复活执行。
-                if current is WorkExecutionState.CANCELLING and new_state in (
-                        WorkExecutionState.STARTING,
-                        WorkExecutionState.RUNNING,
-                        WorkExecutionState.WAITING_PERMISSION,
-                        WorkExecutionState.BLOCKED_APPROVAL,
-                        WorkExecutionState.TOOL_RUNNING,
-                        WorkExecutionState.VERIFYING,
-                        WorkExecutionState.REPAIRING):
-                    raise WorkLedgerError(
-                        "CANCELLING 不可恢复执行（迟到 approve/事件不得复活；"
-                        "仅真实 terminal evidence 或 timeout policy 收口）")
-                if int(row["approval_invalidated"]) == 1 and new_state in (
-                        WorkExecutionState.RUNNING,
-                        WorkExecutionState.WAITING_PERMISSION,
-                        WorkExecutionState.BLOCKED_APPROVAL):
-                    raise WorkLedgerError(
-                        "approval 已失效（迟到 approve 不得恢复执行）")
-                if _is_terminal(new_state):
-                    self._conn.execute(
-                        "UPDATE work_executions SET state=?, state_version="
-                        "state_version+1, is_active=0, updated_at=? "
-                        "WHERE execution_id=? AND state_version=?",
-                        (new_state.value, now, execution_id, expected_version))
-                else:
-                    self._conn.execute(
-                        "UPDATE work_executions SET state=?, state_version="
-                        "state_version+1, updated_at=? "
-                        "WHERE execution_id=? AND state_version=?",
-                        (new_state.value, now, execution_id, expected_version))
+                cur = self._conn.execute(
+                    "UPDATE work_executions SET state=?, state_version="
+                    "state_version+1, is_active=?, updated_at=? "
+                    "WHERE execution_id=? AND state_version=?",
+                    (new_state.value,
+                     0 if _is_terminal(new_state) else 1,
+                     now, execution_id, expected_version))
+                if cur.rowcount != 1:
+                    raise StaleStateVersion(
+                        f"execution {execution_id} 跨连接 CAS 失败"
+                        f"（rowcount=0）")
+                self._conn.execute(
+                    "UPDATE work_attempts SET state=?, state_version="
+                    "state_version+1, updated_at=? WHERE attempt_id=?",
+                    (new_state.value, now, str(row["attempt_id"])))
                 return expected_version + 1
 
     def begin_reconciliation(self, execution_id: int, *,
                              expected_version: int) -> int:
-        """恢复期：持久化 reconciliation/UNKNOWN 状态（不写 C7）。"""
+        """恢复期：持久化 reconciliation/UNKNOWN 状态（不写 C7；UNKNOWN 不得
+        经 generic transition 恢复 RUNNING——verify-on-recovery 走
+        :meth:`mark_verified_by_outcome` 专用权威路径）。已处于 UNKNOWN →
+        幂等零迁移。"""
+        with self._lock:
+            row = self._execution_row(self._conn, execution_id)
+            if WorkExecutionState(str(row["state"]))                     is WorkExecutionState.UNKNOWN:
+                return int(row["state_version"])
         return self.transition(execution_id, WorkExecutionState.UNKNOWN,
                                expected_version=expected_version)
 
-    # -------------------------------------------------- 终态证据 / 16F 验证
+    # -------------------------------------------------- 证据 / 16F 权威验证
     def mark_terminal_evidence(self, execution_id: int,
                                evidence: Mapping[str, Any], *,
                                expected_version: int) -> int:
-        """持久化 terminal/critical evidence（与终态迁移同事务原子完成）。"""
-        blob = _canonical_json(dict(evidence or {}), self._max_payload_bytes)
+        """terminal/recovery evidence 与状态版本同事务原子持久化。"""
+        blob = _canonical_json(evidence, self._max_payload_bytes)
         now = self._now()
         with self._lock:
             with self._conn:
@@ -482,74 +702,115 @@ class WorkLedger:
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion(
                         f"execution {execution_id} CAS 失败")
-                self._conn.execute(
+                cur = self._conn.execute(
                     "UPDATE work_executions SET terminal_evidence_json=?, "
                     "state_version=state_version+1, updated_at=? "
                     "WHERE execution_id=? AND state_version=?",
                     (blob, now, execution_id, expected_version))
+                if cur.rowcount != 1:
+                    raise StaleStateVersion(
+                        f"execution {execution_id} 跨连接 CAS 失败")
                 return expected_version + 1
 
     def mark_verified_by_outcome(self, execution_id: int, verifier, outcome,
                                  *, expected_version: int) -> int:
-        """16F 结果只有经 IndependentVerifier 类拥有的
-        ``outcome_is_authentic`` 入口通过，才能在工作域标记 VERIFIED（并持久
-        化 verification marker = report_digest）。非 authentic → 类型化拒绝、
-        零状态修改。"""
-        if not verifier.outcome_is_authentic(outcome):
+        """**VERIFIED 唯一入口**（P13-R1/B1）：verifier exact
+        IndependentVerifier、outcome exact RepairOutcome、seal 复核经类拥有
+        的 outcome_is_authentic（禁止实例动态分派/shadow/subclass override）、
+        outcome 身份与 ledger 冻结身份（contract_id/hash/run_id）完全一致、
+        report_digest 64-hex——全部通过后同事务写入 VERIFIED + marker
+        （rowcount CAS）。"""
+        from furina.agent.verification import IndependentVerifier
+        from furina.agent.verification.repair import RepairOutcome
+        if type(verifier) is not IndependentVerifier:
             raise WorkLedgerError(
-                "16F outcome 未通过 outcome_is_authentic 复核"
+                f"verifier 必须是 exact IndependentVerifier（子类/代理不得"
+                f"进入权威路径），得到 {type(verifier).__name__}")
+        if type(outcome) is not RepairOutcome:
+            raise WorkLedgerError(
+                f"outcome 必须是 exact RepairOutcome，得到 "
+                f"{type(outcome).__name__}")
+        authentic_fn = IndependentVerifier.outcome_is_authentic.__get__(verifier)
+        try:
+            ok = authentic_fn(outcome)
+        except Exception as exc:
+            # 结构/canonical 复核的 VerificationError 等一律折叠为类型化
+            # WorkLedgerError（绝不让非 WorkLedgerError 逃出权威入口）。
+            raise WorkLedgerError(
+                f"outcome 真实性复核异常（{type(exc).__name__}）——零泄漏拒绝"
+            ) from None
+        if not ok:
+            raise WorkLedgerError(
+                "16F outcome 未通过类拥有的 outcome_is_authentic 复核"
                 "（VERIFIED 标记拒绝，零状态修改）")
         marker = outcome.final_report.report_digest
+        if type(marker) is not str or len(marker) != 64:
+            raise WorkLedgerError("report_digest 必须是 64-hex")
         now = self._now()
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
-                current = WorkExecutionState(str(row["state"]))
-                if _is_terminal(current):
+                if outcome.contract_id != str(row["contract_id"]):
                     raise WorkLedgerError(
-                        f"execution {execution_id} 已终态 {current.value}"
-                        f"（终态吸收，零迁移）")
+                        "outcome contract_id 与 ledger 冻结身份不一致")
+                if outcome.contract_hash != str(row["contract_hash"]):
+                    raise WorkLedgerError(
+                        "outcome contract_hash 与 ledger 冻结身份不一致")
+                bound_run = str(row["run_id"])
+                if bound_run and outcome.final_report.run_id != bound_run:
+                    raise WorkLedgerError(
+                        "outcome run_id 与 ledger 绑定 run 不一致（跨 run "
+                        "拒绝）")
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion(
-                        f"execution {execution_id} CAS 失败："
-                        f"expected {expected_version}，"
-                        f"actual {int(row['state_version'])}")
-                self._conn.execute(
-                    "UPDATE work_executions SET state=?, verification_marker=?, "
+                        f"execution {execution_id} CAS 失败")
+                cur = self._conn.execute(
+                    "UPDATE work_executions SET state=?, "
+                    "verification_marker=?, verification_verified=1, "
                     "is_active=0, state_version=state_version+1, updated_at=? "
                     "WHERE execution_id=? AND state_version=?",
                     (WorkExecutionState.VERIFIED.value, marker, now,
                      execution_id, expected_version))
+                if cur.rowcount != 1:
+                    raise StaleStateVersion(
+                        f"execution {execution_id} 跨连接 CAS 失败")
+                self._conn.execute(
+                    "UPDATE work_attempts SET state='VERIFIED', "
+                    "state_version=state_version+1, updated_at=? "
+                    "WHERE attempt_id=?", (now, str(row["attempt_id"])))
                 return expected_version + 1
 
     # -------------------------------------------------- 取消（PART 5）
     def cancel_intent(self, execution_id: int, *,
                       expected_version: int) -> int:
-        """cancel intent 先落盘（重复 cancel 幂等）：pre-submit（run 未绑定）
-        → 直接 CANCELLED 终态（零 backend run）；RUNNING/WAITING/REPAIRING/
-        VERIFYING → CANCELLING（等真实 terminal evidence 或 timeout policy，
-        绝不立即伪造 CANCELLED）。"""
+        """cancel intent 先落盘（重复幂等）：pre-submit（run 未绑定）→ 直接
+        CANCELLED 零 backend run；活动执行 → CANCELLING 等真实 terminal
+        evidence 或 timeout policy。"""
         now = self._now()
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
                 current = WorkExecutionState(str(row["state"]))
                 if _is_terminal(current):
-                    return int(row["state_version"])       # 幂等：已终态
+                    return int(row["state_version"])            # 幂等
+                if int(row["cancel_intent"]) == 1:
+                    return expected_version                     # 幂等
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion(
                         f"execution {execution_id} CAS 失败")
-                if int(row["cancel_intent"]) == 1:
-                    return expected_version                # 幂等：intent 已落盘
                 run_bound = bool(str(row["run_id"]))
                 if not run_bound:
-                    # pre-submit cancel：零 backend run、零 submit 副作用。
                     self._conn.execute(
                         "UPDATE work_executions SET cancel_intent=1, state=?, "
                         "is_active=0, state_version=state_version+1, "
                         "updated_at=? WHERE execution_id=? AND state_version=?",
                         (WorkExecutionState.CANCELLED.value, now,
                          execution_id, expected_version))
+                    self._conn.execute(
+                        "UPDATE work_attempts SET state='CANCELLED', "
+                        "state_version=state_version+1, updated_at=? "
+                        "WHERE attempt_id=?",
+                        (now, str(row["attempt_id"])))
                     return expected_version + 1
                 self._conn.execute(
                     "UPDATE work_executions SET cancel_intent=1, state=?, "
@@ -557,18 +818,19 @@ class WorkLedger:
                     "WHERE execution_id=? AND state_version=?",
                     (WorkExecutionState.CANCELLING.value, now,
                      execution_id, expected_version))
+                self._conn.execute(
+                    "UPDATE work_attempts SET state='CANCELLING', "
+                    "state_version=state_version+1, updated_at=? "
+                    "WHERE attempt_id=?", (now, str(row["attempt_id"])))
                 return expected_version + 1
 
     def dispatch_stop_once(self, execution_id: int) -> bool:
-        """backend stop 每活动 run 恰好派发一次（重复 cancel 幂等）：首次
-        返回 True（调用方执行远端 stop），之后一律 False（stop 结果不确定时
-        由调用方 reconcile，绝不盲目重发）。"""
+        """backend stop 每活动 run 恰好派发一次（幂等）；run 未绑定 → False。"""
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
                 if not str(row["run_id"]):
-                    return False        # pre-submit cancel：零 backend run →
-                    # 零 backend stop（绝不向不存在的 run 派发）
+                    return False        # pre-submit：零 backend run → 零 stop
                 if int(row["stop_dispatched"]) == 1:
                     return False
                 self._conn.execute(
@@ -576,9 +838,31 @@ class WorkLedger:
                     "WHERE execution_id=?", (execution_id,))
                 return True
 
+    def record_outstanding_approval(self, execution_id: int,
+                                    approval_id: str, *,
+                                    expected_version: int) -> int:
+        """持久化 outstanding approval_id（B5：不再只有 bool）。"""
+        if type(approval_id) is not str or not approval_id or len(approval_id) > 128:
+            raise WorkLedgerError("approval_id 必须是非空短 builtin str")
+        now = self._now()
+        with self._lock:
+            with self._conn:
+                row = self._execution_row(self._conn, execution_id)
+                if int(row["state_version"]) != expected_version:
+                    raise StaleStateVersion(
+                        f"execution {execution_id} CAS 失败")
+                cur = self._conn.execute(
+                    "UPDATE work_executions SET approval_id=?, "
+                    "state_version=state_version+1, updated_at=? "
+                    "WHERE execution_id=? AND state_version=?",
+                    (approval_id, now, execution_id, expected_version))
+                if cur.rowcount != 1:
+                    raise StaleStateVersion(
+                        f"execution {execution_id} 跨连接 CAS 失败")
+                return expected_version + 1
+
     def invalidate_approval(self, execution_id: int) -> None:
-        """approval wait 被取消后旧 approval 失效（迟到 approve 不得恢复
-        执行）。"""
+        """approval wait 被取消后旧 approval 失效（迟到 approve 不得恢复）。"""
         with self._lock:
             with self._conn:
                 self._conn.execute(
@@ -590,15 +874,16 @@ class WorkLedger:
             row = self._execution_row(self._conn, execution_id)
             return bool(row["approval_invalidated"])
 
-    # -------------------------------------------------- 事件（幂等 + 有界）
+    # -------------------------------------------------- 事件（(execution_id, event_id) 隔离）
     def record_event(self, execution_id: int, event_id: str, kind: EventKind,
                      payload: Optional[Mapping[str, Any]] = None) -> str:
-        """持久化 normalized event：event_id 同内容重投幂等（返回
-        "duplicate"）；同 id 异内容 → :class:`EventContentConflict`；critical
-        永不丢弃（per-run/global 容量耗尽 →
-        :class:`CriticalBufferOverflow` fail-closed）；droppable tick 在
-        per-run/global 容量耗尽时确定性丢弃（计数持久化）。返回
-        "stored"/"duplicate"/"dropped" 。"""
+        """持久化 normalized event——身份按 **(execution_id, event_id)** 隔离：
+        不同 execution 同 event_id 各自保留；同 execution 同内容幂等
+        （"duplicate"）、异内容 → :class:`EventContentConflict`。critical 永不
+        丢弃（容量耗尽 → durable execution-bound overflow marker + 计数 →
+        :class:`CriticalBufferOverflow` fail-closed）；droppable progress 在
+        容量耗尽时以确定性后备键 UPSERT 覆盖写（保留最新、行数有界、计数
+        持久化——绝不只"填满后永久 drop"）。"""
         if not isinstance(kind, EventKind):
             raise WorkLedgerError("kind 必须是 EventKind")
         if type(event_id) is not str or not event_id or len(event_id) > 128:
@@ -609,48 +894,70 @@ class WorkLedger:
         with self._lock:
             self._execution_row(self._conn, execution_id)
             row = self._conn.execute(
-                "SELECT kind, payload_json FROM work_events WHERE event_id=?",
-                (event_id,)).fetchone()
+                "SELECT kind, payload_json FROM work_events "
+                "WHERE execution_id=? AND event_id=?",
+                (execution_id, event_id)).fetchone()
             if row is not None:
                 if str(row["kind"]) != kind.value \
                         or str(row["payload_json"]) != blob:
                     raise EventContentConflict(
-                        f"event {event_id} 同 id 异内容（类型化冲突）")
+                        f"event {event_id!r} 同 execution 异内容（类型化冲突）")
                 return "duplicate"
             per_run = int(self._conn.execute(
                 "SELECT COUNT(*) AS c FROM work_events WHERE execution_id=?",
                 (execution_id,)).fetchone()["c"])
             global_n = int(self._conn.execute(
                 "SELECT COUNT(*) AS c FROM work_events").fetchone()["c"])
-            at_capacity = (per_run >= self._max_events_per_run
-                           or global_n >= self._max_global_events)
+            # P13-R1/B6-8：critical 保留槽——droppable/coalescible 在容量只剩
+            # 最后 1 格时即拒绝（progress 占满后 terminal critical 仍被保留）。
+            if priority.value != "critical":
+                at_capacity = (per_run >= self._max_events_per_run - 1
+                               or global_n >= self._max_global_events - 1)
+            else:
+                at_capacity = (per_run >= self._max_events_per_run
+                               or global_n >= self._max_global_events)
             if priority.value == "critical" and at_capacity:
-                # 溢出计数独立事务持久化（不随 fail-closed 异常回滚），随后
-                # 抛出——调用方停止摄取并进入 UNKNOWN/reconcile。
+                # durable execution-bound overflow marker（B6-8：不是只加计数）
                 with self._conn:
+                    self._conn.execute(
+                        "UPDATE work_executions SET overflow_marker=?, "
+                        "updated_at=? WHERE execution_id=?",
+                        (f"critical_overflow:{kind.value}:{event_id[:64]}:"
+                         f"{int(now)}", now, execution_id))
                     self._incr_counter_locked(self._conn,
                                               "critical_overflow", 1)
                 raise CriticalBufferOverflow(
                     f"critical 缓冲容量耗尽（per_run={per_run}, "
-                    f"global={global_n}）——fail-closed 停止摄取，"
-                    f"进入 UNKNOWN/reconcile")
-            if at_capacity:
-                counter = ("progress_dropped" if priority.value == "droppable"
-                           else "coalescible_dropped")
+                    f"global={global_n}）——durable overflow marker 已落盘，"
+                    f"fail-closed 停止摄取，进入 UNKNOWN/reconcile")
+            if at_capacity and priority.value == "droppable":
+                # B6-7：droppable 用确定性后备键 UPSERT 覆盖写（保留最新、
+                # 行数有界、绝不只"填满后永久 drop"）。
                 with self._conn:
-                    self._incr_counter_locked(self._conn, counter, 1)
+                    self._conn.execute(
+                        "INSERT INTO work_events(execution_id,event_id,kind,"
+                        "payload_json,critical,received_at) VALUES(?,?,?,?,0,?) "
+                        "ON CONFLICT(execution_id,event_id) DO UPDATE SET "
+                        "kind=excluded.kind, payload_json=excluded.payload_json,"
+                        " received_at=excluded.received_at",
+                        (execution_id, f"progress:latest:{execution_id}",
+                         kind.value, blob, now))
+                    self._incr_counter_locked(self._conn, "progress_dropped", 1)
+                    self._incr_counter_locked(self._conn, "progress_upserts", 1)
+                return "dropped"
+            if at_capacity:
+                with self._conn:
+                    self._incr_counter_locked(self._conn, "coalesced", 1)
                 return "dropped"
             with self._conn:
                 self._conn.execute(
-                    "INSERT INTO work_events(event_id,execution_id,kind,"
+                    "INSERT INTO work_events(execution_id,event_id,kind,"
                     "payload_json,critical,received_at) VALUES(?,?,?,?,?,?)",
-                    (event_id, execution_id, kind.value, blob,
+                    (execution_id, event_id, kind.value, blob,
                      1 if priority.value == "critical" else 0, now))
             return "stored"
 
     def events_of(self, execution_id: int) -> Tuple[Dict[str, Any], ...]:
-        """execution 的持久化事件（防御性快照；critical/terminal evidence
-        restart 后保留）。"""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT event_id, kind, payload_json, critical, received_at "
@@ -669,24 +976,37 @@ class WorkLedger:
                             "received_at": float(row["received_at"])})
             return tuple(out)
 
-    # -------------------------------------------------- truth-commit claim（16G 接口）
+    # -------------------------------------------------- truth-commit claim（B1）
     def claim_truth_commit(self, execution_id: int,
-                           owner_token: str) -> bool:
-        """truth-commit claim（CAS）：并发下恰一 owner 胜出；stale claim 拒绝。
-        只提供 claim/marker API——本阶段零 C7/C6 写入。"""
+                           owner_token: str) -> Tuple[bool, str]:
+        """truth-commit claim（B1-4/5）：仅允许已由权威入口 VERIFIED
+        （verification_verified=1 且 marker 非空）的 execution；claim 绑定
+        contract_id/hash/report_digest；并发恰一 owner、stale 拒绝。返回
+        ``(是否成功, 绑定的 report_digest)``。"""
         if type(owner_token) is not str or not owner_token or len(owner_token) > 128:
             raise WorkLedgerError("owner_token 必须是非空短 builtin str")
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
+                if str(row["state"]) != WorkExecutionState.VERIFIED.value \
+                        or int(row["verification_verified"]) != 1:
+                    raise CommitClaimConflict(
+                        f"execution {execution_id} 未经验权 VERIFIED"
+                        f"（STARTING/UNKNOWN/FAILED/CANCELLED/"
+                        f"BACKEND_DONE_UNVERIFIED 不得 claim）")
+                marker = str(row["verification_marker"])
+                if not marker:
+                    raise CommitClaimConflict(
+                        "verification_marker 为空（未经权威验证）不得 claim")
                 if str(row["truth_commit_status"]) != "":
-                    return False                    # 已被认领（stale claim 拒绝）
+                    return False, marker            # 已认领（stale claim 拒绝）
                 cur = self._conn.execute(
                     "UPDATE work_executions SET truth_commit_owner=?, "
-                    "truth_commit_status='CLAIMED' WHERE execution_id=? "
-                    "AND truth_commit_status=''",
-                    (owner_token, execution_id))
-                return cur.rowcount == 1
+                    "truth_commit_digest=?, truth_commit_status='CLAIMED' "
+                    "WHERE execution_id=? AND truth_commit_status='' "
+                    "AND state='VERIFIED' AND verification_verified=1",
+                    (owner_token, marker, execution_id))
+                return (cur.rowcount == 1, marker)
 
     def resolve_truth_commit(self, execution_id: int, owner_token: str) -> bool:
         """resolve claim（仅 claim owner 可 resolve；CAS 到 COMMITTED）。"""
@@ -708,18 +1028,20 @@ class WorkLedger:
                 self._execution_row(self._conn, execution_id))
 
     def load_non_terminal(self) -> Tuple[ExecutionRecord, ...]:
-        """启动恢复：加载全部非终态执行（reconciliation 输入；防御性快照）。"""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM work_executions WHERE is_active=1 "
                 "ORDER BY execution_id").fetchall()
             return tuple(self._record_from_row(r) for r in rows)
 
-    def all_executions(self) -> Tuple[ExecutionRecord, ...]:
+    def attempts_of(self, execution_id: int) -> Tuple[Dict[str, Any], ...]:
+        """attempt ledger 快照（attempt_id/run_id/backend_id/state/version）。"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM work_executions ORDER BY execution_id").fetchall()
-            return tuple(self._record_from_row(r) for r in rows)
+                "SELECT attempt_id, run_id, backend_id, state, state_version "
+                "FROM work_attempts WHERE execution_id=? ORDER BY started_at",
+                (execution_id,)).fetchall()
+            return tuple(dict(r) for r in rows)
 
     def schema_version(self) -> str:
         with self._lock:
@@ -745,96 +1067,114 @@ class EventBufferOutcome(enum.Enum):
 
     ACCEPTED = "accepted"
     DROPPED_TICK = "dropped_tick"
-    COALESCED = "coalesced"
     DUPLICATE = "duplicate"
 
 
 class WorkEventBuffer:
-    """纯内存有界事件缓冲（tick 路径安全：offer 零 DB/vector/network I/O）。
+    """纯内存有界事件缓冲 v2（tick 路径安全：offer 零 DB/vector/network I/O）。
 
-    - critical 永不丢弃：容量耗尽 fail-closed 抛
-      :class:`CriticalBufferOverflow`（调用方停止摄取并进入 UNKNOWN/
-      reconcile；overflow 计数由调用方经 WorkLedger.incr_counter 持久化）；
-    - droppable（TOOL_PROGRESS/tokens）per-run 容量耗尽时确定性丢弃；
-    - coalescible（reconnect/unknown）合并（同 run 只保留最新观察）；
-    - 重复 critical 按稳定身份（event_id）去重，不无限增长。
+    B6：offer 携带稳定 **run 身份**——per_run_cap 按 run 统计（不同 run 互不
+    干扰/互不合并）、global_cap 对全部 entry 生效；payload 进入前经 exact
+    dict 校验 + 16E sanitize + UTF-8 字节上限 + canonical JSON 深拷贝
+    （修改原始对象/snapshot 绝不影响内部）；NaN/Inf/非 JSON fail-closed；
+    droppable tick per-run 容量耗尽确定性丢弃；critical 永不丢弃——global
+    容量耗尽 fail-closed 抛 :class:`CriticalBufferOverflow`（durable overflow
+    marker 由调用方经 ledger 落盘）；drain/flush 后容量恢复。
     """
+
+    _MAX_PAYLOAD_BYTES = 4096
 
     def __init__(self, *, per_run_cap: int = 128,
                  global_cap: int = 1024) -> None:
+        limit = _MAX_EVENTS_PER_RUN_LIMIT
         for name, value in (("per_run_cap", per_run_cap),
                             ("global_cap", global_cap)):
-            if type(value) is not int or value < 1:
-                raise WorkLedgerError(f"{name} 必须是正 int")
+            if type(value) is not int or value < 1 or value > limit:
+                raise WorkLedgerError(
+                    f"{name} 必须是 [1, {limit}] 内的 builtin int")
         self._per_run_cap = per_run_cap
         self._global_cap = global_cap
         self._lock = threading.Lock()
-        self._events: Dict[str, Dict[str, Any]] = {}       # event_id → event
+        self._events: Dict[str, Dict[str, Any]] = {}   # event_id → entry
         self._order: List[str] = []
-        self._per_run_count: Dict[str, int] = {}
+        self._per_run: Dict[str, int] = {}             # run_id → count
         self._dropped_ticks = 0
-        self._coalesced = 0
         self._duplicates = 0
 
-    def offer(self, event_id: str, kind: EventKind,
+    def offer(self, run_id: str, event_id: str, kind: EventKind,
               payload: Optional[Mapping[str, Any]] = None) -> EventBufferOutcome:
-        """确定性入队（纯内存；绝不阻塞、绝不 I/O）。"""
+        """确定性入队（纯内存；payload canonical 深拷贝；字节有界）。"""
+        if type(run_id) is not str or not run_id:
+            raise WorkLedgerError("run_id 必须是非空 builtin str（稳定身份）")
         if type(event_id) is not str or not event_id:
             raise WorkLedgerError("event_id 必须是非空 builtin str")
         if not isinstance(kind, EventKind):
             raise WorkLedgerError("kind 必须是 EventKind")
+        if payload is None:
+            payload = {}
+        if type(payload) is not dict:
+            raise WorkLedgerError("payload 必须是 builtin dict")
+        _reject_non_finite(payload)
+        if len(json.dumps(payload, ensure_ascii=True,
+                          allow_nan=False).encode("utf-8"))                 > self._MAX_PAYLOAD_BYTES:
+            raise WorkLedgerError(
+                "payload 原始体积超过 4096 字节上限（拒绝 2MiB 级对象常驻）")
+        clean = sanitize_payload(payload, max_bytes=self._MAX_PAYLOAD_BYTES)
+        try:
+            blob = json.dumps(clean, sort_keys=True, ensure_ascii=True,
+                              allow_nan=False, separators=(",", ":"))
+        except (ValueError, TypeError) as exc:
+            raise WorkLedgerError(
+                f"payload 无法 canonical 化（{type(exc).__name__}；NaN/Inf "
+                f"拒绝）") from None
+        if len(blob.encode("utf-8")) > self._MAX_PAYLOAD_BYTES:
+            raise WorkLedgerError("payload 超过字节上限（canonical 后仍超界）")
+        entry = {"run_id": run_id, "event_id": event_id, "kind": kind,
+                 "payload": json.loads(blob)}
         with self._lock:
             if event_id in self._events:
                 self._duplicates += 1
                 return EventBufferOutcome.DUPLICATE
             priority = classify_priority(kind)
-            global_n = len(self._order)
-            if priority.value == "critical" and global_n >= self._global_cap:
+            if priority.value == "critical" \
+                    and len(self._order) >= self._global_cap:
                 raise CriticalBufferOverflow(
-                    f"critical 缓冲容量耗尽（global={global_n}）——fail-closed")
-            per_key = f"{kind.value}"
-            if priority.value == "droppable":
-                if self._per_run_count.get(per_key, 0) >= self._per_run_cap:
-                    self._dropped_ticks += 1
-                    return EventBufferOutcome.DROPPED_TICK
-                self._per_run_count[per_key] = \
-                    self._per_run_count.get(per_key, 0) + 1
-            elif priority.value == "coalescible":
-                # 合并：同 kind 的旧观察被最新观察替换（确定性 coalesce）。
-                for eid in reversed(self._order):
-                    old = self._events.get(eid)
-                    if old is not None and old["kind"] is kind:
-                        del self._events[eid]
-                        self._order.remove(eid)
-                        self._coalesced += 1
-                        break
-            entry = {"event_id": event_id, "kind": kind,
-                     "payload": dict(payload or {})}
+                    f"critical 缓冲容量耗尽（global={len(self._order)}）——"
+                    f"fail-closed（durable overflow marker 由调用方落盘）")
+            if priority.value == "droppable" \
+                    and self._per_run.get(run_id, 0) >= self._per_run_cap:
+                self._dropped_ticks += 1
+                return EventBufferOutcome.DROPPED_TICK
+            self._per_run[run_id] = self._per_run.get(run_id, 0) + 1
             self._events[event_id] = entry
             self._order.append(event_id)
             return EventBufferOutcome.ACCEPTED
 
     def snapshot(self) -> Tuple[Dict[str, Any], ...]:
-        """防御性快照（owner 线程批量 flush 到 ledger 用；不暴露内部引用）。"""
         with self._lock:
-            return tuple(dict(self._events[eid]) for eid in self._order)
+            return tuple(json.loads(json.dumps(self._events[eid]))
+                         for eid in self._order)
+
+    def drain(self) -> Tuple[Dict[str, Any], ...]:
+        """有界 drain/flush：返回快照并清空已接受 entry（容量恢复）。"""
+        with self._lock:
+            out = tuple(json.loads(json.dumps(self._events[eid]))
+                        for eid in self._order)
+            self._events.clear()
+            self._order.clear()
+            self._per_run.clear()
+            return out
 
     @property
     def dropped_ticks(self) -> int:
         return self._dropped_ticks
 
     @property
-    def coalesced(self) -> int:
-        return self._coalesced
-
-    @property
     def duplicates(self) -> int:
         return self._duplicates
 
     def clear_operational(self) -> None:
-        """清空 operational buffer（restart 后仅此缓冲清空；critical/terminal
-        evidence 由 ledger 持久化保留）。"""
         with self._lock:
             self._events.clear()
             self._order.clear()
-            self._per_run_count.clear()
+            self._per_run.clear()
