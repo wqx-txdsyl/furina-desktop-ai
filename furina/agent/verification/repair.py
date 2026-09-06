@@ -177,14 +177,21 @@ _ATTEMPT_STR_FIELDS = ("attempt_id", "run_id", "contract_hash", "verdict",
 _ATTEMPT_VERDICTS = ("", "VERIFIED", "FAILED", "INCONCLUSIVE")
 
 
-def _check_attempt_structure(a) -> None:
-    """P13：AttemptRecord **单一可信结构验证**（只读、确定性、类/模块拥有，
-    不得动态调用实例属性）——由 AttemptRecord.__post_init__（构造期，违约即
-    拒绝构造）与 IndependentVerifier.outcome_is_authentic 的完整 outcome
-    复核（违约即 False）共同调用，两套规则零漂移。
+def _check_attempt_structure(a, *, canonical: bool = False) -> None:
+    """P13 + P14：AttemptRecord **单一可信结构验证**（只读、确定性、类/模块
+    拥有，不得动态调用实例属性）——由 AttemptRecord.__post_init__（构造期，
+    违约即拒绝构造）与 IndependentVerifier.outcome_is_authentic 的完整
+    outcome 复核（违约即 False）共同调用，两套规则零漂移。
 
     全部字段先做 **exact builtin 类型**证明再做比较/词法校验
     （``object.__new__`` 旁路实例携带敌意字段时，敌意协议方法零调用）。
+
+    P14 canonical 认证模式（``canonical=True``，仅真实性 API 使用）：额外
+    要求字段与 ``__post_init__`` 完成后的 **canonical frozen value** 完全
+    一致——started/finished 必须是构造后规范的 builtin float（int/其他未
+    规范化表示拒绝）、diagnostic 不得超 MAX_DIAGNOSTIC_CHARS 且
+    ``scrub_secrets(diagnostic) == diagnostic``（仍含秘密形态 → False，
+    认证阶段绝不静默修正、绝不导出/记录/哈希/回显 raw diagnostic）。
     """
     for _name in _ATTEMPT_STR_FIELDS:
         if type(getattr(a, _name)) is not str:
@@ -237,6 +244,20 @@ def _check_attempt_structure(a) -> None:
             "attempt 时间必须是有限数值（NaN/Inf 拒绝）")
     if a.finished_at_epoch < a.started_at_epoch:
         raise VerificationError("attempt 时序非法：finished < started")
+    if canonical:
+        # P14：canonical 认证模式——__post_init__ 会改写的字段必须已完成
+        # 相同 canonicalization（float 规范 + 脱敏限长），旁路注入的未规范
+        # 表示一律拒绝。
+        if type(a.started_at_epoch) is not float \
+                or type(a.finished_at_epoch) is not float:
+            raise VerificationError(
+                "attempt 时间必须是构造后规范的 builtin float（canonical）")
+        if len(a.diagnostic) > MAX_DIAGNOSTIC_CHARS:
+            raise VerificationError(
+                "attempt diagnostic 超界（canonical）")
+        if scrub_secrets(a.diagnostic) != a.diagnostic:
+            raise VerificationError(
+                "attempt diagnostic 仍含秘密形态（canonical）")
 
 
 @dataclass(frozen=True)
@@ -255,8 +276,9 @@ class AttemptRecord:
 
     def __post_init__(self) -> None:
         # P13：单一可信结构验证（与 outcome 复核共享同一实现——规则零漂移）；
-        # 检查全部通过后再做 float 规范化与诊断脱敏限长。
-        _check_attempt_structure(self)
+        # 检查全部通过后再做 float 规范化与诊断脱敏限长（构造期 canonical
+        # 规范化的唯一入口）。
+        _check_attempt_structure(self, canonical=False)
         object.__setattr__(self, "started_at_epoch",
                            float(self.started_at_epoch))
         object.__setattr__(self, "finished_at_epoch",
@@ -265,15 +287,21 @@ class AttemptRecord:
                            scrub_secrets(self.diagnostic)[:MAX_DIAGNOSTIC_CHARS])
 
 
-def _check_outcome_structure(o, *, max_attempts: int) -> None:
-    """P13：RepairOutcome **单一可信结构验证**（只读、确定性、类/模块拥有）
-    ——由 RepairOutcome.__post_init__（构造期，max_attempts=全局
+def _check_outcome_structure(o, *, max_attempts: int,
+                             canonical: bool = False) -> None:
+    """P13 + P14：RepairOutcome **单一可信结构验证**（只读、确定性、类/模块
+    拥有）——由 RepairOutcome.__post_init__（构造期，max_attempts=全局
     MAX_ATTEMPTS）与 IndependentVerifier.outcome_is_authentic（复核期，
-    max_attempts=当前契约 budget.max_attempts，更严于全局）共同调用，
-    两套规则零漂移；权威 API 因此复核**完整** outcome 而非只抽查最后一个
-    attempt（reviewer 实测旁路前置 attempt 曾被认证为真——通道关闭）。
+    max_attempts=当前契约 budget.max_attempts 更严于全局 + canonical 认证
+    模式）共同调用，两套规则零漂移；权威 API 因此复核**完整** outcome 而非
+    只抽查最后一个 attempt（reviewer 实测旁路前置 attempt 曾被认证为真——
+    通道关闭）。
 
-    全部字段 exact type 前置；O(1) 数量上限先于账本遍历。"""
+    全部字段 exact type 前置；O(1) 数量上限先于账本遍历。
+
+    P14 canonical 认证模式：终局时间必须是构造后规范的 builtin float、
+    diagnostic 不得超 MAX_DIAGNOSTIC_CHARS 且脱敏后不变（旁路注入的
+    raw/超长 diagnostic 与 int 时间戳一律拒绝——认证阶段绝不静默修正）。"""
     if type(o.stop_reason) is not RepairStopReason:
         raise VerificationError(
             f"stop_reason 必须是 RepairStopReason，得到 "
@@ -309,6 +337,19 @@ def _check_outcome_structure(o, *, max_attempts: int) -> None:
         raise VerificationError("终局时间必须是有限数值（NaN/Inf 拒绝）")
     if o.finished_at_epoch < o.started_at_epoch:
         raise VerificationError("终局时序非法：finished < started")
+    if canonical:
+        # P14：canonical 认证模式——__post_init__ 会改写的字段必须已完成
+        # 相同 canonicalization。
+        if type(o.started_at_epoch) is not float \
+                or type(o.finished_at_epoch) is not float:
+            raise VerificationError(
+                "终局时间必须是构造后规范的 builtin float（canonical）")
+        if len(o.diagnostic) > MAX_DIAGNOSTIC_CHARS:
+            raise VerificationError(
+                "终局 diagnostic 超界（canonical）")
+        if scrub_secrets(o.diagnostic) != o.diagnostic:
+            raise VerificationError(
+                "终局 diagnostic 仍含秘密形态（canonical）")
     if o.stop_reason is RepairStopReason.VERIFIED:
         if o.final_report is None:
             raise VerificationError(
@@ -328,7 +369,7 @@ def _check_outcome_structure(o, *, max_attempts: int) -> None:
     for a in o.attempts:
         if type(a) is not AttemptRecord:
             raise VerificationError("attempts 必须全部是 AttemptRecord")
-        _check_attempt_structure(a)
+        _check_attempt_structure(a, canonical=canonical)
         if a.contract_hash != o.contract_hash:
             raise VerificationError("attempt 契约 hash 与终局不一致")
         if a.attempt_id in seen_attempt_ids or a.run_id in seen_attempt_runs:
@@ -391,8 +432,10 @@ class RepairOutcome:
 
     def __post_init__(self) -> None:
         # P13：单一可信结构验证（全局上限；与 outcome_is_authentic 共享同一
-        # 实现——规则零漂移）。检查全部通过后再做 float 规范化与诊断脱敏。
-        _check_outcome_structure(self, max_attempts=MAX_ATTEMPTS)
+        # 实现——规则零漂移）。检查全部通过后再做 float 规范化与诊断脱敏
+        # （构造期 canonical 规范化的唯一入口）。
+        _check_outcome_structure(self, max_attempts=MAX_ATTEMPTS,
+                                 canonical=False)
         object.__setattr__(self, "started_at_epoch",
                            float(self.started_at_epoch))
         object.__setattr__(self, "finished_at_epoch",

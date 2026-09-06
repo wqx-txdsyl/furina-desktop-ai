@@ -369,11 +369,14 @@ class IndependentVerifier:
             from .repair import RepairOutcome, _check_outcome_structure
             if type(outcome) is not RepairOutcome:
                 return False
-            # P13：完整结构复核（类拥有的单一可信实现；契约级上限更严于
-            # 全局硬上限；全部 attempt 重新验证——绝不只抽查最后一个）。
+            # P13 + P14：完整结构复核（类拥有的单一可信实现；契约级上限
+            # 更严于全局硬上限；canonical 认证模式——只接受与 __post_init__
+            # 完成后完全一致的 canonical frozen value；全部 attempt 重新
+            # 验证——绝不只抽查最后一个）。
             _check_outcome_structure(
                 outcome,
-                max_attempts=self._contract.budget.max_attempts)
+                max_attempts=self._contract.budget.max_attempts,
+                canonical=True)
             # 当前 verifier 绑定复核（结构 helper 不绑定具体 verifier）。
             if outcome.contract_id != self._contract.contract_id:
                 return False

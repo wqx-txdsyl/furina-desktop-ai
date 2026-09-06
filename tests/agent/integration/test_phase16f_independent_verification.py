@@ -7026,3 +7026,159 @@ def test_p13_real_multi_attempt_outcome_authentic_true(env):
     assert out.stop_reason is RepairStopReason.VERIFIED
     assert len(out.attempts) == 2
     assert v.outcome_is_authentic(out) is True
+
+
+# ================================================================
+# Reviewer Patch 14 — P0：认证 API 只接受构造后 canonical frozen value
+# （canonical 认证模式；拒绝旁路注入的未规范化字段）（reviewer-locked）
+# ================================================================
+
+def _p14_real_parts(c, v):
+    """当前 verifier 真实签发的 VERIFIED 报告 + 与之精确一致的 canonical
+    last attempt。"""
+    from furina.agent.verification.repair import AttemptRecord
+    rep = v.verify(_ok_summary_submission(c, "run_p14_v_0001"))
+    attempt = AttemptRecord(
+        attempt_id="att_p14_0001", run_id=rep.run_id,
+        contract_hash=rep.contract_hash, verdict="VERIFIED",
+        report_id=rep.report_id, failure_signature="",
+        started_at_epoch=1.0, finished_at_epoch=2.0)
+    return rep, attempt
+
+
+def _p14_bypass_outcome(c, rep, attempt, **over):
+    """object.__new__(RepairOutcome) 旁路构造（结构一致 + 可注入未规范化
+    字段）。"""
+    from furina.agent.verification.repair import RepairOutcome
+    o = object.__new__(RepairOutcome)
+    defaults = dict(stop_reason=RepairStopReason.VERIFIED,
+                    contract_id=rep.contract_id,
+                    contract_hash=rep.contract_hash,
+                    attempts=(attempt,), final_report=rep,
+                    started_at_epoch=1.0, finished_at_epoch=2.0, diagnostic="")
+    defaults.update(over)
+    for key, value in defaults.items():
+        object.__setattr__(o, key, value)
+    return o
+
+
+def _p14_bypass_attempt(rep, **over):
+    """object.__new__(AttemptRecord) 旁路构造（结构一致 + 可注入未规范化
+    字段）。"""
+    from furina.agent.verification.repair import AttemptRecord
+    a = object.__new__(AttemptRecord)
+    defaults = dict(attempt_id="att_p14_0002", run_id=rep.run_id,
+                    contract_hash=rep.contract_hash, verdict="VERIFIED",
+                    report_id=rep.report_id, failure_signature="",
+                    started_at_epoch=1.0, finished_at_epoch=2.0, diagnostic="")
+    defaults.update(over)
+    for key, value in defaults.items():
+        object.__setattr__(a, key, value)
+    return a
+
+
+def test_p14_raw_outcome_diagnostic_not_authentic(env):
+    """P14 锁定（reviewer 反例 1）：旁路 outcome 注入未脱敏 raw secret
+    diagnostic → outcome_is_authentic=false（认证阶段绝不静默修正）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p14_a_0001")
+    v = IndependentVerifier(c)
+    rep, attempt = _p14_real_parts(c, v)
+    bypass = _p14_bypass_outcome(
+        c, rep, attempt, diagnostic="password=RAW_OUTCOME_SECRET")
+    assert v.outcome_is_authentic(bypass) is False
+
+
+def test_p14_raw_attempt_diagnostic_not_authentic(env):
+    """P14 锁定（reviewer 反例 2）：旁路 attempt 注入未脱敏 raw secret
+    diagnostic → outcome_is_authentic=false。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p14_b_0001")
+    v = IndependentVerifier(c)
+    rep, attempt = _p14_real_parts(c, v)
+    bad_attempt = _p14_bypass_attempt(
+        rep, diagnostic="api_key=RAW_ATTEMPT_SECRET")
+    bypass = _p14_bypass_outcome(c, rep, bad_attempt)
+    assert v.outcome_is_authentic(bypass) is False
+
+
+def test_p14_oversize_diagnostic_not_authentic(env):
+    """P14 锁定（reviewer 反例 3）：旁路 outcome diagnostic 100000 字符
+    （超 MAX_DIAGNOSTIC_CHARS）→ outcome_is_authentic=false。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p14_c_0001")
+    v = IndependentVerifier(c)
+    rep, attempt = _p14_real_parts(c, v)
+    bypass = _p14_bypass_outcome(c, rep, attempt, diagnostic="x" * 100000)
+    assert v.outcome_is_authentic(bypass) is False
+
+
+def test_p14_max_length_clean_diagnostic_authentic(env):
+    """P14 锁定（正例 4）：diagnostic 恰好 MAX_DIAGNOSTIC_CHARS 且无秘密
+    形态 → canonical 通过（真实 outcome → true）。"""
+    from furina.agent.verification.models import MAX_DIAGNOSTIC_CHARS
+    from furina.agent.verification.repair import RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p14_d_0001")
+    v = IndependentVerifier(c)
+    rep, attempt = _p14_real_parts(c, v)
+    clean = "d" * MAX_DIAGNOSTIC_CHARS
+    outcome = RepairOutcome(
+        stop_reason=RepairStopReason.VERIFIED,
+        contract_id=rep.contract_id, contract_hash=rep.contract_hash,
+        attempts=(attempt,), final_report=rep,
+        started_at_epoch=1.0, finished_at_epoch=2.0, diagnostic=clean)
+    assert outcome.diagnostic == clean
+    assert v.outcome_is_authentic(outcome) is True
+
+
+def test_p14_noncanonical_timestamps_not_authentic(env):
+    """P14 锁定（reviewer 反例 5/6）：旁路 outcome / attempt 注入 int
+    时间戳（未规范化表示）→ outcome_is_authentic=false。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p14_e_0001")
+    v = IndependentVerifier(c)
+    rep, attempt = _p14_real_parts(c, v)
+    bypass_outcome = _p14_bypass_outcome(c, rep, attempt,
+                                         started_at_epoch=1, finished_at_epoch=2)
+    assert v.outcome_is_authentic(bypass_outcome) is False
+    int_attempt = _p14_bypass_attempt(rep, started_at_epoch=1,
+                                      finished_at_epoch=2)
+    bypass2 = _p14_bypass_outcome(c, rep, int_attempt)
+    assert v.outcome_is_authentic(bypass2) is False
+
+
+def test_p14_normal_construction_int_timestamps_normalized(env):
+    """P14 锁定（正例 7）：正常构造传入 int 时间戳 → 构造期规范化为
+    builtin float，完整真实 outcome 仍为 true（调用方兼容行为零改变）。"""
+    from furina.agent.verification.repair import AttemptRecord, RepairOutcome
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p14_f_0001")
+    v = IndependentVerifier(c)
+    rep, _ = _p14_real_parts(c, v)
+    attempt = AttemptRecord(
+        attempt_id="att_p14_f_0001", run_id=rep.run_id,
+        contract_hash=rep.contract_hash, verdict="VERIFIED",
+        report_id=rep.report_id, failure_signature="",
+        started_at_epoch=1, finished_at_epoch=2)       # int 输入
+    assert type(attempt.started_at_epoch) is float     # 构造期 float 规范
+    outcome = RepairOutcome(
+        stop_reason=RepairStopReason.VERIFIED,
+        contract_id=rep.contract_id, contract_hash=rep.contract_hash,
+        attempts=(attempt,), final_report=rep,
+        started_at_epoch=1, finished_at_epoch=2)       # int 输入
+    assert type(outcome.started_at_epoch) is float
+    assert v.outcome_is_authentic(outcome) is True
+
+
+def test_p14_hostile_diagnostic_object_zero_calls(env):
+    """P14 锁定（正例 8）：旁路 outcome 注入敌意 diagnostic 对象 → false
+    且 __str__/__repr__/__bool__ 调用次数为 0（exact type 先于一切）。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p14_g_0001")
+    v = IndependentVerifier(c)
+    rep, attempt = _p14_real_parts(c, v)
+    hostile = _P13HostileObj()
+    bypass = _p14_bypass_outcome(c, rep, attempt, diagnostic=hostile)
+    assert v.outcome_is_authentic(bypass) is False
+    assert all(n == 0 for n in hostile.calls.values()), hostile.calls

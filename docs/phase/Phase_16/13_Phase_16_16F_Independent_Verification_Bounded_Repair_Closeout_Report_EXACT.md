@@ -230,6 +230,92 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.000000000000 Patch 14 回执（Reviewer Patch 14 专用）
+
+```text
+BASE_SHA                         = 8d7a607d5e22c0e520207e4614c5f0f81f6abcba
+                                   （PATCH13_FINAL_SHA；Patch 14 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+BRANCH                           = feature/phase16-16f-independent-verification-
+                                   patch2-clean
+MODEL                            = GLM-5.3-Flash（任务书推荐模型）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–13 惯例）
+CHANGED_FILES                    = furina/agent/verification/repair.py,
+                                   verifier.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（models.py/checks.py/
+                                   __init__.py 零改动）
+CANONICAL_FROZEN_VALUES_REQUIRED = true（P0：共享结构 helper 增加 canonical
+                                   认证模式（_check_attempt_structure/
+                                   _check_outcome_structure 增加
+                                   canonical=True 参数）——构造期
+                                   canonical=False（先验证输入再规范化），
+                                   真实性 API canonical=True（只接受与
+                                   __post_init__ 完成后完全一致的 canonical
+                                   frozen value）；构造器与认证规则由同一
+                                   实现承载、零漂移）
+RAW_OUTCOME_DIAGNOSTIC_AUTHENTIC = false（锁定（reviewer 反例 1）：旁路
+                                   outcome 注入未脱敏 "password=RAW_*"
+                                   diagnostic → scrub_secrets 不变式失配 →
+                                   outcome_is_authentic=false，认证阶段绝不
+                                   静默修正、绝不导出/记录/哈希/回显 raw
+                                   diagnostic）
+RAW_ATTEMPT_DIAGNOSTIC_AUTHENTIC = false（锁定（reviewer 反例 2）：旁路
+                                   attempt 注入未脱敏 "api_key=RAW_*"
+                                   diagnostic → 同上 false）
+OVERSIZE_DIAGNOSTIC_AUTHENTIC    = false（锁定（reviewer 反例 3）：旁路
+                                   outcome diagnostic 100000 字符（超
+                                   MAX_DIAGNOSTIC_CHARS）→ false；恰好
+                                   MAX 且无秘密 → 正常认证 true）
+NONCANONICAL_TIMESTAMPS_AUTHENTIC = false（锁定（reviewer 反例 5/6）：旁路
+                                   outcome/attempt 注入 int 时间戳（未规范
+                                   化表示）→ type is float 校验拒绝 →
+                                   false；正例 7：正常构造传入 int 时间戳 →
+                                   构造期规范化为 builtin float → 完整真实
+                                   outcome 仍为 true——调用方兼容行为零
+                                   改变）
+FULL_OUTCOME_REVALIDATED         = true（P13 完整复核保持——全部字段 exact
+                                   type、全部 attempt 复核、final_report
+                                   完整绑定、O(1) 数量上限（契约级）、类级
+                                   seal 复核；敌意 diagnostic 对象
+                                   __str__/__repr__/__bool__ 零调用；Patch
+                                   13 非法前置 attempt 与 Patch 12 shadowing
+                                   测试保持通过）
+SECRET_STORED_OR_EXPORTED        = false（canonical scrub-stability 不变式
+                                   使仍含秘密形态的旁路字段在认证面拒绝——
+                                   认证失败零导出零记录零哈希零回显）
+OLD_TESTS_PRESERVED              = true（270 项既有专项测试全保留——P13 的
+                                   6 项与 P1–P12 全部否证零弱化、零 skip、
+                                   零 xfail）
+NEW_P14_TESTS                    = 7 项（raw outcome/attempt diagnostic、
+                                   oversize、MAX 正例、int 时间戳双反例、
+                                   int 规范化正例、敌意 diagnostic 对象零
+                                   调用）
+TARGETED                         = 277 passed / 0 failed / 0 skipped（16F 专项：
+                                   原 270 全保留 + 7 项 P14 reviewer-locked
+                                   否证/正例；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 684 passed（tests/agent 全目录一次；
+                                   = Patch 13 基线 677 + P14 新增 7）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1966 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 277 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；本补丁全部测试尝试零 flaky 零
+                                   重跑）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 repair.py + verifier.py +
+                                   1 测试文件 + 本 closeout——16A–16E frozen
+                                   contracts 与 C1–C7 零改动，models.py/
+                                   checks.py/__init__.py 零改动）
+GIT_DIFF_CHECK                   = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+STATUS                           = READY_FOR_REVIEW
+```
+
 ## 0.00000000000 Patch 13 回执（Reviewer Patch 13 专用）
 
 ```text
