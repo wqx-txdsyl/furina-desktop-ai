@@ -177,6 +177,68 @@ _ATTEMPT_STR_FIELDS = ("attempt_id", "run_id", "contract_hash", "verdict",
 _ATTEMPT_VERDICTS = ("", "VERIFIED", "FAILED", "INCONCLUSIVE")
 
 
+def _check_attempt_structure(a) -> None:
+    """P13：AttemptRecord **单一可信结构验证**（只读、确定性、类/模块拥有，
+    不得动态调用实例属性）——由 AttemptRecord.__post_init__（构造期，违约即
+    拒绝构造）与 IndependentVerifier.outcome_is_authentic 的完整 outcome
+    复核（违约即 False）共同调用，两套规则零漂移。
+
+    全部字段先做 **exact builtin 类型**证明再做比较/词法校验
+    （``object.__new__`` 旁路实例携带敌意字段时，敌意协议方法零调用）。
+    """
+    for _name in _ATTEMPT_STR_FIELDS:
+        if type(getattr(a, _name)) is not str:
+            raise VerificationError(
+                f"{_name} 必须是 builtin str，得到 "
+                f"{_safe_type_name(type(getattr(a, _name)))}")
+    if type(a.started_at_epoch) not in (int, float):
+        raise VerificationError(
+            f"started_at_epoch 必须是 builtin int/float，得到 "
+            f"{_safe_type_name(type(a.started_at_epoch))}")
+    if type(a.finished_at_epoch) not in (int, float):
+        raise VerificationError(
+            f"finished_at_epoch 必须是 builtin int/float，得到 "
+            f"{_safe_type_name(type(a.finished_at_epoch))}")
+    if type(a.diagnostic) is not str:
+        raise VerificationError(
+            f"diagnostic 必须是 builtin str，得到 "
+            f"{_safe_type_name(type(a.diagnostic))}")
+    # P10-B2：语义一致性——attempt_id/run_id 走 canonical identity；
+    # contract_hash 严格 64 位小写 hex；verdict 封闭词表；
+    # verdict="" ⇒ report_id="" 且 failure_signature 为 64-hex 签名；
+    # verdict≠"" ⇒ report_id 为 vrp_ 报告身份且 VERIFIED ⇒ 签名为 ""、
+    # FAILED/INCONCLUSIVE ⇒ 必须携带 64-hex 签名（P11-B2）。
+    validate_identity(a.attempt_id, "attempt_id")
+    validate_identity(a.run_id, "run_id")
+    if not _SHA256_PATTERN.match(a.contract_hash):
+        raise VerificationError("attempt contract_hash 必须是 64 位小写 hex")
+    if a.verdict not in _ATTEMPT_VERDICTS:
+        raise VerificationError(
+            f"attempt verdict 必须是封闭词表值，得到 "
+            f"{scrub_secrets(a.verdict)[:32]!r}")
+    if a.verdict == "":
+        if a.report_id != "" \
+                or not _SHA256_PATTERN.match(a.failure_signature):
+            raise VerificationError(
+                "collect 层失败记录必须 report_id=\"\" 且携带 64-hex 签名")
+    else:
+        if not _REPORT_ID_PATTERN.match(a.report_id):
+            raise VerificationError("attempt report_id 词法非法")
+        if a.verdict == "VERIFIED":
+            if a.failure_signature != "":
+                raise VerificationError("VERIFIED 记录不得携带失败签名")
+        else:
+            if not _SHA256_PATTERN.match(a.failure_signature):
+                raise VerificationError(
+                    "FAILED/INCONCLUSIVE 记录必须携带 64 位小写 hex 失败签名")
+    if not math.isfinite(float(a.started_at_epoch)) \
+            or not math.isfinite(float(a.finished_at_epoch)):
+        raise VerificationError(
+            "attempt 时间必须是有限数值（NaN/Inf 拒绝）")
+    if a.finished_at_epoch < a.started_at_epoch:
+        raise VerificationError("attempt 时序非法：finished < started")
+
+
 @dataclass(frozen=True)
 class AttemptRecord:
     """单次 attempt 的不可变记录（attempt/run 身份 + 契约 hash + 结果/签名）。"""
@@ -192,60 +254,126 @@ class AttemptRecord:
     diagnostic: str = ""
 
     def __post_init__(self) -> None:
-        # P9-B3：公开冻结值模型 exact-builtin 扫描——全部字符串字段必须是
-        # **builtin str**（子类不得进入冻结对象或导出树）。
-        for _name in _ATTEMPT_STR_FIELDS:
-            if type(getattr(self, _name)) is not str:
-                raise VerificationError(
-                    f"{_name} 必须是 builtin str，得到 "
-                    f"{_safe_type_name(type(getattr(self, _name)))}")
-        # P10-B2：语义一致性——attempt_id/run_id 走 canonical identity；
-        # contract_hash 严格 64 位小写 hex；verdict 封闭词表；
-        # verdict="" ⇒ report_id="" 且 failure_signature 为 64-hex 签名；
-        # verdict≠"" ⇒ report_id 为 vrp_ 报告身份且 VERIFIED ⇒ 签名为 ""。
-        validate_identity(self.attempt_id, "attempt_id")
-        validate_identity(self.run_id, "run_id")
-        if not _SHA256_PATTERN.match(self.contract_hash):
-            raise VerificationError("attempt contract_hash 必须是 64 位小写 hex")
-        if self.verdict not in _ATTEMPT_VERDICTS:
-            raise VerificationError(
-                f"attempt verdict 必须是封闭词表值，得到 "
-                f"{scrub_secrets(self.verdict)[:32]!r}")
-        if self.verdict == "":
-            if self.report_id != "" \
-                    or not _SHA256_PATTERN.match(self.failure_signature):
-                raise VerificationError(
-                    "collect 层失败记录必须 report_id=\"\" 且携带 64-hex 签名")
-        else:
-            if not _REPORT_ID_PATTERN.match(self.report_id):
-                raise VerificationError("attempt report_id 词法非法")
-            if self.verdict == "VERIFIED":
-                if self.failure_signature != "":
-                    raise VerificationError("VERIFIED 记录不得携带失败签名")
-            else:
-                # P11-B2：FAILED/INCONCLUSIVE 必须携带 64 位小写 hex 失败签名
-                #（空签名缺口关闭——reviewer 实测 FAILED + failure_signature=""
-                # 曾可构造）。
-                if not _SHA256_PATTERN.match(self.failure_signature):
-                    raise VerificationError(
-                        "FAILED/INCONCLUSIVE 记录必须携带 64 位小写 hex 失败签名")
-        # P8-B3：时间戳有限数值结构校验（bool/子类/NaN/Inf 拒绝）+ float 规范。
+        # P13：单一可信结构验证（与 outcome 复核共享同一实现——规则零漂移）；
+        # 检查全部通过后再做 float 规范化与诊断脱敏限长。
+        _check_attempt_structure(self)
         object.__setattr__(self, "started_at_epoch",
-                           _finite_epoch(self.started_at_epoch, "started_at_epoch"))
+                           float(self.started_at_epoch))
         object.__setattr__(self, "finished_at_epoch",
-                           _finite_epoch(self.finished_at_epoch, "finished_at_epoch"))
-        # P10-B2：attempt 时序一致。
-        if self.finished_at_epoch < self.started_at_epoch:
-            raise VerificationError("attempt 时序非法：finished < started")
-        # P9-B3：诊断必须是 builtin str——非字符串拒绝（绝不 `value or ""`
-        # truthiness、绝不调用其 __bool__/__str__）；秘密边界（blocker 6）：
-        # 诊断字符串面统一脱敏后限长。
-        if type(self.diagnostic) is not str:
-            raise VerificationError(
-                f"diagnostic 必须是 builtin str，得到 "
-                f"{_safe_type_name(type(self.diagnostic))}")
+                           float(self.finished_at_epoch))
         object.__setattr__(self, "diagnostic",
                            scrub_secrets(self.diagnostic)[:MAX_DIAGNOSTIC_CHARS])
+
+
+def _check_outcome_structure(o, *, max_attempts: int) -> None:
+    """P13：RepairOutcome **单一可信结构验证**（只读、确定性、类/模块拥有）
+    ——由 RepairOutcome.__post_init__（构造期，max_attempts=全局
+    MAX_ATTEMPTS）与 IndependentVerifier.outcome_is_authentic（复核期，
+    max_attempts=当前契约 budget.max_attempts，更严于全局）共同调用，
+    两套规则零漂移；权威 API 因此复核**完整** outcome 而非只抽查最后一个
+    attempt（reviewer 实测旁路前置 attempt 曾被认证为真——通道关闭）。
+
+    全部字段 exact type 前置；O(1) 数量上限先于账本遍历。"""
+    if type(o.stop_reason) is not RepairStopReason:
+        raise VerificationError(
+            f"stop_reason 必须是 RepairStopReason，得到 "
+            f"{_safe_type_name(type(o.stop_reason))}")
+    if type(o.contract_id) is not str or type(o.contract_hash) is not str:
+        raise VerificationError("contract_id/contract_hash 必须是 builtin str")
+    if type(o.diagnostic) is not str:
+        raise VerificationError(
+            f"diagnostic 必须是 builtin str，得到 "
+            f"{_safe_type_name(type(o.diagnostic))}")
+    if type(o.attempts) is not tuple:
+        raise VerificationError("attempts 必须是 builtin tuple（封闭导出树）")
+    if o.final_report is not None \
+            and type(o.final_report) is not VerificationReport:
+        raise VerificationError("final_report 必须是 None 或 VerificationReport")
+    # P12-B2：O(1) 数量上限（调用方传入全局或更严的契约级上限）——**先封
+    # 数量再遍历账本**（超限账本零遍历、元素级校验不执行）。
+    if len(o.attempts) > max_attempts:
+        raise VerificationError(
+            f"attempts 数量 {len(o.attempts)} 超界硬上限 "
+            f"{max_attempts}（先封数量再遍历）")
+    validate_identity(o.contract_id, "contract_id")
+    if not _SHA256_PATTERN.match(o.contract_hash):
+        raise VerificationError("contract_hash 必须是 64 位小写 hex")
+    for _name in ("started_at_epoch", "finished_at_epoch"):
+        _v = getattr(o, _name)
+        if type(_v) not in (int, float):
+            raise VerificationError(
+                f"{_name} 必须是 builtin int/float，得到 "
+                f"{_safe_type_name(type(_v))}")
+    if not math.isfinite(float(o.started_at_epoch)) \
+            or not math.isfinite(float(o.finished_at_epoch)):
+        raise VerificationError("终局时间必须是有限数值（NaN/Inf 拒绝）")
+    if o.finished_at_epoch < o.started_at_epoch:
+        raise VerificationError("终局时序非法：finished < started")
+    if o.stop_reason is RepairStopReason.VERIFIED:
+        if o.final_report is None:
+            raise VerificationError(
+                "VERIFIED 终局必须携带 final_report（不得为 None）")
+        if o.final_report.verdict is not VerificationVerdict.VERIFIED:
+            raise VerificationError("VERIFIED 终局的 final_report verdict 非法")
+        if not o.attempts:
+            raise VerificationError("VERIFIED 终局必须携带非空 attempts")
+    elif o.final_report is not None \
+            and o.final_report.verdict is VerificationVerdict.VERIFIED:
+        raise VerificationError(
+            "非 VERIFIED 终局不得携带 VERIFIED final_report")
+    # 完整账本复核（P13：**全部** attempt，绝不只抽查最后一个）。
+    seen_attempt_ids: set = set()
+    seen_attempt_runs: set = set()
+    prev_finish = o.started_at_epoch
+    for a in o.attempts:
+        if type(a) is not AttemptRecord:
+            raise VerificationError("attempts 必须全部是 AttemptRecord")
+        _check_attempt_structure(a)
+        if a.contract_hash != o.contract_hash:
+            raise VerificationError("attempt 契约 hash 与终局不一致")
+        if a.attempt_id in seen_attempt_ids or a.run_id in seen_attempt_runs:
+            raise VerificationError("attempt 身份重复（attempt_id/run_id）")
+        seen_attempt_ids.add(a.attempt_id)
+        seen_attempt_runs.add(a.run_id)
+        if a.started_at_epoch < prev_finish:
+            raise VerificationError(
+                "attempt 时间轴非法（未按时间非递减排列）")
+        if a.finished_at_epoch > o.finished_at_epoch \
+                or a.started_at_epoch < o.started_at_epoch:
+            raise VerificationError(
+                "attempt 时间完全/部分落在 outcome 时间窗之外")
+        prev_finish = a.finished_at_epoch
+    # P11-B1：final_report 非 None 时（无论 stop_reason）与终局/最后 attempt
+    # 的**完整身份绑定**。
+    if o.final_report is not None:
+        rep = o.final_report
+        if type(rep.contract_id) is not str \
+                or type(rep.contract_hash) is not str:
+            raise VerificationError(
+                "final_report 契约身份必须是 builtin str")
+        if type(rep.verdict) is not VerificationVerdict:
+            raise VerificationError("final_report verdict 类型非法")
+        if type(rep.standard_hash) is not str:
+            raise VerificationError(
+                "final_report standard_hash 必须是 builtin str")
+        if type(rep.run_id) is not str or type(rep.report_id) is not str:
+            raise VerificationError("final_report run/report 身份必须是 builtin str")
+        if rep.contract_id != o.contract_id:
+            raise VerificationError(
+                "final_report contract_id 与终局不一致（跨契约报告拒绝）")
+        if rep.contract_hash != o.contract_hash:
+            raise VerificationError(
+                "final_report contract_hash 与终局不一致")
+        if not o.attempts:
+            raise VerificationError(
+                "携带 final_report 的终局必须包含最后 attempt")
+        last = o.attempts[-1]
+        if rep.run_id != last.run_id or rep.report_id != last.report_id \
+                or rep.verdict.value != last.verdict:
+            raise VerificationError(
+                "final_report 与最后 attempt 身份不一致")
+        if last.contract_hash != o.contract_hash:
+            raise VerificationError("最后 attempt 契约 hash 与终局不一致")
 
 
 @dataclass(frozen=True)
@@ -262,102 +390,13 @@ class RepairOutcome:
     diagnostic: str = ""
 
     def __post_init__(self) -> None:
-        # P9-B3：公开冻结值模型 exact-builtin 扫描——stop_reason/容器/元素/
-        # final_report 全部精确类型（子类不得冒充进入导出树）。
-        if type(self.stop_reason) is not RepairStopReason:
-            raise VerificationError(
-                f"stop_reason 必须是 RepairStopReason，得到 "
-                f"{_safe_type_name(type(self.stop_reason))}")
-        if type(self.contract_id) is not str or type(self.contract_hash) is not str:
-            raise VerificationError("contract_id/contract_hash 必须是 builtin str")
-        if type(self.attempts) is not tuple:
-            raise VerificationError("attempts 必须是 builtin tuple（封闭导出树）")
-        # P12-B2：O(1) 全局 attempt 数量硬上限——**先封数量再遍历账本**（超限
-        # 账本零遍历、元素级校验不执行；reviewer 实测 100 个身份唯一、时序
-        # 合法的 attempts 曾可构造而 WorkContract 全局上限为 99——通道关闭）。
-        if len(self.attempts) > MAX_ATTEMPTS:
-            raise VerificationError(
-                f"attempts 数量 {len(self.attempts)} 超界全局硬上限 "
-                f"{MAX_ATTEMPTS}（先封数量再遍历）")
-        if not all(type(a) is AttemptRecord for a in self.attempts):
-            raise VerificationError("attempts 必须全部是 AttemptRecord")
-        if self.final_report is not None \
-                and type(self.final_report) is not VerificationReport:
-            raise VerificationError("final_report 必须是 None 或 VerificationReport")
-        # P10-B2：语义一致性——contract_id canonical、contract_hash 64-hex、
-        # 时序单调、VERIFIED 终局必须携带与最后 attempt 精确一致的 VERIFIED
-        # 报告；非 VERIFIED 终局绝不携带 VERIFIED 报告。（closeout 明确：
-        # RepairOutcome 是结构化执行结果，不是第二验证权威——final_report 的
-        # seal 真实性仍只能由当前 IndependentVerifier 复核。）
-        validate_identity(self.contract_id, "contract_id")
-        if not _SHA256_PATTERN.match(self.contract_hash):
-            raise VerificationError("contract_hash 必须是 64 位小写 hex")
-        # P8-B3：时间戳有限数值结构校验——RepairOutcome 不得包含 NaN/Inf。
+        # P13：单一可信结构验证（全局上限；与 outcome_is_authentic 共享同一
+        # 实现——规则零漂移）。检查全部通过后再做 float 规范化与诊断脱敏。
+        _check_outcome_structure(self, max_attempts=MAX_ATTEMPTS)
         object.__setattr__(self, "started_at_epoch",
-                           _finite_epoch(self.started_at_epoch, "started_at_epoch"))
+                           float(self.started_at_epoch))
         object.__setattr__(self, "finished_at_epoch",
-                           _finite_epoch(self.finished_at_epoch, "finished_at_epoch"))
-        if self.finished_at_epoch < self.started_at_epoch:
-            raise VerificationError("终局时序非法：finished < started")
-        for a in self.attempts:
-            if a.contract_hash != self.contract_hash:
-                raise VerificationError("attempt 契约 hash 与终局不一致")
-        if self.stop_reason is RepairStopReason.VERIFIED:
-            if self.final_report is None:
-                raise VerificationError(
-                    "VERIFIED 终局必须携带 final_report（不得为 None）")
-            if self.final_report.verdict is not VerificationVerdict.VERIFIED:
-                raise VerificationError("VERIFIED 终局的 final_report verdict 非法")
-            if not self.attempts:
-                raise VerificationError("VERIFIED 终局必须携带非空 attempts")
-        elif self.final_report is not None \
-                and self.final_report.verdict is VerificationVerdict.VERIFIED:
-            raise VerificationError(
-                "非 VERIFIED 终局不得携带 VERIFIED final_report")
-        # P11-B1：final_report 非 None 时（无论 stop_reason）与终局/最后
-        # attempt 的**完整身份绑定**——contract_id、contract_hash、run_id、
-        # report_id、verdict 全部一致（RepairOutcome 本身只负责结构绑定；
-        # seal 真实性只能经 IndependentVerifier 的 outcome 真实性 API 复核）。
-        if self.final_report is not None:
-            rep = self.final_report
-            if rep.contract_id != self.contract_id:
-                raise VerificationError(
-                    "final_report contract_id 与终局不一致（跨契约报告拒绝）")
-            if rep.contract_hash != self.contract_hash:
-                raise VerificationError(
-                    "final_report contract_hash 与终局不一致")
-            if not self.attempts:
-                raise VerificationError(
-                    "携带 final_report 的终局必须包含最后 attempt")
-            last = self.attempts[-1]
-            if rep.run_id != last.run_id or rep.report_id != last.report_id \
-                    or rep.verdict.value != last.verdict:
-                raise VerificationError(
-                    "final_report 与最后 attempt 身份不一致")
-            if last.contract_hash != self.contract_hash:
-                raise VerificationError("最后 attempt 契约 hash 与终局不一致")
-        # P11-B2：attempt 账本语义闭合——身份唯一、时间窗封闭、按时间非递减。
-        seen_attempt_ids: set = set()
-        seen_attempt_runs: set = set()
-        prev_finish = self.started_at_epoch
-        for a in self.attempts:
-            if a.attempt_id in seen_attempt_ids or a.run_id in seen_attempt_runs:
-                raise VerificationError("attempt 身份重复（attempt_id/run_id）")
-            seen_attempt_ids.add(a.attempt_id)
-            seen_attempt_runs.add(a.run_id)
-            if a.started_at_epoch < prev_finish:
-                raise VerificationError(
-                    "attempt 时间轴非法（未按时间非递减排列）")
-            if a.finished_at_epoch > self.finished_at_epoch \
-                    or a.started_at_epoch < self.started_at_epoch:
-                raise VerificationError(
-                    "attempt 时间完全/部分落在 outcome 时间窗之外")
-            prev_finish = a.finished_at_epoch
-        # P9-B3：诊断必须是 builtin str（绝不 `value or ""` truthiness）。
-        if type(self.diagnostic) is not str:
-            raise VerificationError(
-                f"diagnostic 必须是 builtin str，得到 "
-                f"{_safe_type_name(type(self.diagnostic))}")
+                           float(self.finished_at_epoch))
         object.__setattr__(self, "diagnostic",
                            scrub_secrets(self.diagnostic)[:MAX_DIAGNOSTIC_CHARS])
 

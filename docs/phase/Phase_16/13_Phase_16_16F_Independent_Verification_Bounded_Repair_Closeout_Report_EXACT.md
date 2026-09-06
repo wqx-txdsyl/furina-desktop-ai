@@ -230,6 +230,89 @@ LOCAL_REMOTE_MATCH              = push 后核验，结论记录于外部 handoff
 READY_FOR_REVIEW                = YES
 ```
 
+## 0.00000000000 Patch 13 回执（Reviewer Patch 13 专用）
+
+```text
+BASE_SHA                         = a609105df77e0a7293369c876bfc0f5b1492ef76
+                                   （PATCH12_FINAL_SHA；Patch 13 唯一 BASE_SHA，
+                                   HEAD==BASE_SHA==remote 开工核验通过）
+BRANCH                           = feature/phase16-16f-independent-verification-
+                                   patch2-clean
+MODEL                            = GLM-5.3-Flash（任务书推荐模型）
+FINAL_SHA                        = 见外部 handoff（closeout 不包含自身 commit
+                                   SHA，沿用 16A–16E 与 Patch 1–12 惯例）
+CHANGED_FILES                    = furina/agent/verification/repair.py,
+                                   verifier.py
+                                   + tests/agent/integration/
+                                   test_phase16f_independent_verification.py
+                                   + 本 closeout（models.py/checks.py/
+                                   __init__.py 零改动）
+FULL_OUTCOME_REVALIDATED         = true（P0：outcome_is_authentic 经类拥有的
+                                   单一可信结构验证 helper
+                                   （repair._check_outcome_structure——与本
+                                   模型构造期共享同一实现，规则零漂移）复核
+                                   **完整** outcome：全部字段 exact type、
+                                   stop_reason identity、contract 词法/hash、
+                                   时间有限性与单调、诊断类型、O(1) 数量上限
+                                   （契约级更严于全局）、全部 attempt 复核、
+                                   final_report 完整绑定——绝不只抽查最后
+                                   一个 attempt）
+ALL_ATTEMPTS_REVALIDATED         = true（账本内**每个** attempt 都经
+                                   _check_attempt_structure 完整复核：全部
+                                   字段 exact str/数值、attempt_id/run_id
+                                   canonical identity、contract_hash 64-hex、
+                                   verdict 封闭词表、verdict↔report_id·签名
+                                   一致性、时序单调；并与终局做 hash 一致、
+                                   身份唯一、时间轴非递减、时间窗封闭校验）
+BYPASSED_OUTCOME_AUTHENTIC       = false（object.__new__(RepairOutcome)
+                                   旁路 outcome（attempts=(敌意对象, 合法
+                                   last)+真实签名报告）→ outcome_is_authentic
+                                   == false（reviewer 反例 1 关闭））
+MALFORMED_EARLIER_ATTEMPT_AUTHENTIC = false（前置 attempt contract_hash
+                                   错误 / 时间越界 [100,200] vs [0,10] /
+                                   乱序 / 重复 attempt_id·run_id → 全部
+                                   false（reviewer 反例 2–4 关闭））
+HOSTILE_ATTEMPT_FIELDS_OBSERVED  = false（object.__new__(AttemptRecord)
+                                   旁路携带敌意字段 → false 且敌意协议方法
+                                   零调用（exact type 先于任何比较/词法
+                                   校验——reviewer 反例 5 关闭））
+CLASS_OWNED_AUTHORITY            = true（helper 为类/模块拥有的确定性实现，
+                                   不得动态调用实例属性；seal 复核仍经类级
+                                   绑定真实实现；正例：完整真实多 attempt
+                                   outcome（FAILED→VERIFIED）→
+                                   outcome_is_authentic=true——合法
+                                   BoundedRepairLoop 输出零改变（reviewer
+                                   反例 6 关闭）；Patch 12 的 shadowing 与
+                                   99/100 边界测试保持通过（反例 7 关闭））
+OLD_TESTS_PRESERVED              = true（264 项既有专项测试全保留——P12 的
+                                   5 项与 P1–P11 全部否证零弱化、零 skip、
+                                   零 xfail）
+NEW_P13_TESTS                    = 6 项（敌意前置 attempt/错误 contract
+                                   hash/时间越界与乱序/重复身份/旁路敌意
+                                   字段零调用/真实多 attempt 正例）
+TARGETED                         = 270 passed / 0 failed / 0 skipped（16F 专项：
+                                   原 264 全保留 + 6 项 P13 reviewer-locked
+                                   否证/正例；-W error::UserWarning 零
+                                   warnings 零 skipped）
+TESTS_AGENT                      = 677 passed（tests/agent 全目录一次；
+                                   = Patch 12 基线 671 + P13 新增 6）
+COGNITION                        = 279 passed（tests/cognition 全目录一次）
+FULL_SUITE                       = 1959 passed / 0 failed / 15 warnings（仅
+                                   一次；15 warnings 全部来自非 16F 既有套件
+                                   ——16F targeted 270 passed 且
+                                   -W error::UserWarning 零 warnings 零
+                                   skipped；本补丁全部测试尝试零 flaky 零
+                                   重跑）
+C1_C7_UNCHANGED                  = true（零写入/零 schema 依赖/零持久化；
+                                   git diff 仅 repair.py + verifier.py +
+                                   1 测试文件 + 本 closeout——16A–16E frozen
+                                   contracts 与 C1–C7 零改动，models.py/
+                                   checks.py/__init__.py 零改动）
+GIT_DIFF_CHECK                   = clean（git diff --check 零输出）
+LOCAL_REMOTE_MATCH               = push 后核验，结论记录于外部 handoff
+STATUS                           = READY_FOR_REVIEW
+```
+
 ## 0.0000000000 Patch 12 回执（Reviewer Patch 12 专用）
 
 ```text

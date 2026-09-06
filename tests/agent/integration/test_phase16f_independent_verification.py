@@ -6770,7 +6770,7 @@ def test_p12_b2_global_attempt_cap_enforced(env):
                       contract_hash=rep.contract_hash,
                       attempts=hundred, final_report=None,
                       started_at_epoch=0.0, finished_at_epoch=10.0)
-    assert "全局硬上限" in str(ei.value)
+    assert "超界硬上限" in str(ei.value)
     # 元素遍历之前拒绝：100 个非 AttemptRecord 元素同样以数量错误拒绝
     with pytest.raises(VerificationError) as ei2:
         RepairOutcome(stop_reason=RepairStopReason.ATTEMPTS_EXHAUSTED,
@@ -6778,7 +6778,7 @@ def test_p12_b2_global_attempt_cap_enforced(env):
                       contract_hash=rep.contract_hash,
                       attempts=tuple(range(100)), final_report=None,
                       started_at_epoch=0.0, finished_at_epoch=10.0)
-    assert "全局硬上限" in str(ei2.value)
+    assert "超界硬上限" in str(ei2.value)
     # 全局边界 99 不因数量误拒（其余字段合法）
     ninetynine = tuple(mk(i) for i in range(99))
     outcome = RepairOutcome(stop_reason=RepairStopReason.ATTEMPTS_EXHAUSTED,
@@ -6822,3 +6822,207 @@ def test_p12_b2_contract_attempt_cap_in_authenticity(env):
                         attempts=(a1,), final_report=real,
                         started_at_epoch=0.0, finished_at_epoch=10.0)
     assert v.outcome_is_authentic(one) is True         # 边界内真实 outcome
+
+
+# ================================================================
+# Reviewer Patch 13 — P0：outcome_is_authentic 完整复核（单一可信结构
+# helper 共享；绝不只抽查最后一个 attempt）（reviewer-locked）
+# ================================================================
+
+class _P13HostileObj:
+    """全部协议方法计数并抛携密异常的敌意对象。"""
+
+    def __init__(self):
+        self.calls = {"eq": 0, "ne": 0, "str": 0, "repr": 0, "bool": 0,
+                      "hash": 0}
+
+    def __eq__(self, other):
+        self.calls["eq"] += 1
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    def __ne__(self, other):
+        self.calls["ne"] += 1
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    def __hash__(self):
+        self.calls["hash"] += 1
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    def __str__(self):
+        self.calls["str"] += 1
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    def __repr__(self):
+        self.calls["repr"] += 1
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+    def __bool__(self):
+        self.calls["bool"] += 1
+        raise RuntimeError(f"leak:{_P8_SECRET}")
+
+
+def _p13_bypass_outcome(c, **fields):
+    """object.__new__(RepairOutcome) 旁路构造（绕过 __post_init__）。"""
+    from furina.agent.verification.repair import RepairOutcome
+    o = object.__new__(RepairOutcome)
+    defaults = dict(stop_reason=RepairStopReason.VERIFIED,
+                    contract_id=c.contract_id, contract_hash=c.content_hash,
+                    attempts=(), final_report=None,
+                    started_at_epoch=0.0, finished_at_epoch=10.0, diagnostic="")
+    defaults.update(fields)
+    for key, value in defaults.items():
+        object.__setattr__(o, key, value)
+    return o
+
+
+def _p13_bypass_attempt(**fields):
+    """object.__new__(AttemptRecord) 旁路构造（绕过 __post_init__）。"""
+    from furina.agent.verification.repair import AttemptRecord
+    a = object.__new__(AttemptRecord)
+    defaults = dict(attempt_id="att_p13_0001", run_id="run_p13_0001",
+                    contract_hash="0" * 64, verdict="VERIFIED", report_id="",
+                    failure_signature="", started_at_epoch=0.0,
+                    finished_at_epoch=1.0, diagnostic="")
+    defaults.update(fields)
+    for key, value in defaults.items():
+        object.__setattr__(a, key, value)
+    return a
+
+
+def test_p13_hostile_earlier_attempt_authentic_false(env):
+    """P13 锁定（reviewer 反例 1）：attempts=(敌意对象, 合法 VERIFIED
+    last) → outcome_is_authentic=false，敌意对象协议方法零调用。"""
+    from furina.agent.verification.repair import AttemptRecord
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p13_a_0001")
+    v = IndependentVerifier(c)
+    rep = v.verify(_ok_summary_submission(c, "run_p13_a_0001"))
+    last = AttemptRecord(attempt_id="att_p13_a_0002", run_id=rep.run_id,
+                         contract_hash=rep.contract_hash, verdict="VERIFIED",
+                         report_id=rep.report_id, failure_signature="",
+                         started_at_epoch=1.0, finished_at_epoch=2.0)
+    hostile = _P13HostileObj()
+    bypass = _p13_bypass_outcome(c, attempts=(hostile, last), final_report=rep)
+    assert v.outcome_is_authentic(bypass) is False
+    assert all(n == 0 for n in hostile.calls.values()), hostile.calls
+
+
+def test_p13_bad_contract_hash_earlier_attempt_false(env):
+    """P13 锁定（reviewer 反例 2）：前置 attempt contract_hash 错误 →
+    outcome_is_authentic=false。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p13_b_0001")
+    v = IndependentVerifier(c)
+    rep = v.verify(_ok_summary_submission(c, "run_p13_b_0001"))
+    bad = _p13_bypass_attempt(attempt_id="att_p13_b_0001",
+                              run_id="run_p13_b_early_0001",
+                              contract_hash="not-a-hash")
+    last = _p13_bypass_attempt(attempt_id="att_p13_b_0002", run_id=rep.run_id,
+                               contract_hash=rep.contract_hash,
+                               verdict="VERIFIED", report_id=rep.report_id,
+                               started_at_epoch=1.0, finished_at_epoch=2.0)
+    bypass = _p13_bypass_outcome(c, attempts=(bad, last), final_report=rep)
+    assert v.outcome_is_authentic(bypass) is False
+
+
+def test_p13_out_of_window_and_out_of_order_earlier_attempts_false(env):
+    """P13 锁定（reviewer 反例 3）：前置 attempt 时间越界 / 乱序 →
+    outcome_is_authentic=false。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p13_c_0001")
+    v = IndependentVerifier(c)
+    rep = v.verify(_ok_summary_submission(c, "run_p13_c_0001"))
+    last = _p13_bypass_attempt(attempt_id="att_p13_c_0002", run_id=rep.run_id,
+                               contract_hash=rep.contract_hash,
+                               verdict="VERIFIED", report_id=rep.report_id,
+                               started_at_epoch=1.0, finished_at_epoch=2.0)
+    out_of_window = _p13_bypass_attempt(
+        attempt_id="att_p13_c_0001", run_id="run_p13_c_early_0001",
+        started_at_epoch=100.0, finished_at_epoch=200.0)
+    bypass = _p13_bypass_outcome(c, attempts=(out_of_window, last),
+                                 final_report=rep)
+    assert v.outcome_is_authentic(bypass) is False
+    out_of_order = _p13_bypass_attempt(
+        attempt_id="att_p13_c_0003", run_id="run_p13_c_early_0002",
+        started_at_epoch=5.0, finished_at_epoch=6.0)
+    bypass2 = _p13_bypass_outcome(c, attempts=(out_of_order, last),
+                                  final_report=rep)
+    assert v.outcome_is_authentic(bypass2) is False
+
+
+def test_p13_duplicate_earlier_attempt_identity_false(env):
+    """P13 锁定（reviewer 反例 4）：前置 attempt 与最后 attempt 重复
+    attempt_id / run_id → outcome_is_authentic=false。"""
+    tmp, work, work_real, outside, outside_real = env
+    c = _verified_summary_contract(work_real, "wc_16f_p13_d_0001")
+    v = IndependentVerifier(c)
+    rep = v.verify(_ok_summary_submission(c, "run_p13_d_0001"))
+    last = _p13_bypass_attempt(attempt_id="att_p13_d_0001", run_id=rep.run_id,
+                               contract_hash=rep.contract_hash,
+                               verdict="VERIFIED", report_id=rep.report_id,
+                               started_at_epoch=1.0, finished_at_epoch=2.0)
+    dup_id = _p13_bypass_attempt(attempt_id="att_p13_d_0001",
+                                 run_id="run_p13_d_early_0001",
+                                 started_at_epoch=0.0, finished_at_epoch=0.5)
+    dup_run = _p13_bypass_attempt(attempt_id="att_p13_d_0002",
+                                  run_id=rep.run_id,
+                                  started_at_epoch=0.0, finished_at_epoch=0.5)
+    bypass = _p13_bypass_outcome(c, attempts=(dup_id, last), final_report=rep)
+    assert v.outcome_is_authentic(bypass) is False
+    bypass2 = _p13_bypass_outcome(c, attempts=(dup_run, last), final_report=rep)
+    assert v.outcome_is_authentic(bypass2) is False
+
+
+def test_p13_hostile_bypass_attempt_fields_zero_calls(env):
+    """P13 锁定（reviewer 反例 5）：object.__new__(AttemptRecord) 旁路携带
+    敌意字段 → 复核 false 且敌意协议调用次数为 0（exact type 先于任何
+    比较/词法校验）。"""
+    tmp, work, work_real, outside, outside_real = env
+    from furina.agent.verification.repair import AttemptRecord
+    c = _verified_summary_contract(work_real, "wc_16f_p13_e_0001")
+    v = IndependentVerifier(c)
+    rep = v.verify(_ok_summary_submission(c, "run_p13_e_0001"))
+    last = AttemptRecord(attempt_id="att_p13_e_0002", run_id=rep.run_id,
+                         contract_hash=rep.contract_hash, verdict="VERIFIED",
+                         report_id=rep.report_id, failure_signature="",
+                         started_at_epoch=1.0, finished_at_epoch=2.0)
+    hostile = _P13HostileObj()
+    bad = _p13_bypass_attempt(attempt_id=hostile)
+    bypass = _p13_bypass_outcome(c, attempts=(bad, last), final_report=rep)
+    assert v.outcome_is_authentic(bypass) is False
+    assert all(n == 0 for n in hostile.calls.values()), hostile.calls
+
+
+def test_p13_real_multi_attempt_outcome_authentic_true(env):
+    """P13 锁定（正例）：完整真实多 attempt outcome（FAILED→VERIFIED）→
+    outcome_is_authentic=true——合法 BoundedRepairLoop 输出零改变。"""
+    tmp, work, work_real, outside, outside_real = env
+    art = work_real / "summary.md"
+    art.write_bytes(b"stale")
+    c = _contract(work_real, contract_id="wc_16f_p13_f_0001",
+                  budget=ExecutionBudget(max_duration_seconds=600.0,
+                                         cost_limit=CostBudget(amount=5.0),
+                                         max_attempts=5))
+    v = IndependentVerifier(c)
+    good = b"fresh content p13"
+    stale_sha = _sha(b"stale")
+    good_sha = _sha(good)
+    state = {"attempt": 0}
+
+    def collector(attempt_id, run_id):
+        state["attempt"] += 1
+        if state["attempt"] == 1:
+            art.write_bytes(b"tampered-p13")
+            return _submission(c, run_id,
+                               declared=[_declared(art, sha_hex=stale_sha)])
+        art.write_bytes(good)
+        return _submission(c, run_id,
+                           declared=[_declared(art, sha_hex=good_sha)])
+
+    out = BoundedRepairLoop(
+        contract=c, verifier=v, collect_evidence=collector,
+        now_fn=FakeClock(500.0),
+        boundary_snapshot=_BoundarySource(c, cost=0.0).snapshot).run()
+    assert out.stop_reason is RepairStopReason.VERIFIED
+    assert len(out.attempts) == 2
+    assert v.outcome_is_authentic(out) is True

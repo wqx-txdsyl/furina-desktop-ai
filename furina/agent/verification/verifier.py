@@ -346,89 +346,49 @@ class IndependentVerifier:
             return False
 
     def outcome_is_authentic(self, outcome: Any) -> bool:
-        """P11-B1 + P12-B1/B2：公开、fail-closed 的 RepairOutcome 真实性复核
-        --**16G 晋升的唯一权威类入口**（stop_reason / final_report.verdict
-        都不是验证权威，不得只看其值晋升；16G 消费契约：必须调用
+        """P11-B1 + P12-B1/B2 + P13：公开、fail-closed 的 RepairOutcome 真实
+        性复核——**16G 晋升的唯一权威类入口**（stop_reason /
+        final_report.verdict 都不是验证权威，不得只看其值晋升；必须调用
         IndependentVerifier 类拥有的本入口，不得通过可被实例 shadow 的动态
         属性决定晋升）。
 
-        - 只接受 **exact** RepairOutcome；字段先做 **exact builtin 类型**
-          证明，再做比较/属性访问（``object.__new__`` 旁路实例携带敌意
-          stop_reason.value property 等字段时，敌意协议方法零调用）；
-        - stop_reason 必须 exact RepairStopReason 且 identity 为 VERIFIED
-          （禁止 getattr(..., "value") 动态分派）；
-        - attempts 先做 O(1) **契约级数量硬上限**（<= 当前契约
-          budget.max_attempts），再访问最后 attempt；
-        - seal 复核经**类级绑定**的真实实现（与 Patch 10 repair loop 同一
-          安全策略——实例 shadowing / 子类 override 无法替换权威行为）。
+        P13：先经类拥有的**单一可信结构验证 helper**
+        （:func:`repair._check_outcome_structure`，与本模型构造期共享同一
+        实现——规则零漂移）复核**完整** outcome——全部字段 exact type、
+        stop_reason identity、contract 词法/hash、时间窗、全部 attempt（数量
+        上限、exact AttemptRecord、词表/hash/签名/时序、唯一性、排序）与
+        final_report 完整绑定——绝不只抽查最后一个 attempt；契约级上限
+        （budget.max_attempts）更严于全局。随后绑定当前 verifier 的契约
+        身份/standard_hash，最后经**类级绑定**的 seal_is_authentic 验证真实
+        seal（实例 shadowing / 子类 override 无法替换权威行为）。
 
-        任意异常（含 object.__new__ 旁路畸形对象）→ False：零泄漏、绝不抛出。
+        任意异常（含 object.__new__ 旁路畸形对象、敌意字段）→ False：零
+        泄漏、绝不抛出。
         """
         try:
-            from .repair import (       # 延迟导入（repair → verifier）
-                AttemptRecord,
-                RepairOutcome,
-                RepairStopReason,
-            )
+            from .repair import RepairOutcome, _check_outcome_structure
             if type(outcome) is not RepairOutcome:
                 return False
-            # P12-B1：字段 exact type 先于任何比较/属性访问。
-            if type(outcome.stop_reason) is not RepairStopReason:
-                return False
-            if outcome.stop_reason is not RepairStopReason.VERIFIED:
-                return False
-            if type(outcome.contract_id) is not str:
-                return False
-            if type(outcome.contract_hash) is not str:
-                return False
-            if type(outcome.attempts) is not tuple:
-                return False
-            # P12-B2：契约级 attempt 数量硬上限（O(1)，先于账本遍历/最后
-            # attempt 访问）。
-            if len(outcome.attempts) > self._contract.budget.max_attempts:
-                return False
-            rep = outcome.final_report
-            if type(rep) is not VerificationReport:
-                return False
-            if type(rep.contract_id) is not str:
-                return False
-            if type(rep.contract_hash) is not str:
-                return False
-            if type(rep.standard_hash) is not str:
-                return False
+            # P13：完整结构复核（类拥有的单一可信实现；契约级上限更严于
+            # 全局硬上限；全部 attempt 重新验证——绝不只抽查最后一个）。
+            _check_outcome_structure(
+                outcome,
+                max_attempts=self._contract.budget.max_attempts)
+            # 当前 verifier 绑定复核（结构 helper 不绑定具体 verifier）。
             if outcome.contract_id != self._contract.contract_id:
                 return False
             if outcome.contract_hash != self._contract.content_hash:
                 return False
-            if rep.contract_id != self._contract.contract_id:
-                return False
-            if rep.contract_hash != self._contract.content_hash:
-                return False
-            if rep.standard_hash != self.standard_hash:
-                return False
-            if len(outcome.attempts) == 0:
-                return False
-            last = outcome.attempts[-1]
-            if type(last) is not AttemptRecord:
-                return False
-            if type(last.verdict) is not str:
-                return False
-            if type(last.run_id) is not str:
-                return False
-            if type(last.report_id) is not str:
-                return False
-            if last.verdict != "VERIFIED" or last.run_id != rep.run_id:
-                return False
-            if last.report_id != rep.report_id:
+            rep = outcome.final_report
+            if rep is None or rep.standard_hash != self.standard_hash:
                 return False
             # P12-B1：seal 复核经类级绑定的真实实现（实例 shadowing /
-            # 子类 override 无法替换权威行为——reviewer 实测
-            # ``verifier.seal_is_authentic = lambda _: True`` 曾绕过本 API，
-            # 通道关闭）。
+            # 子类 override 无法替换权威行为）。
             seal_check = IndependentVerifier.seal_is_authentic.__get__(self)
             return seal_check(rep)
         except Exception:
             return False
+
 
 
     # -- 输入 exact-schema 解析（fail-closed + defensive-copy 冻结） --------------
