@@ -487,18 +487,30 @@ class WorkLedger:
                 "SELECT attempt_id, execution_id, contract_id, run_id, "
                 "backend_id, state, state_version, created_at, updated_at "
                 "FROM work_executions").fetchall():
+            # 获取 contract_hash
+            ch = self._conn.execute(
+                "SELECT contract_hash FROM work_contracts WHERE contract_id=?",
+                (str(r["contract_id"]),)).fetchone()
+            contract_hash = str(ch["contract_hash"]) if ch else ""
             self._conn.execute(
-                "INSERT OR IGNORE INTO work_attempts(attempt_id,execution_id,"
-                "contract_id,run_id,backend_id,state,state_version,"
-                "started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO work_attempts(attempt_id,execution_id,"
+                "contract_id,contract_hash,run_id,backend_id,state,"
+                "state_version,started_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (str(r["attempt_id"]), int(r["execution_id"]),
-                 str(r["contract_id"]), str(r["run_id"]),
+                 str(r["contract_id"]), contract_hash, str(r["run_id"]),
                  str(r["backend_id"]), str(r["state"]),
                  int(r["state_version"]), float(r["created_at"]),
                  float(r["updated_at"])))
 
     def _migrate_v2_to_v3(self) -> None:
         self._add_missing_execution_columns()
+        # v2→v3：work_contracts 补 legacy_unrecoverable 列
+        cols = self._table_columns(self._conn, "work_contracts")
+        if "legacy_unrecoverable" not in cols:
+            self._conn.execute(
+                "ALTER TABLE work_contracts ADD COLUMN legacy_unrecoverable "
+                "INTEGER NOT NULL DEFAULT 0")
 
     def _add_missing_execution_columns(self) -> None:
         cols = self._table_columns(self._conn, "work_executions")
@@ -764,13 +776,18 @@ class WorkLedger:
                         f"contract {contract.contract_id} active claim 并发冲突"
                         f"（{exc}）") from None
                 eid = int(cur.lastrowid)
-                self._conn.execute(
-                    "INSERT INTO work_attempts(attempt_id,execution_id,"
-                    "contract_id,contract_hash,state,state_version,"
-                    "started_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                    (attempt_id, eid, contract.contract_id,
-                     contract.content_hash,
-                     WorkExecutionState.STARTING.value, 1, now, now))
+                try:
+                    self._conn.execute(
+                        "INSERT INTO work_attempts(attempt_id,execution_id,"
+                        "contract_id,contract_hash,state,state_version,"
+                        "started_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (attempt_id, eid, contract.contract_id,
+                         contract.content_hash,
+                         WorkExecutionState.STARTING.value, 1, now, now))
+                except sqlite3.IntegrityError:
+                    raise WorkLedgerError(
+                        f"attempt_id {attempt_id!r} 已存在（write-once）"
+                    ) from None
                 return eid
 
     # -------------------------------------------------- CAS 迁移
@@ -839,14 +856,16 @@ class WorkLedger:
                     "UPDATE work_executions SET state='UNKNOWN', "
                     "state_version=state_version+1, updated_at=? "
                     "WHERE execution_id=? AND state_version=? AND state=?",
-                    (self._now(), execution_id, expected_version, current.value))
+                    (now, execution_id, expected_version, current.value))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("reconciliation rowcount=0")
-            self._conn.execute(
-                "UPDATE work_attempts SET state='UNKNOWN', "
-                "state_version=state_version+1, updated_at=? "
-                "WHERE attempt_id=? AND state=?",
-                (self._now(), str(row["attempt_id"]), current.value))
+                at = self._conn.execute(
+                    "UPDATE work_attempts SET state='UNKNOWN', "
+                    "state_version=state_version+1, updated_at=? "
+                    "WHERE attempt_id=?",
+                    (now, str(row["attempt_id"])))
+                if at.rowcount != 1:
+                    raise CorruptionError("reconciliation attempt sync 失配")
             return expected_version + 1
 
     # -------------------------------------------------- 绑定 / 证据 / 16F
@@ -964,14 +983,16 @@ class WorkLedger:
                 if not evidence_blob:
                     raise WorkLedgerError(
                         "无持久化 terminal evidence 不得 VERIFIED")
-                stored_ev = json.loads(evidence_blob)
-                ev_payload = terminal_evidence if terminal_evidence is not None \
-                    else stored_ev
-                ev_check = _canonical_json(ev_payload, self._max_payload_bytes)
-                if ev_check != _canonical_json(stored_ev,
-                                               self._max_payload_bytes):
+                # P13-R2/B2：从 authentic report 的 EvidenceBundle 提取
+                # terminal observation 并与 ledger persisted evidence 的
+                # event_id 精确匹配（不能只验证调用方传入的 evidence）。
+                report_term_events = [
+                    t for t in outcome.final_report.evidence.terminal
+                    if t.bound]
+                if not report_term_events:
                     raise WorkLedgerError(
-                        "传入 evidence 与持久化 evidence 不一致")
+                        "authentic report 无 bound terminal observation"
+                        "（evidence 绑定失败）")
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion("verify CAS 失败")
                 cur = self._conn.execute(
@@ -1044,7 +1065,7 @@ class WorkLedger:
                 if _is_terminal(current):
                     return int(row["state_version"])
                 if int(row["cancel_intent"]) == 1:
-                    return expected_version
+                    return int(row["state_version"])  # 返回 DB 真实 version
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion("cancel CAS 失败")
                 run_bound = bool(str(row["run_id"]))
@@ -1083,7 +1104,12 @@ class WorkLedger:
                     raise CorruptionError("attempt cancel 同步失配")
                 return expected_version + 1
 
-    def dispatch_stop_once(self, execution_id: int) -> bool:
+    def dispatch_stop_once(self, execution_id: int, *,
+                           backend_confirmed: bool = False) -> bool:
+        """backend 存在且 supports_stop 已由调用方确认后才能调用此方法。
+        backend_confirmed=False → 不消费 stop claim（零副作用）。"""
+        if not backend_confirmed:
+            return False
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)

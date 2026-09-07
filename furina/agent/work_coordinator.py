@@ -279,7 +279,14 @@ class CancellationCoordinator:
             approval_cancelled = True
         self._ledger.invalidate_approval(execution_id)
         # ③ backend stop 恰一次（run 未绑定 → 零 stop；不确定 → reconcile）。
-        stop_dispatched = self._ledger.dispatch_stop_once(execution_id)
+        # 先确认 backend 存在且 supports_stop，再消费 stop claim
+        backend_confirmed = False
+        if self._registry is not None and rec.backend_id:
+            b = self._registry.get(rec.backend_id)
+            if b is not None and b.capabilities.supports_stop:
+                backend_confirmed = True
+        stop_dispatched = self._ledger.dispatch_stop_once(
+            execution_id, backend_confirmed=backend_confirmed)
         reconciled = False
         if stop_dispatched and self._registry is not None and rec.backend_id:
             backend = self._registry.get(rec.backend_id)

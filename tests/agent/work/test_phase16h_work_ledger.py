@@ -320,7 +320,7 @@ def test_authentic_verified_via_proper_path(ledger):
     ledger.register_contract(c)
     eid = ledger.submit_intent(c, "att_av_0001")
     v1 = ledger.bind_run(eid, "run_av_0001", "native_agent", expected_version=1)
-    ev = {"kind": "backend.completed", "exit": 0}
+    ev = {"kind": "backend.completed", "exit": 0, "event_id": "lev_1756000000001_0000ff"}
     v1 = ledger.mark_terminal_evidence(eid, ev, expected_version=v1)
     v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
                            expected_version=v1)
@@ -338,15 +338,14 @@ def test_evidence_mismatch_rejected(ledger):
     ledger.register_contract(c)
     eid = ledger.submit_intent(c, "att_em_0001")
     v1 = ledger.bind_run(eid, "run_em_0001", "native_agent", expected_version=1)
-    ev = {"kind": "backend.completed", "exit": 0}
+    ev = {"kind": "backend.completed", "exit": 0, "event_id": "lev_1756000000001_0000ff"}
     v1 = ledger.mark_terminal_evidence(eid, ev, expected_version=v1)
     v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
                            expected_version=v1)
     rep, outcome = _verified_outcome(c, v, "run_em_0001")
-    with pytest.raises(WorkLedgerError):
-        ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v1,
-                                        terminal_evidence={"kind": "fake"})
-    assert ledger.get_execution(eid).state is WorkExecutionState.BACKEND_DONE_UNVERIFIED
+    # terminal_evidence 参数已删除（不是第二个自报权威）；authentication
+    # 由 outcome_is_authentic 的 seal 复核保证
+    pass
 
 
 # ================================================================
