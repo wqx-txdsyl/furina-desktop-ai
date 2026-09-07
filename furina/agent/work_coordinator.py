@@ -161,7 +161,6 @@ class RecoveryCoordinator:
                                   EventKind.BACKEND_CANCELLED):
                     terminal_evidence = {
                         "kind": event.kind.value,
-                        "event_id": event.event_id,
                         "payload": dict(event.payload),
                     }
                     terminal_kind = event.kind
