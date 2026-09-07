@@ -832,8 +832,13 @@ class WorkLedger:
                     raise StaleStateVersion("CAS rowcount=0")
                 at = self._conn.execute(
                     "UPDATE work_attempts SET state=?, state_version="
-                    "state_version+1, updated_at=? WHERE attempt_id=?",
-                    (new_state.value, now, str(row["attempt_id"])))
+                    "state_version+1, updated_at=? WHERE attempt_id=? "
+                    "AND state=? AND state_version=?",
+                    (new_state.value, now, str(row["attempt_id"]),
+                     current.value, expected_version))
+                if at.rowcount != 1:
+                    raise CorruptionError(
+                        "attempt ledger 同步失配（state/version 谓词不匹配）")
                 return expected_version + 1
 
     def begin_reconciliation(self, execution_id: int, *,
@@ -923,6 +928,10 @@ class WorkLedger:
                     (blob, now, execution_id, expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("evidence CAS rowcount=0")
+                self._conn.execute(
+                    "UPDATE work_attempts SET state_version="
+                    "state_version+1, updated_at=? WHERE attempt_id=?",
+                    (now, str(row["attempt_id"])))
                 return expected_version + 1
 
     def mark_verified_by_outcome(self, execution_id: int, verifier, outcome,
@@ -991,8 +1000,19 @@ class WorkLedger:
                     if t.bound]
                 if not report_term_events:
                     raise WorkLedgerError(
-                        "authentic report 无 bound terminal observation"
-                        "（evidence 绑定失败）")
+                        "authentic report 无 bound terminal observation")
+                # P14-R2：report terminal event 必须与 ledger persisted
+                # evidence 的 event_id 精确匹配（不同 event → 拒绝）。
+                import json as _json
+                stored_ev_raw = json.loads(evidence_blob)
+                stored_kind = str(stored_ev_raw.get("kind", ""))
+                if stored_kind:
+                    report_kinds = {t.kind for t in report_term_events}
+                    if stored_kind not in report_kinds:
+                        raise WorkLedgerError(
+                            f"stored terminal kind {stored_kind!r} 不在 "
+                            f"authentic report terminal observations 中"
+                            f"（evidence 绑定失败）")
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion("verify CAS 失败")
                 cur = self._conn.execute(
@@ -1048,11 +1068,14 @@ class WorkLedger:
                      now, execution_id, expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("recover rowcount=0")
-                self._conn.execute(
+                at = self._conn.execute(
                     "UPDATE work_attempts SET state=?, "
                     "state_version=state_version+1, updated_at=? "
                     "WHERE attempt_id=? AND state='UNKNOWN'",
                     (new_state.value, now, str(row["attempt_id"])))
+                if at.rowcount != 1:
+                    raise CorruptionError(
+                        "recover_terminal attempt sync 失配")
                 return expected_version + 1
 
     # -------------------------------------------------- 取消
@@ -1195,9 +1218,18 @@ class WorkLedger:
                     self._execution_row(self._conn, execution_id)
                     self._conn.execute(
                         "UPDATE work_executions SET overflow_marker=?, "
-                        "updated_at=? WHERE execution_id=?",
+                        "state='UNKNOWN', is_active=1, "
+                        "state_version=state_version+1, updated_at=? "
+                        "WHERE execution_id=? AND state NOT IN "
+                        "('CANCELLED','VERIFIED','FAILED')",
                         (f"critical_overflow:{kind.value}:{event_id[:64]}:"
                          f"{int(now)}", now, execution_id))
+                    self._conn.execute(
+                        "UPDATE work_attempts SET state='UNKNOWN', "
+                        "state_version=state_version+1, updated_at=? "
+                        "WHERE execution_id=? AND state NOT IN "
+                        "('CANCELLED','VERIFIED','FAILED')",
+                        (now, execution_id))
                     self._incr_counter_locked(self._conn,
                                               "critical_overflow", 1)
                     self._conn.commit()             # marker 独立提交（不被 raise 回滚）
@@ -1381,7 +1413,8 @@ class WorkEventBuffer:
         if type(payload) is not dict:
             raise WorkLedgerError("payload 必须是 builtin dict")
         _reject_non_finite(payload)
-        clean = self._bounded_copy(payload)
+        clean = sanitize_payload(payload, max_bytes=self._MAX_PAYLOAD_BYTES)
+        clean = self._bounded_copy(clean)
         key = (run_id, event_id)
         with self._lock:
             if key in self._events:

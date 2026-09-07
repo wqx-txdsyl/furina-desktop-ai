@@ -292,8 +292,9 @@ class CancellationCoordinator:
             backend = self._registry.get(rec.backend_id)
             if backend is not None and backend.capabilities.supports_stop:
                 try:
-                    backend.stop(BackendRunHandle(backend_id=rec.backend_id,
-                                                  run_id=rec.run_id))
+                    backend.stop(BackendRunHandle(
+                        backend_id=rec.backend_id, run_id=rec.run_id,
+                        correlation=rec.contract_id))
                 except Exception:
                     # stop 网络结果不确定 → UNKNOWN/reconcile；stop_dispatched
                     # 已置位 → 绝不重发；绝不重新 submit。

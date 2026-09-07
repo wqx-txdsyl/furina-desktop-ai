@@ -343,9 +343,14 @@ def test_evidence_mismatch_rejected(ledger):
     v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
                            expected_version=v1)
     rep, outcome = _verified_outcome(c, v, "run_em_0001")
-    # terminal_evidence 参数已删除（不是第二个自报权威）；authentication
-    # 由 outcome_is_authentic 的 seal 复核保证
-    pass
+    # kind 不匹配 → 拒绝（report terminal kind ≠ stored evidence kind）
+    ev_wrong_kind = {"kind": "backend.failed", "exit": 1,
+                     "event_id": "lev_1756000000001_0000ff"}
+    v1X = ledger.mark_terminal_evidence(eid, ev_wrong_kind,
+                                        expected_version=v1)
+    with pytest.raises(WorkLedgerError):
+        ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v1X,
+                                        terminal_evidence=ev_wrong_kind)
 
 
 # ================================================================
