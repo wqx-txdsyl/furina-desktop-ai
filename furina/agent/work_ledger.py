@@ -928,10 +928,13 @@ class WorkLedger:
                     (blob, now, execution_id, expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("evidence CAS rowcount=0")
-                self._conn.execute(
+                at = self._conn.execute(
                     "UPDATE work_attempts SET state_version="
-                    "state_version+1, updated_at=? WHERE attempt_id=?",
-                    (now, str(row["attempt_id"])))
+                    "state_version+1, updated_at=? "
+                    "WHERE attempt_id=? AND state_version=?",
+                    (now, str(row["attempt_id"]), expected_version))
+                if at.rowcount != 1:
+                    raise CorruptionError("evidence attempt CAS 失配")
                 return expected_version + 1
 
     def mark_verified_by_outcome(self, execution_id: int, verifier, outcome,
@@ -1006,13 +1009,19 @@ class WorkLedger:
                 import json as _json
                 stored_ev_raw = json.loads(evidence_blob)
                 stored_kind = str(stored_ev_raw.get("kind", ""))
+                stored_event_id = str(stored_ev_raw.get("event_id", ""))
                 if stored_kind:
                     report_kinds = {t.kind for t in report_term_events}
                     if stored_kind not in report_kinds:
                         raise WorkLedgerError(
                             f"stored terminal kind {stored_kind!r} 不在 "
-                            f"authentic report terminal observations 中"
-                            f"（evidence 绑定失败）")
+                            f"authentic report terminal observations 中")
+                if stored_event_id:
+                    report_event_ids = {t.event_id for t in report_term_events}
+                    if stored_event_id not in report_event_ids:
+                        raise WorkLedgerError(
+                            f"stored event {stored_event_id!r} 不在 report "
+                            f"terminal observations（evidence 绑定失败）")
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion("verify CAS 失败")
                 cur = self._conn.execute(
@@ -1128,23 +1137,32 @@ class WorkLedger:
                 return expected_version + 1
 
     def dispatch_stop_once(self, execution_id: int, *,
-                           backend_confirmed: bool = False) -> bool:
-        """backend 存在且 supports_stop 已由调用方确认后才能调用此方法。
-        backend_confirmed=False → 不消费 stop claim（零副作用）。"""
+                           backend_confirmed: bool = False,
+                           expected_version: int = 0) -> bool:
+        """backend stop claim：需要调用方传入 backend_confirmed=True（证明已
+        确认 backend 存在且 supports_stop）+ run 已绑定 + CAS 版本匹配 +
+        rowcount==1。backend 不存在/未确认/run 未绑定/已派发 → False 零副作用。
+        """
         if not backend_confirmed:
             return False
+        now = self._now()
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
                 if not str(row["run_id"]):
-                    return False
+                    return False        # 零 backend run → 零 stop
                 if int(row["stop_dispatched"]) == 1:
-                    return False
-                self._conn.execute(
-                    "UPDATE work_executions SET stop_dispatched=1 "
-                    "WHERE execution_id=?", (execution_id,))
+                    return False        # 幂等：已派发
+                if int(row["state_version"]) != expected_version:
+                    return False        # CAS 失败
+                cur = self._conn.execute(
+                    "UPDATE work_executions SET stop_dispatched=1, "
+                    "state_version=state_version+1, updated_at=? "
+                    "WHERE execution_id=? AND state_version=? AND run_id=?",
+                    (now, execution_id, expected_version, str(row["run_id"])))
+                if cur.rowcount != 1:
+                    return False        # CAS rowcount=0
                 return True
-
     def record_outstanding_approval(self, execution_id: int,
                                     approval_id: str, *,
                                     expected_version: int) -> int:

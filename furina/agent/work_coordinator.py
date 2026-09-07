@@ -285,8 +285,10 @@ class CancellationCoordinator:
             b = self._registry.get(rec.backend_id)
             if b is not None and b.capabilities.supports_stop:
                 backend_confirmed = True
+        rec_after_cancel = self._ledger.get_execution(execution_id)
         stop_dispatched = self._ledger.dispatch_stop_once(
-            execution_id, backend_confirmed=backend_confirmed)
+            execution_id, backend_confirmed=backend_confirmed,
+            expected_version=rec_after_cancel.state_version)
         reconciled = False
         if stop_dispatched and self._registry is not None and rec.backend_id:
             backend = self._registry.get(rec.backend_id)
