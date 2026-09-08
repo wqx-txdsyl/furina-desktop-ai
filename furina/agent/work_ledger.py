@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from furina.agent.backend.protocol import ExecutionBackend
 from furina.agent.events.models import (
     EventKind,
     classify_priority,
@@ -287,7 +288,7 @@ def _canonical_json(payload: Any, max_bytes: int) -> str:
             raise WorkLedgerError("payload 键必须全为 builtin str")
     _reject_non_finite(payload)
     try:
-        raw_len = len(json.dumps(payload, ensure_ascii=True,
+        raw_len = len(json.dumps(payload, ensure_ascii=False,
                                  allow_nan=False).encode("utf-8"))
     except (TypeError, ValueError) as exc:
         raise WorkLedgerError(
@@ -308,6 +309,11 @@ def _canonical_json(payload: Any, max_bytes: int) -> str:
 
 def _is_terminal(state: WorkExecutionState) -> bool:
     return state in _TERMINAL_STATES
+
+
+# Patch 6：terminal evidence exact 六键 schema（写入与验证双重执行）
+_TERMINAL_EVIDENCE_KEYS = frozenset({
+    "event_id", "kind", "run_id", "backend_id", "contract_id", "payload"})
 
 
 def _finite_time(value: Any, field_name: str) -> float:
@@ -816,6 +822,35 @@ class WorkLedger:
                 return eid
 
     # -------------------------------------------------- attempt 统一 CAS
+    @staticmethod
+    def _validate_terminal_evidence(evidence: Any,
+                                    row: sqlite3.Row) -> None:
+        """terminal evidence exact 六键 schema + ledger 冻结身份校验
+        （mark_terminal_evidence / recover_terminal 写入时与
+        mark_verified_by_outcome 验证时三重执行）。"""
+        if type(evidence) is not dict \
+                or set(evidence.keys()) != _TERMINAL_EVIDENCE_KEYS:
+            raise WorkLedgerError(
+                "terminal evidence 必须是 exact 六键 schema"
+                "（event_id/kind/run_id/backend_id/contract_id/payload）")
+        for f in ("event_id", "kind", "run_id", "backend_id", "contract_id"):
+            v = evidence[f]
+            if type(v) is not str or not v or len(v) > 256:
+                raise WorkLedgerError(
+                    f"terminal evidence {f} 必须是非空短 builtin str")
+        if type(evidence["payload"]) is not dict:
+            raise WorkLedgerError("terminal evidence payload 必须是 dict")
+        bound_run = str(row["run_id"])
+        if not bound_run or evidence["run_id"] != bound_run:
+            raise WorkLedgerError(
+                "terminal evidence run_id 与 ledger 冻结绑定不一致")
+        if evidence["backend_id"] != str(row["backend_id"]):
+            raise WorkLedgerError(
+                "terminal evidence backend_id 与 ledger 冻结绑定不一致")
+        if evidence["contract_id"] != str(row["contract_id"]):
+            raise WorkLedgerError(
+                "terminal evidence contract_id 与 ledger 冻结绑定不一致")
+
     def _attempt_cas_locked(self, conn: sqlite3.Connection,
                             row: sqlite3.Row, *, new_state: str,
                             old_state: str, old_version: int, now: float,
@@ -958,6 +993,7 @@ class WorkLedger:
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
+                self._validate_terminal_evidence(evidence, row)
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion("evidence CAS 失败")
                 cur = self._conn.execute(
@@ -1031,6 +1067,20 @@ class WorkLedger:
                 if not evidence_blob:
                     raise WorkLedgerError(
                         "无持久化 terminal evidence 不得 VERIFIED")
+                # Patch 6：传入 terminal_evidence 必须与持久化 evidence
+                # canonical 相等（六键 schema + 冻结身份三重校验）——
+                # 绝不允许调用时传完全不同的 evidence 仍进入 VERIFIED。
+                if terminal_evidence is None:
+                    raise WorkLedgerError(
+                        "mark_verified_by_outcome 必须传入与持久化一致的 "
+                        "terminal_evidence")
+                self._validate_terminal_evidence(terminal_evidence, row)
+                passed_blob = _canonical_json(terminal_evidence,
+                                              self._max_payload_bytes)
+                if passed_blob != evidence_blob:
+                    raise WorkLedgerError(
+                        "传入 terminal_evidence 与持久化 evidence 不一致"
+                        "（canonical 不等，evidence 绑定失败）")
                 # P13-R2/B2：从 authentic report 的 EvidenceBundle 提取
                 # terminal observation 并与 ledger persisted evidence 的
                 # event_id 精确匹配（不能只验证调用方传入的 evidence）。
@@ -1044,6 +1094,21 @@ class WorkLedger:
                 # evidence 的 event_id 精确匹配（不同 event → 拒绝）。
                 import json as _json
                 stored_ev_raw = json.loads(evidence_blob)
+                if not isinstance(stored_ev_raw, dict):
+                    raise CorruptionError(
+                        "持久化 terminal evidence 必须是 object")
+                # Patch 6：evidence 全身份绑定——run/backend/contract 身份
+                # 必须与 ledger 冻结绑定逐值一致（全错 evidence 不得 VERIFIED）。
+                bound_backend = str(row["backend_id"])
+                for fname, expected in (
+                        ("run_id", bound_run),
+                        ("backend_id", bound_backend),
+                        ("contract_id", str(row["contract_id"]))):
+                    val = stored_ev_raw.get(fname)
+                    if type(val) is not str or val != expected:
+                        raise WorkLedgerError(
+                            f"stored terminal evidence {fname} 与 ledger "
+                            f"冻结身份不一致（evidence 绑定失败）")
                 stored_kind = str(stored_ev_raw.get("kind", ""))
                 stored_event_id = str(stored_ev_raw.get("event_id", ""))
                 if stored_kind:
@@ -1093,6 +1158,7 @@ class WorkLedger:
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
+                self._validate_terminal_evidence(terminal_evidence, row)
                 current = WorkExecutionState(str(row["state"]))
                 if current is not WorkExecutionState.UNKNOWN:
                     raise IllegalTransition(
@@ -1161,11 +1227,17 @@ class WorkLedger:
 
     def dispatch_stop_once(self, execution_id: int, *, backend,
                            expected_version: int) -> bool:
-        """backend stop claim：调用方必须传入**真实 backend 实例本身**（绝不
-        接受布尔信任参数——由 ledger 直接核验实例 capabilities.supports_stop
-        恰为 True）+ run 已绑定 + CAS 版本匹配 + rowcount==1。backend 为
-        None/不支持 stop/run 未绑定/已派发/CAS 失败 → False 零副作用。"""
-        if backend is None:
+        """backend stop claim（Patch 6 全谓词）：backend 必须是真实
+        ExecutionBackend 实例（isinstance）+ descriptor/capabilities 合法
+        （builtin str backend_id + supports_stop 恰为 True）+ descriptor ID
+        与 ledger 冻结绑定一致 + execution 处于 CANCELLING 且 cancel_intent=1
+        + run 已绑定 + CAS 版本匹配 + rowcount==1。任一不满足 → False
+        零副作用（绝不提前消耗 durable at-most-once stop claim）。"""
+        if not isinstance(backend, ExecutionBackend):
+            return False
+        desc = getattr(backend, "descriptor", None)
+        desc_id = getattr(desc, "backend_id", None)
+        if type(desc_id) is not str or not desc_id:
             return False
         caps = getattr(backend, "capabilities", None)
         if caps is None or getattr(caps, "supports_stop", None) is not True:
@@ -1174,8 +1246,15 @@ class WorkLedger:
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
-                if not str(row["run_id"]):
+                bound_run = str(row["run_id"])
+                bound_backend = str(row["backend_id"])
+                if not bound_run:
                     return False        # 零 backend run → 零 stop
+                if desc_id != bound_backend:
+                    return False        # descriptor ID 与冻结绑定不一致
+                if str(row["state"]) != WorkExecutionState.CANCELLING.value \
+                        or int(row["cancel_intent"]) != 1:
+                    return False        # 仅 CANCELLING+cancel intent 允许 stop
                 if int(row["stop_dispatched"]) == 1:
                     return False        # 幂等：已派发
                 if int(row["state_version"]) != expected_version:
@@ -1185,8 +1264,9 @@ class WorkLedger:
                     "UPDATE work_executions SET stop_dispatched=1, "
                     "state_version=state_version+1, updated_at=? "
                     "WHERE execution_id=? AND state_version=? AND run_id=? "
-                    "AND stop_dispatched=0",
-                    (now, execution_id, expected_version, str(row["run_id"])))
+                    "AND stop_dispatched=0 AND state=? AND cancel_intent=1",
+                    (now, execution_id, expected_version, bound_run,
+                     current))
                 if cur.rowcount != 1:
                     return False        # CAS rowcount=0
                 self._attempt_cas_locked(
@@ -1491,6 +1571,7 @@ class WorkEventBuffer:
         self._events: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._order: List[Tuple[str, str]] = []
         self._per_run: Dict[str, int] = {}
+        self._peeked: set = set()
         self._dropped_ticks = 0
         self._duplicates = 0
 
@@ -1511,7 +1592,7 @@ class WorkEventBuffer:
             raise WorkLedgerError("payload 必须是 builtin dict")
         _reject_non_finite(payload)
         try:
-            raw_len = len(json.dumps(payload, ensure_ascii=True,
+            raw_len = len(json.dumps(payload, ensure_ascii=False,
                                      allow_nan=False).encode("utf-8"))
         except (TypeError, ValueError) as exc:
             raise WorkLedgerError(
@@ -1598,39 +1679,37 @@ class WorkEventBuffer:
             return tuple(json.loads(json.dumps(self._events[k]))
                          for k in self._order)
 
-    def drain(self) -> Tuple[Dict[str, Any], ...]:
-        """原子 drain：返回快照并清空（调用方须先持久化再 drain）。"""
-        with self._lock:
-            out = tuple(json.loads(json.dumps(self._events[k]))
-                        for k in self._order)
-            self._events.clear()
-            self._order.clear()
-            self._per_run.clear()
-            return out
+    # Patch 6：公开破坏性 drain() 已移除——事件消费只能走
+    # peek→persist→ack（peek 不清空、ack 只移除已确认持久化 key），
+    # 绝不允许一步清空绕过持久化协议。
 
     def peek(self, max_items: int = 256) -> Tuple[Dict[str, Any], ...]:
         """peek→persist→ack 协议第一步：返回前 max_items 条快照但**不清空**
-        （持久化成功前零丢失窗口；crash 后 peek 可重复）。"""
+        （持久化成功前零丢失窗口；crash 后 peek 可重复）。peek 返回的 key
+        进入 peeked 注册表——ack 只接受已 peek 的 key。"""
         if type(max_items) is not int or max_items < 1:
             raise WorkLedgerError("max_items 必须是正 int")
         with self._lock:
-            return tuple(json.loads(json.dumps(self._events[k]))
-                         for k in self._order[:max_items])
+            out = tuple(json.loads(json.dumps(self._events[k]))
+                        for k in self._order[:max_items])
+            self._peeked.update(self._order[:max_items])
+            return out
 
     def ack(self, keys) -> int:
-        """peek→persist→ack 协议第二步：仅移除调用方已确认持久化的
-        (run_id, event_id)；未 peek 到的 key 类型化拒绝（零静默吞没）。"""
+        """peek→persist→ack 协议第二步：仅移除**已 peek 且已确认持久化**的
+        (run_id, event_id)；存在但未 peek 的 key 与未 peek 到的 key 一律
+        类型化拒绝（零静默吞没）。"""
         key_list = list(keys)
         for k in key_list:
             if (type(k) is not tuple or len(k) != 2
                     or type(k[0]) is not str or type(k[1]) is not str):
                 raise WorkLedgerError("ack key 必须是 (run_id, event_id) 二元组")
         with self._lock:
-            removed = 0
             for k in key_list:
-                if k not in self._events:
+                if k not in self._peeked:
                     raise WorkLedgerError(
-                        f"ack key {k[1]!r} 不在当前缓冲（必须先 peek）")
+                        f"ack key {k[1]!r} 未曾 peek（必须先 peek 再 ack）")
+            removed = 0
             for k in key_list:
                 if k in self._events:
                     del self._events[k]
@@ -1641,6 +1720,7 @@ class WorkEventBuffer:
                     else:
                         self._per_run[k[0]] = n
                     removed += 1
+                self._peeked.discard(k)
             return removed
 
     @property
@@ -1656,3 +1736,4 @@ class WorkEventBuffer:
             self._events.clear()
             self._order.clear()
             self._per_run.clear()
+            self._peeked.clear()

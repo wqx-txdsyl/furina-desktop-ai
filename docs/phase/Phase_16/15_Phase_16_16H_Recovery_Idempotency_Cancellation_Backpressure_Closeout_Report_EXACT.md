@@ -295,3 +295,55 @@ tests/cognition 279 passed；full suite 2001 passed / 0 failed（15 warnings
 范围仅 furina/agent/work_ledger.py + furina/agent/work_coordinator.py +
 2 测试文件 + 本 closeout 增补；16A–16E frozen contracts 与 C1–C7 零改动。
 不合并 integration、不开始 16G、不声明 16H_PASS，停在 READY_FOR_REVIEW。
+
+---
+
+## Patch 6（BASE fc280f3，READY_FOR_REVIEW）
+
+Reviewer Patch 5 复核（PHASE16_16H_PATCH5_PATCH_REQUIRED，REVIEWED_SHA
+fc280f3）确立 2 P0 + 4 P1 blocker，本补丁全量落地：
+
+1. **P0-1 terminal evidence 全身份绑定闭环**：新增
+   _validate_terminal_evidence——exact 六键 schema
+   （event_id/kind/run_id/backend_id/contract_id/payload，缺键/多键/类型错
+   拒绝）+ run/backend/contract 与 execution 冻结行逐值一致，在
+   mark_terminal_evidence 写入时、recover_terminal 写入时、
+   mark_verified_by_outcome 验证时**三重执行**；mark_verified_by_outcome
+   的 terminal_evidence 参数从"实际未使用"升级为强制传入且与持久化
+   evidence **canonical 相等**（_canonical_json blob 精确比较）——写入
+   正确 evidence 后传任何分歧 evidence（含 payload 伪造）都不得 VERIFIED。
+2. **P0-2 stop claim 全谓词**：dispatch_stop_once 要求 backend 是真实
+   ExecutionBackend 实例（isinstance，鸭子对象拒绝）+ descriptor/
+   capabilities 合法（builtin str backend_id + supports_stop 恰为 True）+
+   descriptor ID 与 ledger 冻结 backend_id 一致 + execution 处于
+   CANCELLING 且 cancel_intent=1 + run 已绑定 + CAS 版本匹配；UPDATE
+   WHERE 追加 state='CANCELLING' AND cancel_intent=1；任一不满足 →
+   False 零副作用（错误调用绝不能提前消耗 durable at-most-once stop
+   claim）。
+3. **P1-3 ack peek 注册表**：WorkEventBuffer 维护 peeked key 集合——
+   peek() 注册返回的 key，ack() 只接受**曾 peek** 的 key；存在但未 peek
+   的 key 一律类型化拒绝且拒绝路径零副作用（reviewer 独立复现
+   peek(1)→ack(e2)=1 的通道封闭）。
+4. **P1-4 公开破坏性 drain() 移除**：事件消费只能走 peek→persist→ack，
+   绝不允许一步清空绕过持久化协议。
+5. **P1-5 raw 预检真实 UTF-8 字节**：_canonical_json 与 WorkEventBuffer
+   raw 预检改用 ensure_ascii=False 的真实 UTF-8 字节数——20000 个 '€'
+   （真实 60000 字节 ≤ 65536）正确接受，不再被转义计数（66009+）错杀；
+   真实超限仍截断前拒绝；序列化异常统一折为类型化错误。
+6. **P1-6 迁移 fixture 真实化**：v1/v2 fixture 的 contract_hash 改为
+   Python 参数绑定写入的真实 64-hex（SQL 内 '*64 是文本算术陷阱，计算成
+   文本 "0"）；v2 迁移测试对 contract（含 legacy_unrecoverable）/
+   execution（hash/run/backend/state/version/timestamps）/attempt backfill/
+   event 在迁移后与二次 reopen 全部逐值断言。
+
+新增 reviewer-locked 测试 5 项（错误 backend 身份否证、evidence 身份
+mismatch/canonical 分歧双路径否证、drain 移除、raw UTF-8 真实计数、六键
+schema 否证），并将 stop 测试升级为 CANCELLING/cancel_intent 前置版；
+原 35 项全保留（evidence fixture 适配六键 schema、语义断言不变）。
+
+门禁：16H 专项 40 passed / 0 failed / 0 skipped；tests/agent 724 passed；
+tests/cognition 279 passed；full suite 2006 passed / 0 failed（15 warnings
+全部来自非 16H 既有套件）；git diff --check 干净。范围仅
+furina/agent/work_ledger.py + 2 测试文件 + 本 closeout 增补（work_coordinator.py
+本轮零改动），16A–16E frozen contracts 与 C1–C7 零改动。不合并
+integration、不开始 16G、不声明 16H_PASS，停在 READY_FOR_REVIEW。

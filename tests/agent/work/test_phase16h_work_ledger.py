@@ -207,11 +207,13 @@ CREATE TABLE work_events(
     kind TEXT NOT NULL, payload_json TEXT NOT NULL,
     critical INTEGER NOT NULL, received_at REAL NOT NULL);
 CREATE TABLE work_counters(name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
-INSERT INTO work_contracts VALUES('wc_v1_0001', 'a'*64, 1000.0);
 INSERT INTO work_executions(contract_id,attempt_id,run_id,backend_id,state,state_version,is_active,created_at,updated_at)
     VALUES('wc_v1_0001','att_v1_0001','run_v1_0001','native_agent','RUNNING',3,1,1000.0,1001.0);
 INSERT INTO work_events VALUES('ev_v1_0001',1,'backend.completed','{}',1,1001.0);
     """)
+    # 真实 64-hex 经 Python 参数绑定写入（SQL 内 '*64' 是文本算术陷阱）
+    conn.execute("INSERT INTO work_contracts VALUES(?,?,?)",
+                 ("wc_v1_0001", "a" * 64, 1000.0))
     conn.commit()
     conn.execute("PRAGMA user_version = 1")
     conn.commit()
@@ -333,7 +335,10 @@ def test_authentic_verified_via_proper_path(ledger):
     ledger.register_contract(c)
     eid = ledger.submit_intent(c, "att_av_0001")
     v1 = ledger.bind_run(eid, "run_av_0001", "native_agent", expected_version=1)
-    ev = {"kind": "backend.completed", "exit": 0, "event_id": "lev_1756000000001_0000ff"}
+    ev = {"event_id": "lev_1756000000001_0000ff",
+          "kind": "backend.completed", "run_id": "run_av_0001",
+          "backend_id": "native_agent", "contract_id": c.contract_id,
+          "payload": {"exit": 0}}
     v1 = ledger.mark_terminal_evidence(eid, ev, expected_version=v1)
     v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
                            expected_version=v1)
@@ -351,14 +356,21 @@ def test_evidence_mismatch_rejected(ledger):
     ledger.register_contract(c)
     eid = ledger.submit_intent(c, "att_em_0001")
     v1 = ledger.bind_run(eid, "run_em_0001", "native_agent", expected_version=1)
-    ev = {"kind": "backend.completed", "exit": 0, "event_id": "lev_1756000000001_0000ff"}
+    ev = {"event_id": "lev_1756000000001_0000ff",
+          "kind": "backend.completed", "run_id": "run_em_0001",
+          "backend_id": "native_agent", "contract_id": c.contract_id,
+          "payload": {"exit": 0}}
     v1 = ledger.mark_terminal_evidence(eid, ev, expected_version=v1)
     v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
                            expected_version=v1)
     rep, outcome = _verified_outcome(c, v, "run_em_0001")
     # kind 不匹配 → 拒绝（report terminal kind ≠ stored evidence kind）
-    ev_wrong_kind = {"kind": "backend.failed", "exit": 1,
-                     "event_id": "lev_1756000000001_0000ff"}
+    ev_wrong_kind = {"event_id": "lev_1756000000001_0000ff",
+                     "kind": "backend.failed",
+                     "run_id": "run_em_0001",
+                     "backend_id": "native_agent",
+                     "contract_id": c.contract_id,
+                     "payload": {"exit": 1}}
     v1X = ledger.mark_terminal_evidence(eid, ev_wrong_kind,
                                         expected_version=v1)
     with pytest.raises(WorkLedgerError):
