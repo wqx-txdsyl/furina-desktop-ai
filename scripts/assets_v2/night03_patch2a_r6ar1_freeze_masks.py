@@ -100,7 +100,7 @@ def main():
     source_bytes = SOURCE_JSON.read_bytes()
     source_sha = hashlib.sha256(source_bytes).hexdigest()
     doc = json.loads(source_bytes.decode('utf-8'))
-    assert doc['format'] == 'night03-ownership-scanline-rle-v2'
+    assert doc['format'] == 'night03-ownership-scanline-rle-v1'
     assert doc['asset'] == 'a16'
     assert doc['alpha_threshold'] == ALPHA_THRESHOLD
 
@@ -184,11 +184,6 @@ def main():
 
     cane_m = ownership == 5
     chair_m = ownership == 6
-    zoom_zones = [
-        ('head', (640, 880, 860, 1160)),
-        ('blade_seat', (540, 1090, 770, 1360)),
-        ('tip', (540, 1290, 760, 1470)),
-    ]
     for tag, kill in [('cane', cane_m), ('chair', chair_m),
                       ('cane_chair', cane_m | chair_m)]:
         cut = master.copy()
@@ -204,16 +199,10 @@ def main():
                     + bg * (1 - a2)).clip(0, 255).astype(np.uint8)
             save_png(comp, OUT / f'a16_{tag}_cutout_{bg_name}_100.png')
             rx0, ry0, rx1, ry1 = (400, 880, 860, 1470)
-            z = 4
-            sub = Image.fromarray(comp[ry0:ry1, rx0:rx1]).resize(
-                ((rx1 - rx0) * z, (ry1 - ry0) * z), Image.NEAREST)
-            save_png(sub, OUT / f'a16_{tag}_cutout_{bg_name}_400.png')
-            for zone_name, (zx0, zy0, zx1, zy1) in zoom_zones:
-                z8 = 8
-                sub8 = Image.fromarray(comp[zy0:zy1, zx0:zx1]).resize(
-                    ((zx1 - zx0) * z8, (zy1 - zy0) * z8), Image.NEAREST)
-                save_png(sub8, OUT / f'a16_{tag}_cutout_{bg_name}_800_'
-                         f'{zone_name}.png')
+            for z in (2, 4):
+                sub = Image.fromarray(comp[ry0:ry1, rx0:rx1]).resize(
+                    ((rx1 - rx0) * z, (ry1 - ry0) * z), Image.NEAREST)
+                save_png(sub, OUT / f'a16_{tag}_cutout_{bg_name}_{z * 100}.png')
 
     # ---- plan + report -----------------------------------------------------
     inputs = {}
@@ -224,7 +213,7 @@ def main():
     inputs['ownership_annotation_json'] = source_sha
 
     plan = {
-        'task': 'NIGHT03_RECOVERY_PATCH2A_R6AR2_OWNERSHIP_GATE',
+        'task': 'NIGHT03_RECOVERY_PATCH2A_R6AR1_OWNERSHIP_GATE',
         'base_sha': BASE_SHA,
         'method': 'external hand-annotated scanline RLE ownership source '
                   'consumed read-only; label 0 reserved for transparent '
@@ -263,12 +252,12 @@ def main():
                            separators=(',', ':'))
     sha = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
     plan['MASK_PLAN_SHA256'] = sha
-    (mask_dir / 'night03_patch2a_r6ar2_mask_plan.json').write_text(
+    (mask_dir / 'night03_patch2a_r6ar1_mask_plan.json').write_text(
         json.dumps(plan, indent=1, sort_keys=True) + '\n',
         encoding='utf-8', newline='\n')
 
     lines = [
-        '# NIGHT03_PATCH2A_R6AR2 — a16 Ownership Gate (Builder report)',
+        '# NIGHT03_PATCH2A_R6AR1 — a16 Ownership Gate (Builder report)',
         '',
         f'- MASK_PLAN_SHA256 = {sha}',
         f'- OWNERSHIP_SOURCE_SHA256 = {source_sha}',
@@ -280,9 +269,7 @@ def main():
         f'({census["protected_other_character"]} px)',
         '- STATIC_SOURCE_INDEPENDENT = true (freeze script reads the '
         'committed scanline RLE JSON read-only; it never generates or '
-        'modifies it; the annotate tool uses NO computed catch-all — '
-        'explicit hand-placed regions cover every visible pixel and the '
-        'tool fails otherwise)',
+        'modifies it)',
         '- CANE_CHAIR = hand-traced per-row contours along the real prop '
         'outlines; no wide rectangles, no coarse polygons spanning the '
         'character; the ribbon tied to the blade is part of the cane '
@@ -309,13 +296,13 @@ def main():
         f'{sum(census[LABEL_NAMES[lb]] for lb in range(1, 8))}',
         '- difference: 0',
         '',
-        'STATUS = READY_FOR_NIGHT03_PATCH2A_R6AR2_OWNERSHIP_REVIEW',
+        'STATUS = READY_FOR_NIGHT03_PATCH2A_R6AR1_OWNERSHIP_REVIEW',
         '',
     ]
-    (OUT / 'NIGHT03_PATCH2A_R6AR2_REPORT.md').write_text(
+    (OUT / 'NIGHT03_PATCH2A_R6AR1_REPORT.md').write_text(
         '\n'.join(lines), encoding='utf-8', newline='\n')
 
-    print(f'R6A-R2 OK MASK_PLAN_SHA256={sha}')
+    print(f'R6A-R1 OK MASK_PLAN_SHA256={sha}')
     print(f'OWNERSHIP_SOURCE_SHA256={source_sha}')
     for lb in range(8):
         print(f'  {LABEL_NAMES[lb]}: {census[LABEL_NAMES[lb]]}')

@@ -1,0 +1,86 @@
+{
+ "MASK_PLAN_SHA256": "96b4e809fdca9277e785d21445511c1336e087c1e6d515cee5bbfbea82dcbf56",
+ "assets": {
+  "a16": {
+   "annotation_rows": 1152,
+   "annotation_runs": 4876,
+   "isolated_cutout_census_check": {
+    "protected_costume": {
+     "alpha_px": 116955,
+     "census": 116955,
+     "visual_non_checker_px": 116954
+    },
+    "protected_glove_gold_cuff": {
+     "alpha_px": 9451,
+     "census": 9451,
+     "visual_non_checker_px": 9451
+    },
+    "protected_hair": {
+     "alpha_px": 204718,
+     "census": 204718,
+     "visual_non_checker_px": 204713
+    },
+    "protected_other_character": {
+     "alpha_px": 62723,
+     "census": 62723,
+     "visual_non_checker_px": 62722
+    },
+    "protected_quill_paper": {
+     "alpha_px": 22584,
+     "census": 22584,
+     "visual_non_checker_px": 22584
+    },
+    "remove_cane": {
+     "alpha_px": 22514,
+     "census": 22514,
+     "visual_non_checker_px": 22513
+    },
+    "remove_chair": {
+     "alpha_px": 13610,
+     "census": 13610,
+     "visual_non_checker_px": 13610
+    }
+   },
+   "labeled_background_pixels": 0,
+   "master_file": "data/assets_v2/masters/furina_v2_a16_work_focused.png",
+   "master_sha256": "f4997917453d6a541a08d021132ecad3bd8cffb63773833d31bdcde805d099ab",
+   "ownership_labels": {
+    "background": 1120309,
+    "protected_costume": 116955,
+    "protected_glove_gold_cuff": 9451,
+    "protected_hair": 204718,
+    "protected_other_character": 62723,
+    "protected_quill_paper": 22584,
+    "remove_cane": 22514,
+    "remove_chair": 13610
+   },
+   "unclassified_visible_pixels": 0
+  }
+ },
+ "base_sha": "e3bdedf389a56154614d9e3e9d5a648c20d75e0e",
+ "environment": {
+  "note": "PNG byte hashes are stable for identical (python/pillow/numpy/zlib) environments; cross-version byte equality is not guaranteed. Pixel-level identity is pinned by a16_ownership_source.npy and the canonical JSON hash below.",
+  "numpy": "1.26.4",
+  "pillow": "12.2.0",
+  "png_params": {
+   "compress_level": 6,
+   "optimize": false
+  },
+  "python": "3.11.0"
+ },
+ "inputs": {
+  "BASE": "2f8e10bb17cdc325cf29954bd960e55c90208e84835dddf5b62001a5b922682a",
+  "PATCH1_REVIEW_REPORT": "cb4088eac01ff69cb9fba27a4f960254d6c4a8c9b2ef99da80d7d7af18ca14c2",
+  "_spec/ART_ALPHA_PLAN.md": "8f51692223df9f0a3ba86a413508e3f6c3a1a11bfa1baf1b9160869aee5cad67",
+  "_spec/ART_ALPHA_REVIEW_REPORT.md": "76c7869c5be2f0d4b7ec574612ab6716b79ea1c6ae8a9887599e9210bd5fb09a",
+  "_spec/ASSET_GEOMETRY_AND_ANCHOR_SPEC.md": "0104d217c9349b7228c8a3ae7e2d308ca822c271263f55173f3ff2be0810bd28",
+  "_spec/ASSET_STYLE_LOCK.md": "a7b0bbdbd191531887359fefc2101efa292388db08693690e1c5d3e647fa0843",
+  "_spec/ASSET_TAXONOMY_AND_MANIFEST.md": "be0ef70865029ad617b311488704ff33790789f836263644b4a46a0bd1ece6f4",
+  "_spec/ASSET_TOPOLOGY_MAP.md": "a6de9475db124f44e03b1b828fca870a2b9379032d8a530954ef47051710d3f2",
+  "_spec/FURINA_IDENTITY_LOCK.md": "9b6762dc95f3b1b7b85be4f444ca8482ae665f8261c024382ddc72285cffb6a9",
+  "_spec/MASTER_GENERATION_PROMPT_SPEC.md": "22f16b6292fc022b361cf0e8cf78adbb8cfe0a70396e148d314da7ddc2cf2edb",
+  "ownership_annotation_json": "496fd4eb6c74da339788c234bc811feebdfacf51976c3717a9f2fafc4c6fd837"
+ },
+ "method": "external hand-annotated scanline RLE ownership source consumed read-only; label 0 reserved for transparent background; every visible pixel explicitly labelled (8 semantic labels incl. protected_other_character); remove_cane/remove_chair contours hand-traced along the real prop outlines; zero colour tests, zero connected components, zero morphological ops, zero near_prot, zero removal mask references, zero default-to-costume, zero generation calls",
+ "task": "NIGHT03_RECOVERY_PATCH2A_R6AR3_OWNERSHIP_GATE"
+}
