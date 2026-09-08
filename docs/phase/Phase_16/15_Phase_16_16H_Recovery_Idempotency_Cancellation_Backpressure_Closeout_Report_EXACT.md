@@ -240,3 +240,58 @@ xfail。
    结果不确定 → reconcile，绝不盲目重发）。
 4. truth-commit claim → C7 投影的原子消费属 16G；本阶段仅提供 claim/CAS
    marker API。
+
+---
+
+## Patch 5 WIP-continuation（BASE f1c41ad，READY_FOR_REVIEW）
+
+Reviewer WIP 复核任务书 8 组修复全量落地：
+
+1. **coordinator terminal_evidence 全身份恢复**：RecoveryCoordinator 构造的
+   terminal_evidence 同时包含 event_id / kind / run_id / backend_id /
+   contract_id / payload；16F submission 由注入的 submission_builder 用
+   **同一份** evidence 构造（event_id/kind 精确一致），ledger
+   mark_verified_by_outcome 的 stored-event 绑定检查据此 fail-closed——
+   builder 忽略 evidence 的提交被拒绝（绝不 VERIFIED）。
+2. **统一 attempt CAS**：新增 _attempt_cas_locked 唯一同步通道，全部 10 个
+   mutation（transition / begin_reconciliation / bind_run /
+   mark_terminal_evidence / mark_verified_by_outcome / recover_terminal /
+   cancel_intent 双分支 / dispatch_stop_once / record_outstanding_approval /
+   invalidate_approval）的 attempt UPDATE 一律带 attempt_id + execution_id +
+   contract_id + contract_hash + 旧 state + 旧 state_version 全谓词且
+   rowcount==1，失配 → CorruptionError 零部分写入；execution/attempt
+   state/version 全程 lockstep（测试锁定）。
+3. **backend_confirmed 布尔信任参数废除**：dispatch_stop_once 改为接收
+   **真实 backend 实例本身**，由 ledger 直接核验实例 capabilities.supports_stop
+   恰为 True；None/不支持 stop/CAS 失败/已派发 → False 零副作用。
+4. **invalidate_approval 升级为 CAS mutation**：expected_version 必传、
+   version+attempt 同步、幂等返回 DB 真实 version（绝不无版本谓词静默改写）。
+5. **overflow 保持 UNKNOWN + attempt sync 同一事务**：谓词升级为精确
+   (state, state_version) CAS + _attempt_cas_locked；终态拒绝落 marker。
+6. **WorkEventBuffer**：raw UTF-8 字节预检（sanitize 截断**之前**，64KiB
+   raw 上限，2MiB 级原始对象拒绝而非静默截断常驻）；新增 peek→persist→ack
+   协议（peek 不清空 crash 后可重复、ack 只移除已确认持久化 key、未 peek
+   key 类型化拒绝、ack 释放 per-run 容量）；秘密 sanitize at-rest 锁定。
+7. **读取面 corruption fail-closed**：events_of / progress_latest 损坏 JSON/
+   非 object/critical 非 0-1/时间非有限 → CorruptionError（绝不静默吞成
+   空对象）。
+8. **真实 v2→v3 migration fixture**：v2 schema（无 legacy_unrecoverable /
+   work_attempts）数据保留迁移 + attempts backfill + 幂等 reopen。
+9. **coordinator 修复**：AttemptRecord/RepairOutcome 时间窗一致（此前
+   outcome 用硬编码 1.0/2.0 与 report 时间不一致被 16F 正确拒绝）。
+
+新增 reviewer-locked 测试 14 项
+（tests/agent/work/test_phase16h_patch5_reviewer_locked.py）：attempt CAS
+state/version/identity 三形态否证 + 零部分写入、version lockstep、真实
+backend 证明（None/不支持/幂等）、invalidate CAS+幂等、events/progress
+损坏 fail-closed、真实 v2→v3 迁移、peek→persist→ack、raw 预检（2MiB +
+80KiB 双形态、零残留）、秘密 at-rest、evidence 绑定 fail-closed（builder
+忽略 evidence 否证 + 绑定 builder 正例）、无 backend 取消零 stop。
+
+测试：16H 专项 35 passed / 0 failed / 0 skipped；tests/agent 719 passed；
+tests/cognition 279 passed；full suite 2001 passed / 0 failed（15 warnings
+全部来自非 16H 既有套件；-W error::UserWarning 首轮曾出现一项负载型 flaky，
+隔离复跑与全套复跑均通过）；git diff --check 干净（EOF 空行已修）。
+范围仅 furina/agent/work_ledger.py + furina/agent/work_coordinator.py +
+2 测试文件 + 本 closeout 增补；16A–16E frozen contracts 与 C1–C7 零改动。
+不合并 integration、不开始 16G、不声明 16H_PASS，停在 READY_FOR_REVIEW。

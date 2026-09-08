@@ -159,8 +159,15 @@ class RecoveryCoordinator:
                 if event.kind in (EventKind.BACKEND_COMPLETED,
                                   EventKind.BACKEND_FAILED,
                                   EventKind.BACKEND_CANCELLED):
+                    # terminal evidence 必须携带完整身份（event_id/kind/run_id/
+                    # backend_id/contract_id/payload）——16F submission 由
+                    # submission_builder 用**同一份** evidence 构造。
                     terminal_evidence = {
+                        "event_id": event.event_id,
                         "kind": event.kind.value,
+                        "run_id": rec.run_id,
+                        "backend_id": rec.backend_id,
+                        "contract_id": rec.contract_id,
                         "payload": dict(event.payload),
                     }
                     terminal_kind = event.kind
@@ -211,19 +218,19 @@ class RecoveryCoordinator:
                 RepairOutcome,
                 RepairStopReason,
             )
+            started = float(report.started_at_epoch)
+            finished = float(report.finished_at_epoch)
             attempt = AttemptRecord(
                 attempt_id=rec.attempt_id, run_id=report.run_id,
                 contract_hash=report.contract_hash, verdict="VERIFIED",
                 report_id=report.report_id, failure_signature="",
-                started_at_epoch=float(report.started_at_epoch),
-                finished_at_epoch=float(report.finished_at_epoch))
+                started_at_epoch=started, finished_at_epoch=finished)
             outcome = RepairOutcome(
                 stop_reason=RepairStopReason.VERIFIED,
                 contract_id=report.contract_id,
                 contract_hash=report.contract_hash,
                 attempts=(attempt,), final_report=report,
-                started_at_epoch=float(report.started_at_epoch),
-                finished_at_epoch=float(report.finished_at_epoch))
+                started_at_epoch=started, finished_at_epoch=finished)
             self._ledger.mark_verified_by_outcome(
                 execution_id, verifier, outcome, expected_version=v,
                 terminal_evidence=terminal_evidence)
@@ -276,40 +283,38 @@ class CancellationCoordinator:
         if rec.approval_id and self._approval_canceller is not None:
             self._approval_canceller(rec.approval_id)
             approval_cancelled = True
-        self._ledger.invalidate_approval(execution_id)
+        self._ledger.invalidate_approval(
+            execution_id, expected_version=self._ledger.get_execution(
+                execution_id).state_version)
         # ③ backend stop 恰一次（run 未绑定 → 零 stop；不确定 → reconcile）。
-        # 先确认 backend 存在且 supports_stop，再消费 stop claim
-        backend_confirmed = False
+        # 取真实 backend 实例本身交给 ledger 核验（绝不传布尔信任参数）。
+        backend = None
         if self._registry is not None and rec.backend_id:
-            b = self._registry.get(rec.backend_id)
-            if b is not None and b.capabilities.supports_stop:
-                backend_confirmed = True
+            backend = self._registry.get(rec.backend_id)
         rec_after_cancel = self._ledger.get_execution(execution_id)
         stop_dispatched = self._ledger.dispatch_stop_once(
-            execution_id, backend_confirmed=backend_confirmed,
+            execution_id, backend=backend,
             expected_version=rec_after_cancel.state_version)
         reconciled = False
-        if stop_dispatched and self._registry is not None and rec.backend_id:
-            backend = self._registry.get(rec.backend_id)
-            if backend is not None and backend.capabilities.supports_stop:
-                try:
-                    backend.stop(BackendRunHandle(
-                        backend_id=rec.backend_id, run_id=rec.run_id,
-                        correlation=rec.contract_id))
-                except Exception:
-                    # stop 网络结果不确定 → UNKNOWN/reconcile；stop_dispatched
-                    # 已置位 → 绝不重发；绝不重新 submit。
-                    self._ledger.begin_reconciliation(
-                        execution_id,
-                        expected_version=self._ledger.get_execution(
-                            execution_id).state_version)
-                    reconciled = True
-                    return CancellationOutcome(
-                        execution_id=execution_id,
-                        status="stop_uncertain_reconcile",
-                        stop_dispatched=True,
-                        approval_cancelled=approval_cancelled,
-                        reconciled=True)
+        if stop_dispatched and backend is not None:
+            try:
+                backend.stop(BackendRunHandle(
+                    backend_id=rec.backend_id, run_id=rec.run_id,
+                    correlation=rec.contract_id))
+            except Exception:
+                # stop 网络结果不确定 → UNKNOWN/reconcile；stop_dispatched
+                # 已置位 → 绝不重发；绝不重新 submit。
+                self._ledger.begin_reconciliation(
+                    execution_id,
+                    expected_version=self._ledger.get_execution(
+                        execution_id).state_version)
+                reconciled = True
+                return CancellationOutcome(
+                    execution_id=execution_id,
+                    status="stop_uncertain_reconcile",
+                    stop_dispatched=True,
+                    approval_cancelled=approval_cancelled,
+                    reconciled=True)
         return CancellationOutcome(
             execution_id=execution_id, status="cancelling",
             stop_dispatched=stop_dispatched,

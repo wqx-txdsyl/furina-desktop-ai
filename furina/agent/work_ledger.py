@@ -511,6 +511,31 @@ class WorkLedger:
             self._conn.execute(
                 "ALTER TABLE work_contracts ADD COLUMN legacy_unrecoverable "
                 "INTEGER NOT NULL DEFAULT 0")
+        # v2→v3：真实 backfill work_attempts（v2 无独立 attempt 表）
+        self._create_attempts_table()
+        for r in self._conn.execute(
+                "SELECT attempt_id, execution_id, contract_id, run_id, "
+                "backend_id, state, state_version, created_at, updated_at "
+                "FROM work_executions").fetchall():
+            exists = self._conn.execute(
+                "SELECT 1 FROM work_attempts WHERE attempt_id=?",
+                (str(r["attempt_id"]),)).fetchone()
+            if exists:
+                continue
+            ch = self._conn.execute(
+                "SELECT contract_hash FROM work_contracts WHERE contract_id=?",
+                (str(r["contract_id"]),)).fetchone()
+            contract_hash = str(ch["contract_hash"]) if ch else ""
+            self._conn.execute(
+                "INSERT INTO work_attempts(attempt_id,execution_id,"
+                "contract_id,contract_hash,run_id,backend_id,state,"
+                "state_version,started_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (str(r["attempt_id"]), int(r["execution_id"]),
+                 str(r["contract_id"]), contract_hash, str(r["run_id"]),
+                 str(r["backend_id"]), str(r["state"]),
+                 int(r["state_version"]), float(r["created_at"]),
+                 float(r["updated_at"])))
 
     def _add_missing_execution_columns(self) -> None:
         cols = self._table_columns(self._conn, "work_executions")
@@ -790,6 +815,29 @@ class WorkLedger:
                     ) from None
                 return eid
 
+    # -------------------------------------------------- attempt 统一 CAS
+    def _attempt_cas_locked(self, conn: sqlite3.Connection,
+                            row: sqlite3.Row, *, new_state: str,
+                            old_state: str, old_version: int, now: float,
+                            extra_assigns: str = "",
+                            extra_params: Tuple[Any, ...] = ()) -> None:
+        """attempt ledger 唯一同步通道：attempt_id + execution_id +
+        contract_id + contract_hash + 旧 state + 旧 state_version 全谓词 +
+        rowcount==1（任一失配 → CorruptionError，零部分写入）。"""
+        sql = ("UPDATE work_attempts SET state=?, state_version="
+               "state_version+1"
+               + (", " + extra_assigns if extra_assigns else "")
+               + ", updated_at=? WHERE attempt_id=? AND execution_id=? "
+               "AND contract_id=? AND contract_hash=? AND state=? "
+               "AND state_version=?")
+        params = (new_state, *extra_params, now, str(row["attempt_id"]),
+                  int(row["execution_id"]), str(row["contract_id"]),
+                  str(row["contract_hash"]), old_state, old_version)
+        cur = conn.execute(sql, params)
+        if cur.rowcount != 1:
+            raise CorruptionError(
+                "attempt CAS 同步失配（身份/状态/版本谓词不匹配）")
+
     # -------------------------------------------------- CAS 迁移
     def transition(self, execution_id: int, new_state: WorkExecutionState, *,
                    expected_version: int) -> int:
@@ -830,15 +878,10 @@ class WorkLedger:
                      now, execution_id, expected_version, current.value))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("CAS rowcount=0")
-                at = self._conn.execute(
-                    "UPDATE work_attempts SET state=?, state_version="
-                    "state_version+1, updated_at=? WHERE attempt_id=? "
-                    "AND state=? AND state_version=?",
-                    (new_state.value, now, str(row["attempt_id"]),
-                     current.value, expected_version))
-                if at.rowcount != 1:
-                    raise CorruptionError(
-                        "attempt ledger 同步失配（state/version 谓词不匹配）")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state=new_state.value,
+                    old_state=current.value, old_version=expected_version,
+                    now=now)
                 return expected_version + 1
 
     def begin_reconciliation(self, execution_id: int, *,
@@ -864,13 +907,10 @@ class WorkLedger:
                     (now, execution_id, expected_version, current.value))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("reconciliation rowcount=0")
-                at = self._conn.execute(
-                    "UPDATE work_attempts SET state='UNKNOWN', "
-                    "state_version=state_version+1, updated_at=? "
-                    "WHERE attempt_id=?",
-                    (now, str(row["attempt_id"])))
-                if at.rowcount != 1:
-                    raise CorruptionError("reconciliation attempt sync 失配")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state="UNKNOWN",
+                    old_state=current.value, old_version=expected_version,
+                    now=now)
             return expected_version + 1
 
     # -------------------------------------------------- 绑定 / 证据 / 16F
@@ -902,13 +942,12 @@ class WorkLedger:
                      expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("bind CAS rowcount=0")
-                at = self._conn.execute(
-                    "UPDATE work_attempts SET run_id=?, backend_id=?, "
-                    "state_version=state_version+1, updated_at=? "
-                    "WHERE attempt_id=? AND run_id=''",
-                    (run_id, backend_id, now, str(row["attempt_id"])))
-                if at.rowcount != 1:
-                    raise CorruptionError("attempt run 绑定失配")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state=str(row["state"]),
+                    old_state=str(row["state"]),
+                    old_version=expected_version, now=now,
+                    extra_assigns="run_id=?, backend_id=?",
+                    extra_params=(run_id, backend_id))
                 return expected_version + 1
 
     def mark_terminal_evidence(self, execution_id: int,
@@ -928,13 +967,10 @@ class WorkLedger:
                     (blob, now, execution_id, expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("evidence CAS rowcount=0")
-                at = self._conn.execute(
-                    "UPDATE work_attempts SET state_version="
-                    "state_version+1, updated_at=? "
-                    "WHERE attempt_id=? AND state_version=?",
-                    (now, str(row["attempt_id"]), expected_version))
-                if at.rowcount != 1:
-                    raise CorruptionError("evidence attempt CAS 失配")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state=str(row["state"]),
+                    old_state=str(row["state"]),
+                    old_version=expected_version, now=now)
                 return expected_version + 1
 
     def mark_verified_by_outcome(self, execution_id: int, verifier, outcome,
@@ -1032,13 +1068,10 @@ class WorkLedger:
                     (marker, now, execution_id, expected_version, current.value))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("verify CAS rowcount=0")
-                at = self._conn.execute(
-                    "UPDATE work_attempts SET state='VERIFIED', "
-                    "state_version=state_version+1, updated_at=? "
-                    "WHERE attempt_id=? AND state=?",
-                    (now, str(row["attempt_id"]), current.value))
-                if at.rowcount != 1:
-                    raise CorruptionError("attempt verify 同步失配")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state="VERIFIED",
+                    old_state=current.value, old_version=expected_version,
+                    now=now)
                 return expected_version + 1
 
     def recover_terminal(self, execution_id: int,
@@ -1077,14 +1110,10 @@ class WorkLedger:
                      now, execution_id, expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("recover rowcount=0")
-                at = self._conn.execute(
-                    "UPDATE work_attempts SET state=?, "
-                    "state_version=state_version+1, updated_at=? "
-                    "WHERE attempt_id=? AND state='UNKNOWN'",
-                    (new_state.value, now, str(row["attempt_id"])))
-                if at.rowcount != 1:
-                    raise CorruptionError(
-                        "recover_terminal attempt sync 失配")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state=new_state.value,
+                    old_state="UNKNOWN", old_version=expected_version,
+                    now=now)
                 return expected_version + 1
 
     # -------------------------------------------------- 取消
@@ -1111,13 +1140,10 @@ class WorkLedger:
                          execution_id, expected_version, current.value))
                     if cur.rowcount != 1:
                         raise StaleStateVersion("cancel CAS rowcount=0")
-                    at = self._conn.execute(
-                        "UPDATE work_attempts SET state='CANCELLED', "
-                        "state_version=state_version+1, updated_at=? "
-                        "WHERE attempt_id=? AND state=?",
-                        (now, str(row["attempt_id"]), current.value))
-                    if at.rowcount != 1:
-                        raise CorruptionError("attempt cancel 同步失配")
+                    self._attempt_cas_locked(
+                        self._conn, row, new_state="CANCELLED",
+                        old_state=current.value, old_version=expected_version,
+                        now=now)
                     return expected_version + 1
                 cur = self._conn.execute(
                     "UPDATE work_executions SET cancel_intent=1, state=?, "
@@ -1127,23 +1153,22 @@ class WorkLedger:
                      execution_id, expected_version, current.value))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("cancel CAS rowcount=0")
-                at = self._conn.execute(
-                    "UPDATE work_attempts SET state='CANCELLING', "
-                    "state_version=state_version+1, updated_at=? "
-                    "WHERE attempt_id=? AND state=?",
-                    (now, str(row["attempt_id"]), current.value))
-                if at.rowcount != 1:
-                    raise CorruptionError("attempt cancel 同步失配")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state="CANCELLING",
+                    old_state=current.value, old_version=expected_version,
+                    now=now)
                 return expected_version + 1
 
-    def dispatch_stop_once(self, execution_id: int, *,
-                           backend_confirmed: bool = False,
-                           expected_version: int = 0) -> bool:
-        """backend stop claim：需要调用方传入 backend_confirmed=True（证明已
-        确认 backend 存在且 supports_stop）+ run 已绑定 + CAS 版本匹配 +
-        rowcount==1。backend 不存在/未确认/run 未绑定/已派发 → False 零副作用。
-        """
-        if not backend_confirmed:
+    def dispatch_stop_once(self, execution_id: int, *, backend,
+                           expected_version: int) -> bool:
+        """backend stop claim：调用方必须传入**真实 backend 实例本身**（绝不
+        接受布尔信任参数——由 ledger 直接核验实例 capabilities.supports_stop
+        恰为 True）+ run 已绑定 + CAS 版本匹配 + rowcount==1。backend 为
+        None/不支持 stop/run 未绑定/已派发/CAS 失败 → False 零副作用。"""
+        if backend is None:
+            return False
+        caps = getattr(backend, "capabilities", None)
+        if caps is None or getattr(caps, "supports_stop", None) is not True:
             return False
         now = self._now()
         with self._lock:
@@ -1155,14 +1180,20 @@ class WorkLedger:
                     return False        # 幂等：已派发
                 if int(row["state_version"]) != expected_version:
                     return False        # CAS 失败
+                current = str(row["state"])
                 cur = self._conn.execute(
                     "UPDATE work_executions SET stop_dispatched=1, "
                     "state_version=state_version+1, updated_at=? "
-                    "WHERE execution_id=? AND state_version=? AND run_id=?",
+                    "WHERE execution_id=? AND state_version=? AND run_id=? "
+                    "AND stop_dispatched=0",
                     (now, execution_id, expected_version, str(row["run_id"])))
                 if cur.rowcount != 1:
                     return False        # CAS rowcount=0
+                self._attempt_cas_locked(
+                    self._conn, row, new_state=current, old_state=current,
+                    old_version=expected_version, now=now)
                 return True
+
     def record_outstanding_approval(self, execution_id: int,
                                     approval_id: str, *,
                                     expected_version: int) -> int:
@@ -1181,14 +1212,38 @@ class WorkLedger:
                     (approval_id, now, execution_id, expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("approval CAS rowcount=0")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state=str(row["state"]),
+                    old_state=str(row["state"]),
+                    old_version=expected_version, now=now)
                 return expected_version + 1
 
-    def invalidate_approval(self, execution_id: int) -> None:
+    def invalidate_approval(self, execution_id: int, *,
+                            expected_version: int) -> int:
+        """approval 失效同样是状态改写：CAS 版本 + attempt 同步（绝不无版本
+        谓词静默改写持久化行）。幂等：已失效 → 返回当前 DB 真实 version。"""
+        with self._lock:
+            row = self._execution_row(self._conn, execution_id)
+            if int(row["approval_invalidated"]) == 1:
+                return int(row["state_version"])
+            if int(row["state_version"]) != expected_version:
+                raise StaleStateVersion("invalidate CAS 失败")
+        now = self._now()
         with self._lock:
             with self._conn:
-                self._conn.execute(
-                    "UPDATE work_executions SET approval_invalidated=1 "
-                    "WHERE execution_id=?", (execution_id,))
+                cur = self._conn.execute(
+                    "UPDATE work_executions SET approval_invalidated=1, "
+                    "state_version=state_version+1, updated_at=? "
+                    "WHERE execution_id=? AND state_version=? "
+                    "AND approval_invalidated=0",
+                    (now, execution_id, expected_version))
+                if cur.rowcount != 1:
+                    raise StaleStateVersion("invalidate CAS rowcount=0")
+                self._attempt_cas_locked(
+                    self._conn, row, new_state=str(row["state"]),
+                    old_state=str(row["state"]),
+                    old_version=expected_version, now=now)
+                return expected_version + 1
 
     def approval_invalidated(self, execution_id: int) -> bool:
         with self._lock:
@@ -1210,14 +1265,16 @@ class WorkLedger:
         now = self._now()
         with self._lock:
             with self._conn:
-                self._execution_row(self._conn, execution_id)
-                row = self._conn.execute(
+                row = self._execution_row(self._conn, execution_id)
+                cur_state = str(row["state"])
+                cur_version = int(row["state_version"])
+                dup = self._conn.execute(
                     "SELECT kind, payload_json FROM work_events "
                     "WHERE execution_id=? AND event_id=?",
                     (execution_id, event_id)).fetchone()
-                if row is not None:
-                    if str(row["kind"]) != kind.value \
-                            or str(row["payload_json"]) != blob:
+                if dup is not None:
+                    if str(dup["kind"]) != kind.value \
+                            or str(dup["payload_json"]) != blob:
                         raise EventContentConflict(
                             f"event {event_id!r} 同 execution 异内容")
                     return "duplicate"
@@ -1233,21 +1290,27 @@ class WorkLedger:
                     at_capacity = (per_run >= self._max_events_per_run
                                    or global_n >= self._max_global_events)
                 if priority.value == "critical" and at_capacity:
-                    self._execution_row(self._conn, execution_id)
+                    if cur_state in ("CANCELLED", "VERIFIED", "FAILED"):
+                        raise CriticalBufferOverflow(
+                            "critical 容量耗尽且已终态——拒绝落 marker")
                     self._conn.execute(
                         "UPDATE work_executions SET overflow_marker=?, "
                         "state='UNKNOWN', is_active=1, "
                         "state_version=state_version+1, updated_at=? "
-                        "WHERE execution_id=? AND state NOT IN "
-                        "('CANCELLED','VERIFIED','FAILED')",
+                        "WHERE execution_id=? AND state=? AND state_version=? "
+                        "AND state NOT IN ('CANCELLED','VERIFIED','FAILED')",
                         (f"critical_overflow:{kind.value}:{event_id[:64]}:"
-                         f"{int(now)}", now, execution_id))
-                    self._conn.execute(
-                        "UPDATE work_attempts SET state='UNKNOWN', "
-                        "state_version=state_version+1, updated_at=? "
-                        "WHERE execution_id=? AND state NOT IN "
-                        "('CANCELLED','VERIFIED','FAILED')",
-                        (now, execution_id))
+                         f"{int(now)}", now, execution_id, cur_state,
+                         cur_version))
+                    chk = self._conn.execute(
+                        "SELECT state FROM work_executions "
+                        "WHERE execution_id=?", (execution_id,)).fetchone()
+                    if chk is None or str(chk["state"]) != "UNKNOWN":
+                        raise CriticalBufferOverflow(
+                            "overflow marker 落盘失败（CAS rowcount=0 等价）")
+                    self._attempt_cas_locked(
+                        self._conn, row, new_state="UNKNOWN",
+                        old_state=cur_state, old_version=cur_version, now=now)
                     self._incr_counter_locked(self._conn,
                                               "critical_overflow", 1)
                     self._conn.commit()             # marker 独立提交（不被 raise 回滚）
@@ -1285,9 +1348,12 @@ class WorkLedger:
         try:
             payload = json.loads(str(row["payload_json"]))
         except Exception:
-            payload = {}
-        return {"payload": payload if isinstance(payload, dict) else {},
-                "updated_at": float(row["updated_at"])}
+            raise CorruptionError(
+                "work_progress payload JSON 损坏（fail-closed）") from None
+        if not isinstance(payload, dict):
+            raise CorruptionError("work_progress payload 必须是 object")
+        return {"payload": payload,
+                "updated_at": _finite_time(row["updated_at"], "updated_at")}
 
     def events_of(self, execution_id: int) -> Tuple[Dict[str, Any], ...]:
         with self._lock:
@@ -1300,12 +1366,22 @@ class WorkLedger:
                 try:
                     payload = json.loads(str(row["payload_json"]))
                 except Exception:
-                    payload = {}
+                    raise CorruptionError(
+                        f"work_events {str(row['event_id'])!r} payload JSON "
+                        f"损坏（fail-closed）") from None
+                if not isinstance(payload, dict):
+                    raise CorruptionError(
+                        f"work_events {str(row['event_id'])!r} payload 必须"
+                        f"是 object")
+                crit = row["critical"]
+                if type(crit) is not int or crit not in (0, 1):
+                    raise CorruptionError("work_events critical 值损坏")
                 out.append({"event_id": str(row["event_id"]),
                             "kind": str(row["kind"]),
-                            "payload": payload if isinstance(payload, dict) else {},
-                            "critical": bool(row["critical"]),
-                            "received_at": float(row["received_at"])})
+                            "payload": payload,
+                            "critical": bool(crit),
+                            "received_at": _finite_time(row["received_at"],
+                                                        "received_at")})
             return tuple(out)
 
     # -------------------------------------------------- truth-commit claim
@@ -1397,6 +1473,9 @@ class WorkEventBuffer:
     _MAX_PAYLOAD_BYTES = 4096
     _MAX_DEPTH = 8
     _MAX_ITEMS = 64
+    # raw 预检上限（sanitize 之前）：2MiB 级原始对象在截断/清洗前即拒绝，
+    # 绝不让 sanitize 的静默截断掩盖超大 payload。
+    _RAW_PRECHECK_BYTES = 64 * 1024
 
     def __init__(self, *, per_run_cap: int = 128,
                  global_cap: int = 1024) -> None:
@@ -1431,6 +1510,16 @@ class WorkEventBuffer:
         if type(payload) is not dict:
             raise WorkLedgerError("payload 必须是 builtin dict")
         _reject_non_finite(payload)
+        try:
+            raw_len = len(json.dumps(payload, ensure_ascii=True,
+                                     allow_nan=False).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise WorkLedgerError(
+                f"payload 无法序列化（{type(exc).__name__}）") from None
+        if raw_len > self._RAW_PRECHECK_BYTES:
+            raise WorkLedgerError(
+                f"payload 原始体积 {raw_len} 字节超过 raw 预检上限 "
+                f"{self._RAW_PRECHECK_BYTES}（sanitize 截断前拒绝）")
         clean = sanitize_payload(payload, max_bytes=self._MAX_PAYLOAD_BYTES)
         clean = self._bounded_copy(clean)
         key = (run_id, event_id)
@@ -1518,6 +1607,41 @@ class WorkEventBuffer:
             self._order.clear()
             self._per_run.clear()
             return out
+
+    def peek(self, max_items: int = 256) -> Tuple[Dict[str, Any], ...]:
+        """peek→persist→ack 协议第一步：返回前 max_items 条快照但**不清空**
+        （持久化成功前零丢失窗口；crash 后 peek 可重复）。"""
+        if type(max_items) is not int or max_items < 1:
+            raise WorkLedgerError("max_items 必须是正 int")
+        with self._lock:
+            return tuple(json.loads(json.dumps(self._events[k]))
+                         for k in self._order[:max_items])
+
+    def ack(self, keys) -> int:
+        """peek→persist→ack 协议第二步：仅移除调用方已确认持久化的
+        (run_id, event_id)；未 peek 到的 key 类型化拒绝（零静默吞没）。"""
+        key_list = list(keys)
+        for k in key_list:
+            if (type(k) is not tuple or len(k) != 2
+                    or type(k[0]) is not str or type(k[1]) is not str):
+                raise WorkLedgerError("ack key 必须是 (run_id, event_id) 二元组")
+        with self._lock:
+            removed = 0
+            for k in key_list:
+                if k not in self._events:
+                    raise WorkLedgerError(
+                        f"ack key {k[1]!r} 不在当前缓冲（必须先 peek）")
+            for k in key_list:
+                if k in self._events:
+                    del self._events[k]
+                    self._order.remove(k)
+                    n = self._per_run.get(k[0], 1) - 1
+                    if n <= 0:
+                        self._per_run.pop(k[0], None)
+                    else:
+                        self._per_run[k[0]] = n
+                    removed += 1
+            return removed
 
     @property
     def dropped_ticks(self) -> int:

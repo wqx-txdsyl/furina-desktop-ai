@@ -101,6 +101,19 @@ def _ok_submission(c, run_id):
                 "declared_mime": "text/markdown", "declared_size_bytes": 2}]}
 
 
+def _evidence_bound_builder(c):
+    """production 协议：16F submission 的 terminal_events 必须由**同一份**
+    coordinator terminal evidence 构造（event_id/kind 精确一致）。"""
+    def build(rec, ev):
+        sub = _ok_submission(c, rec.run_id)
+        sub["terminal_events"] = [{
+            "event_id": ev["event_id"], "kind": ev["kind"],
+            "observed_at_epoch": 1756000001.0, "run_id": rec.run_id,
+            "contract_id": c.contract_id, "backend_id": "native_agent"}]
+        return sub
+    return build
+
+
 class _FakeBackend(ExecutionBackend):
     def __init__(self, backend_id="native_agent", *, events=None,
                  supports_stop=True, stop_error=False):
@@ -469,7 +482,7 @@ def test_recovery_completed_verified_via_coordinator(tmp_path):
     led2 = WorkLedger(tmp_path / "work_ledger.db")
     coord = RecoveryCoordinator(
         led2, backend_registry=_registry_with(backend), verifier=v,
-        submission_builder=lambda rec, ev: _ok_submission(c, rec.run_id))
+        submission_builder=_evidence_bound_builder(c))
     result = coord.recover_execution(eid)
     assert result.status == "verified"
     assert result.submit_calls == 0 and backend.submit_calls == 0
@@ -492,7 +505,7 @@ def test_recovery_failed_not_verified(tmp_path):
     led2 = WorkLedger(tmp_path / "work_ledger.db")
     coord = RecoveryCoordinator(
         led2, backend_registry=_registry_with(backend), verifier=v,
-        submission_builder=lambda rec, ev: _ok_submission(c, rec.run_id))
+        submission_builder=_evidence_bound_builder(c))
     result = coord.recover_execution(eid)
     assert "terminal_FAILED" in result.status
     assert led2.get_execution(eid).state is WorkExecutionState.FAILED
