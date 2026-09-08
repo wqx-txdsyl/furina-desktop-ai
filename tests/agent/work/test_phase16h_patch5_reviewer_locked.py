@@ -30,6 +30,8 @@ from furina.agent.work_coordinator import (
 )
 from furina.agent.work_ledger import (
     CorruptionError,
+    EventContentConflict,
+    thaw_payload,
     IllegalTransition,
     CriticalBufferOverflow,
     EventBufferOutcome,
@@ -292,7 +294,7 @@ CREATE TABLE work_counters(name TEXT PRIMARY KEY,
     conn.close()
     assert len(pre["contract"][1]) == 64
     led = WorkLedger(db)
-    assert led.user_version() == 4
+    assert led.user_version() == 5
     # contract 逐值
     row = led._conn.execute(
         "SELECT contract_id, contract_hash, transport_json, "
@@ -324,7 +326,7 @@ CREATE TABLE work_counters(name TEXT PRIMARY KEY,
     led.close()
     # 二次 reopen 幂等 + 数据仍逐值一致
     led2 = WorkLedger(db)
-    assert led2.user_version() == 4
+    assert led2.user_version() == 5
     rec2 = led2.get_execution(1)
     assert (rec2.contract_id, rec2.contract_hash, rec2.attempt_id,
             rec2.run_id, rec2.state.value, rec2.state_version) == (
@@ -583,31 +585,40 @@ def test_terminal_evidence_exact_six_key_schema(ledger, tmp_path):
 # attempt run-backend 谓词 / 序列化异常类型化
 # ================================================================
 
-def test_secret_payload_divergence_rejected(ledger, tmp_path):
-    """Reviewer 否证：不同 secret payload sanitize 后折叠为同一
-    [REDACTED] blob——raw digest 绑定使伪造分歧不得 VERIFIED。"""
+def test_no_raw_secret_or_plain_digest_persisted(ledger, tmp_path):
+    """Patch 8 否证：含秘密的 evidence 落库后，整个 DB 文件既不含 raw
+    secret 原文，也不含其普通 SHA-256 派生物（raw digest 方案已废弃，
+    v4 遗留值在迁移中被清空）。"""
+    import hashlib as _hashlib
     c = _contract(tmp_path, "wc_sec_0001")
-    v = IndependentVerifier(c)
     ledger.register_contract(c)
     eid = ledger.submit_intent(c, "att_sec_0001")
     v1 = ledger.bind_run(eid, "run_sec_0001", "native_agent",
                          expected_version=1)
-    ev_a = {"event_id": "lev_1756000000001_0000ff",
-            "kind": "backend.completed", "run_id": "run_sec_0001",
-            "backend_id": "native_agent", "contract_id": c.contract_id,
-            "payload": {"exit": 0, "token": "aaaa1111bbbb2222"}}
-    v1 = ledger.mark_terminal_evidence(eid, ev_a, expected_version=v1)
-    v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
-                           expected_version=v1)
-    rep, outcome = _verified_outcome_for(c, v, "run_sec_0001")
-    # 同六键、sanitize 后 blob 相同（token 均折叠为 [REDACTED]）但 raw 不同
-    ev_forged = dict(ev_a)
-    ev_forged["payload"] = {"exit": 0, "token": "cccc3333dddd4444"}
-    with pytest.raises(WorkLedgerError):
-        ledger.mark_verified_by_outcome(eid, v, outcome,
-                                        expected_version=v1,
-                                        terminal_evidence=ev_forged)
-    assert ledger.get_execution(eid).state is         WorkExecutionState.BACKEND_DONE_UNVERIFIED
+    secret = "supersecretvalue123456"
+    ev = {"event_id": "lev_1756000000001_0000ff",
+          "kind": "backend.completed", "run_id": "run_sec_0001",
+          "backend_id": "native_agent", "contract_id": c.contract_id,
+          "payload": {"exit": 0, "token": secret}}
+    v1 = ledger.mark_terminal_evidence(eid, ev, expected_version=v1)
+    # 模拟 v4 遗留：写入 raw digest 后重开 → 迁移必须清空
+    conn = sqlite3.connect(ledger._path)
+    conn.execute("UPDATE work_executions SET terminal_evidence_raw_digest=?",
+                 (_hashlib.sha256(secret.encode()).hexdigest(),))
+    conn.commit()
+    conn.close()
+    ledger.close()
+    led2 = WorkLedger(ledger._path)
+    row = led2._conn.execute(
+        "SELECT terminal_evidence_json, terminal_evidence_raw_digest "
+        "FROM work_executions").fetchone()
+    assert str(row["terminal_evidence_raw_digest"]) == ""
+    assert secret not in str(row["terminal_evidence_json"])
+    assert "[REDACTED]" in str(row["terminal_evidence_json"])
+    led2.close()
+    blob = open(ledger._path, "rb").read()
+    assert secret.encode() not in blob
+    assert _hashlib.sha256(secret.encode()).hexdigest().encode() not in blob
 
 
 def test_terminal_kind_whitelist_and_state_mapping(ledger, tmp_path):
@@ -675,3 +686,168 @@ def test_deep_nesting_typed_error():
             led.record_event(eid, "ev_deep", EventKind.TOOL_PROGRESS, deep)
     finally:
         led.close()
+
+
+def test_cross_stitched_observations_rejected(ledger, tmp_path):
+    """Patch 8 否证：verify 必须存在恰一条 report terminal observation
+    同时匹配 stored event_id/kind——event_id 不在任何 observation 中
+    （单边/拼接/不存在）一律拒绝；唯一匹配 → VERIFIED 正例。"""
+    import hashlib as _hashlib
+    c = _contract(tmp_path, "wc_xst_0001")
+    v = IndependentVerifier(c)
+    ledger.register_contract(c)
+    eid = ledger.submit_intent(c, "att_xst_0001")
+    v1 = ledger.bind_run(eid, "run_xst_0001", "native_agent",
+                         expected_version=1)
+    art = c.workspace_scope.write_roots[0] + "/summary.md"
+    submission = {
+        "run_id": "run_xst_0001", "backend_id": "native_agent",
+        "terminal_events": [
+            {"event_id": "lev_1756000000001_0000aa",
+             "kind": "backend.completed",
+             "observed_at_epoch": 1756000001.0,
+             "run_id": "run_xst_0001", "contract_id": c.contract_id,
+             "backend_id": "native_agent"},
+            {"event_id": "lev_1756000000001_0000bb",
+             "kind": "backend.completed",
+             "observed_at_epoch": 1756000002.0,
+             "run_id": "run_xst_0001", "contract_id": c.contract_id,
+             "backend_id": "native_agent"}],
+        "declared_artifacts": [{
+            "artifact_id": "doc", "path": art,
+            "declared_sha256": _hashlib.sha256(b"ok").hexdigest(),
+            "declared_mime": "text/markdown", "declared_size_bytes": 2}]}
+    report = v.verify(submission)
+    started = float(report.started_at_epoch)
+    finished = float(report.finished_at_epoch)
+    from furina.agent.verification.repair import (
+        AttemptRecord,
+        RepairOutcome,
+        RepairStopReason,
+    )
+    attempt = AttemptRecord(attempt_id="att_xst_out", run_id=report.run_id,
+                            contract_hash=report.contract_hash,
+                            verdict="VERIFIED", report_id=report.report_id,
+                            failure_signature="",
+                            started_at_epoch=started,
+                            finished_at_epoch=finished)
+    outcome = RepairOutcome(stop_reason=RepairStopReason.VERIFIED,
+                            contract_id=report.contract_id,
+                            contract_hash=report.contract_hash,
+                            attempts=(attempt,), final_report=report,
+                            started_at_epoch=started,
+                            finished_at_epoch=finished)
+    # 负例：stored event_id 不在任何 report observation 中 → 拒绝
+    ev_bad = {"event_id": "lev_1756000009999_ffff00",
+              "kind": "backend.completed", "run_id": "run_xst_0001",
+              "backend_id": "native_agent", "contract_id": c.contract_id,
+              "payload": {}}
+    v1 = ledger.mark_terminal_evidence(eid, ev_bad, expected_version=v1)
+    v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+                           expected_version=v1)
+    with pytest.raises(WorkLedgerError):
+        ledger.mark_verified_by_outcome(eid, v, outcome,
+                                        expected_version=v1,
+                                        terminal_evidence=ev_bad)
+    assert ledger.get_execution(eid).state is         WorkExecutionState.BACKEND_DONE_UNVERIFIED
+    # 正例：唯一匹配（bb 那条）→ VERIFIED
+    ev_ok = {"event_id": "lev_1756000000001_0000bb",
+             "kind": "backend.completed", "run_id": "run_xst_0001",
+             "backend_id": "native_agent", "contract_id": c.contract_id,
+             "payload": {}}
+    v2 = ledger.mark_terminal_evidence(eid, ev_ok, expected_version=v1)
+    ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v2,
+                                    terminal_evidence=ev_ok)
+    assert ledger.get_execution(eid).state is WorkExecutionState.VERIFIED
+
+
+# ================================================================
+# Patch 8 reviewer-locked —— lossy 语义 / thaw / 单条 observation 配对
+# ================================================================
+
+def test_lossy_duplicate_semantics(tmp_path):
+    """Patch 8：同 (execution, event_id)——任一侧 lossy → ambiguous
+    （零状态变化）；重启后 lossy 标记持久、语义仍成立；两侧 non-lossy
+    且内容相同 → duplicate。"""
+    c = _contract(tmp_path, "wc_ls_0001")
+    led = WorkLedger(tmp_path / "wl_ls.db")
+    led.register_contract(c)
+    eid = led.submit_intent(c, "att_ls_0001")
+    assert led.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
+                            {"exit": 0}, lossy=True) == "stored"
+    assert led.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
+                            {"exit": 0}) == "ambiguous"
+    assert led.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
+                            {"exit": 0}, lossy=True) == "ambiguous"
+    assert led.record_event(eid, "ev_ls2", EventKind.BACKEND_COMPLETED,
+                            {"exit": 0}) == "stored"
+    assert led.record_event(eid, "ev_ls2", EventKind.BACKEND_COMPLETED,
+                            {"exit": 0}) == "duplicate"
+    # lossy + 异内容 → conflict 优先
+    with pytest.raises(EventContentConflict):
+        led.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
+                         {"exit": 1})
+    led.close()
+    led2 = WorkLedger(tmp_path / "wl_ls.db")
+    assert led2.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
+                             {"exit": 0}) == "ambiguous"   # lossy 已持久
+    led2.close()
+
+
+def test_lossy_strict_bool(tmp_path):
+    c = _contract(tmp_path, "wc_lsb_0001")
+    led = WorkLedger(tmp_path / "wl_lsb.db")
+    led.register_contract(c)
+    eid = led.submit_intent(c, "att_lsb_0001")
+    with pytest.raises(WorkLedgerError):
+        led.record_event(eid, "ev_b", EventKind.BACKEND_COMPLETED, {},
+                         lossy=1)
+    led.close()
+
+
+def test_thaw_nested_mapping_and_tuple():
+    """Patch 8：MappingProxyType/tuple 递归 thaw；原生类型零泄漏。"""
+    import types
+    frozen = types.MappingProxyType({
+        "a": (1, 2, types.MappingProxyType({"b": "x"})),
+        "c": [{"d": types.MappingProxyType({"e": [True, None]})}],
+    })
+    out = thaw_payload(frozen)
+    assert out == {"a": [1, 2, {"b": "x"}],
+                   "c": [{"d": {"e": [True, None]}}]}
+    assert type(out) is dict and type(out["a"]) is list
+    assert type(out["a"][2]) is dict
+    # 非 JSON-native → 类型化拒绝（绝不 repr/str 兜底）
+    class _Hostile:
+        pass
+    with pytest.raises(WorkLedgerError):
+        thaw_payload({"k": _Hostile()})
+
+
+def test_nested_normalized_payload_survives_recovery(tmp_path):
+    """Patch 8：嵌套 dict/list 的真实 normalized terminal event 经
+    coordinator 落盘、恢复进入 BACKEND_DONE_UNVERIFIED 并可 VERIFIED。"""
+    c = _contract(tmp_path, "wc_nst_0001")
+    v = IndependentVerifier(c)
+    led = WorkLedger(tmp_path / "work_ledger.db")
+    led.register_contract(c)
+    eid = led.submit_intent(c, "att_nst_0001")
+    led.bind_run(eid, "run_nst_0001", "native_agent", expected_version=1)
+    led.close()
+    backend = _FakeBackend(events=[BackendEvent(
+        backend_id="native_agent", run_id="run_nst_0001",
+        event_type="backend.completed",
+        payload={"exit": 0, "detail": {"artifacts": ["a.md"],
+                                       "counts": (1, 2, 3)}})])
+    led2 = WorkLedger(tmp_path / "work_ledger.db")
+    coord = RecoveryCoordinator(
+        led2, backend_registry=_registry_with(backend), verifier=v,
+        submission_builder=_evidence_bound_builder(c))
+    result = coord.recover_execution(eid)
+    assert result.status == "verified"
+    rec = led2.get_execution(eid)
+    assert rec.state is WorkExecutionState.BACKEND_DONE_UNVERIFIED or         rec.state is WorkExecutionState.VERIFIED
+    evs = led2.events_of(eid)
+    nested = [e for e in evs if e["kind"] == "backend.completed"]
+    assert nested and nested[0]["payload"]["detail"]["artifacts"] == ["a.md"]
+    led2.close()

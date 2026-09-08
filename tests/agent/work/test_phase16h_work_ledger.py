@@ -220,7 +220,7 @@ INSERT INTO work_events VALUES('ev_v1_0001',1,'backend.completed','{}',1,1001.0)
     conn.close()
     # migration 到 v3
     led = WorkLedger(db)
-    assert led.user_version() == 4
+    assert led.user_version() == 5
     rec = led.get_execution(1)
     assert rec.run_id == "run_v1_0001"
     assert len(led.events_of(1)) == 1
@@ -230,7 +230,7 @@ INSERT INTO work_events VALUES('ev_v1_0001',1,'backend.completed','{}',1,1001.0)
     led.close()
     # reopen 幂等
     led2 = WorkLedger(db)
-    assert led2.user_version() == 4
+    assert led2.user_version() == 5
     assert led2.get_execution(1).run_id == "run_v1_0001"
     led2.close()
 
@@ -283,7 +283,7 @@ def test_future_schema_and_incompatible_rejected(tmp_path):
     with pytest.raises(WorkLedgerError):
         WorkLedger(tmp_path / "work_ledger.db")
     conn = sqlite3.connect(tmp_path / "work_ledger.db")
-    conn.execute("PRAGMA user_version = 4")
+    conn.execute("PRAGMA user_version = 5")
     conn.execute("DROP TABLE work_counters")
     conn.execute("CREATE TABLE work_counters(junk TEXT)")
     conn.commit()
@@ -295,7 +295,7 @@ def test_future_schema_and_incompatible_rejected(tmp_path):
     conn.commit()
     conn.close()
     led2 = WorkLedger(tmp_path / "work_ledger.db")
-    assert led2.user_version() == 4
+    assert led2.user_version() == 5
     led2.close()
 
 

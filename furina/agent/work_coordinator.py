@@ -30,6 +30,7 @@ from furina.agent.events.normalizer import BackendEventNormalizer
 from furina.agent.work_ledger import (
     WorkLedger,
     WorkLedgerError,
+    thaw_payload,
 )
 
 __all__ = [
@@ -154,8 +155,18 @@ class RecoveryCoordinator:
                     break
                 consumed += 1
                 event = normalizer.normalize(raw)
+                # Patch 8：16E frozen payload 递归 thaw（MappingProxyType/
+                # tuple → builtin dict/list，有界 fail-closed）+ lossy
+                # 标记严格 bool 传播（绝不丢弃）
+                lossy = getattr(event, "lossy_payload", False)
+                if type(lossy) is not bool:
+                    raise WorkLedgerError(
+                        "NormalizedEvent.lossy_payload 必须是严格 bool")
+                thawed = thaw_payload(event.payload)
+                if type(thawed) is not dict:
+                    raise WorkLedgerError("normalized payload 必须是 dict")
                 self._ledger.record_event(execution_id, event.event_id,
-                                          event.kind, dict(event.payload))
+                                          event.kind, thawed, lossy=lossy)
                 if event.kind in (EventKind.BACKEND_COMPLETED,
                                   EventKind.BACKEND_FAILED,
                                   EventKind.BACKEND_CANCELLED):
@@ -168,7 +179,7 @@ class RecoveryCoordinator:
                         "run_id": rec.run_id,
                         "backend_id": rec.backend_id,
                         "contract_id": rec.contract_id,
-                        "payload": dict(event.payload),
+                        "payload": thawed,
                     }
                     terminal_kind = event.kind
                     break

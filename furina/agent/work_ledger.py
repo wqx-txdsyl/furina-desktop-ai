@@ -25,7 +25,6 @@
 from __future__ import annotations
 
 import enum
-import hashlib
 import json
 import math
 import sqlite3
@@ -63,6 +62,7 @@ __all__ = [
     "WorkEventBuffer",
     "WorkLedger",
     "WorkLedgerError",
+    "thaw_payload",
 ]
 
 _TERMINAL_STATES = frozenset({
@@ -130,9 +130,9 @@ DEFAULT_EVENTS_PER_RUN = 256
 DEFAULT_MAX_GLOBAL_EVENTS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 4096
 
-_SCHEMA_VERSION = "16H.4"
-_KNOWN_USER_VERSIONS = (1, 2, 3, 4)
-_CURRENT_USER_VERSION = 4
+_SCHEMA_VERSION = "16H.5"
+_KNOWN_USER_VERSIONS = (1, 2, 3, 4, 5)
+_CURRENT_USER_VERSION = 5
 
 _CURRENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS work_schema_meta(
@@ -182,7 +182,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_work_attempts_run
 CREATE TABLE IF NOT EXISTS work_events(
     execution_id INTEGER NOT NULL, event_id TEXT NOT NULL,
     kind TEXT NOT NULL, payload_json TEXT NOT NULL,
-    critical INTEGER NOT NULL, received_at REAL NOT NULL,
+    critical INTEGER NOT NULL, lossy INTEGER NOT NULL DEFAULT 0,
+    received_at REAL NOT NULL,
     PRIMARY KEY (execution_id, event_id)
 );
 CREATE TABLE IF NOT EXISTS work_progress(
@@ -206,7 +207,7 @@ _REQUIRED_COLUMNS = {
                         "verification_marker", "verification_verified",
                         "overflow_marker", "approval_id"),
     "work_attempts": ("attempt_id", "execution_id", "run_id", "state"),
-    "work_events": ("execution_id", "event_id"),
+    "work_events": ("execution_id", "event_id", "lossy"),
     "work_progress": ("execution_id", "payload_json"),
     "work_counters": ("name", "value"),
 }
@@ -309,6 +310,39 @@ def _canonical_json(payload: Any, max_bytes: int) -> str:
     return blob
 
 
+def thaw_payload(value: Any, depth: int = 0) -> Any:
+    """Patch 8：16E frozen payload 的递归、有界、确定性 thaw——
+    Mapping/MappingProxyType → builtin dict、tuple → builtin list、
+    标量保持 JSON 原生类型；禁止 repr/str/default=str 兜底；深度/条目/
+    NaN-Inf fail-closed（真实 NormalizedEvent 嵌套 payload 必须可落盘）。"""
+    if depth > 8:
+        raise WorkLedgerError("payload 嵌套超深（>8）")
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise WorkLedgerError("payload 含 NaN/Inf（明确拒绝）")
+        return value
+    if isinstance(value, Mapping):
+        out: Dict[str, Any] = {}
+        for k, v in value.items():
+            if type(k) is not str:
+                raise WorkLedgerError("payload 键必须全为 builtin str")
+            if len(out) >= 64:
+                raise WorkLedgerError("payload 条目数超界（>64）")
+            out[k] = thaw_payload(v, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        out_list: List[Any] = []
+        for item in value:
+            if len(out_list) >= 64:
+                raise WorkLedgerError("payload 条目数超界（>64）")
+            out_list.append(thaw_payload(item, depth + 1))
+        return out_list
+    raise WorkLedgerError(
+        f"payload 值必须是 JSON-native，得到 {type(value).__name__}")
+
+
 def _is_terminal(state: WorkExecutionState) -> bool:
     return state in _TERMINAL_STATES
 
@@ -324,19 +358,6 @@ _TERMINAL_EVIDENCE_KINDS = {
     EventKind.BACKEND_FAILED.value: WorkExecutionState.FAILED,
     EventKind.BACKEND_CANCELLED.value: WorkExecutionState.CANCELLED,
 }
-
-
-def _raw_canonical_digest(evidence: Any) -> str:
-    """sanitize **之前**的原始 canonical evidence digest（精确一致性绑定）：
-    不同 secret payload 经 sanitize 后可能折叠为同一 [REDACTED] blob，
-    raw digest 捕获该分歧；序列化异常统一折为类型化错误。"""
-    try:
-        blob = json.dumps(evidence, sort_keys=True, ensure_ascii=False,
-                          allow_nan=False)
-    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
-        raise WorkLedgerError(
-            f"evidence 无法 canonical 化（{type(exc).__name__}）") from None
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _finite_time(value: Any, field_name: str) -> float:
@@ -458,6 +479,18 @@ class WorkLedger:
                 # v3→v4 / v1→v4 / v2→v4：统一补齐缺失列（含
                 # terminal_evidence_raw_digest）
                 self._add_missing_execution_columns()
+                # Patch 8：work_events 补 lossy 列（v<=4 无该列）
+                ev_cols = self._table_columns(self._conn, "work_events")
+                if "lossy" not in ev_cols:
+                    self._conn.execute(
+                        "ALTER TABLE work_events ADD COLUMN lossy "
+                        "INTEGER NOT NULL DEFAULT 0")
+                # Patch 8：raw-secret 普通摘要方案废弃——v4 遗留
+                # terminal_evidence_raw_digest 值一律清空且此后永不再写入
+                #（列保留为 deprecated 空列，零读取）
+                self._conn.execute(
+                    "UPDATE work_executions SET "
+                    "terminal_evidence_raw_digest=''")
                 self._verify_structure()
                 self._conn.execute(
                     f"PRAGMA user_version = {_CURRENT_USER_VERSION}")
@@ -505,7 +538,8 @@ class WorkLedger:
             "CREATE TABLE work_events("
             "execution_id INTEGER NOT NULL, event_id TEXT NOT NULL,"
             "kind TEXT NOT NULL, payload_json TEXT NOT NULL,"
-            "critical INTEGER NOT NULL, received_at REAL NOT NULL,"
+            "critical INTEGER NOT NULL, lossy INTEGER NOT NULL DEFAULT 0,"
+            "received_at REAL NOT NULL,"
             "PRIMARY KEY (execution_id, event_id))")
         for r in rows:
             self._conn.execute(
@@ -1022,7 +1056,6 @@ class WorkLedger:
                                evidence: Mapping[str, Any], *,
                                expected_version: int) -> int:
         blob = _canonical_json(evidence, self._max_payload_bytes)
-        raw_digest = _raw_canonical_digest(evidence)
         now = self._now()
         with self._lock:
             with self._conn:
@@ -1032,10 +1065,9 @@ class WorkLedger:
                     raise StaleStateVersion("evidence CAS 失败")
                 cur = self._conn.execute(
                     "UPDATE work_executions SET terminal_evidence_json=?, "
-                    "terminal_evidence_raw_digest=?, "
                     "state_version=state_version+1, updated_at=? "
                     "WHERE execution_id=? AND state_version=?",
-                    (blob, raw_digest, now, execution_id, expected_version))
+                    (blob, now, execution_id, expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("evidence CAS rowcount=0")
                 self._attempt_cas_locked(
@@ -1116,15 +1148,10 @@ class WorkLedger:
                     raise WorkLedgerError(
                         "传入 terminal_evidence 与持久化 evidence 不一致"
                         "（canonical 不等，evidence 绑定失败）")
-                # Patch 7：sanitize 前 raw digest 精确绑定——不同 secret
-                # payload 折叠为同一 [REDACTED] blob 的伪造分歧在此被捕获
-                stored_digest = str(row["terminal_evidence_raw_digest"])
-                if not stored_digest \
-                        or stored_digest != _raw_canonical_digest(
-                            terminal_evidence):
-                    raise WorkLedgerError(
-                        "传入 terminal_evidence 与持久化 raw digest 不一致"
-                        "（evidence 绑定失败）")
+                # Patch 8：raw-secret 普通摘要方案已废弃（16E frozen 边界
+                # 绝不保存 raw secret 或其普通未加密摘要）——VERIFIED 依据
+                # sanitized evidence canonical 相等 + authentic outcome +
+                # 单条 bound observation (event_id, kind) 精确配对。
                 # VERIFIED 只能来自 backend.completed（kind/state 严格映射）
                 if terminal_evidence["kind"] \
                         != EventKind.BACKEND_COMPLETED.value:
@@ -1161,18 +1188,17 @@ class WorkLedger:
                             f"冻结身份不一致（evidence 绑定失败）")
                 stored_kind = str(stored_ev_raw.get("kind", ""))
                 stored_event_id = str(stored_ev_raw.get("event_id", ""))
-                if stored_kind:
-                    report_kinds = {t.kind for t in report_term_events}
-                    if stored_kind not in report_kinds:
-                        raise WorkLedgerError(
-                            f"stored terminal kind {stored_kind!r} 不在 "
-                            f"authentic report terminal observations 中")
-                if stored_event_id:
-                    report_event_ids = {t.event_id for t in report_term_events}
-                    if stored_event_id not in report_event_ids:
-                        raise WorkLedgerError(
-                            f"stored event {stored_event_id!r} 不在 report "
-                            f"terminal observations（evidence 绑定失败）")
+                # Patch 8：必须存在**同一条** report terminal observation
+                # 同时匹配 stored event_id 与 kind——两条 observation 各对
+                # 一半的交叉拼接（event_id 取 A、kind 取 B）一律拒绝；
+                # 多义匹配（多条同时命中）同样拒绝。
+                matched = [t for t in report_term_events
+                           if t.event_id == stored_event_id
+                           and t.kind == stored_kind]
+                if len(matched) != 1:
+                    raise WorkLedgerError(
+                        "无唯一 report terminal observation 同时匹配 "
+                        "stored event_id/kind（evidence 绑定失败）")
                 if int(row["state_version"]) != expected_version:
                     raise StaleStateVersion("verify CAS 失败")
                 cur = self._conn.execute(
@@ -1204,7 +1230,6 @@ class WorkLedger:
                 f"recover_terminal 仅接受 BACKEND_DONE_UNVERIFIED/FAILED/"
                 f"CANCELLED，得到 {new_state.value}")
         blob = _canonical_json(terminal_evidence, self._max_payload_bytes)
-        raw_digest = _raw_canonical_digest(terminal_evidence)
         now = self._now()
         with self._lock:
             with self._conn:
@@ -1226,11 +1251,10 @@ class WorkLedger:
                     raise StaleStateVersion("recover CAS 失败")
                 cur = self._conn.execute(
                     "UPDATE work_executions SET terminal_evidence_json=?, "
-                    "terminal_evidence_raw_digest=?, "
                     "state=?, is_active=?, state_version=state_version+1, "
                     "updated_at=? WHERE execution_id=? AND state_version=? "
                     "AND state='UNKNOWN'",
-                    (blob, raw_digest, new_state.value,
+                    (blob, new_state.value,
                      0 if _is_terminal(new_state) else 1,
                      now, execution_id, expected_version))
                 if cur.rowcount != 1:
@@ -1392,14 +1416,20 @@ class WorkLedger:
 
     # -------------------------------------------------- 事件（(execution_id, event_id)）
     def record_event(self, execution_id: int, event_id: str, kind: EventKind,
-                     payload: Optional[Mapping[str, Any]] = None) -> str:
+                     payload: Optional[Mapping[str, Any]] = None, *,
+                     lossy: bool = False) -> str:
         """单事务完成 lookup/容量判断/insert。critical 溢出时 overflow
         marker + 计数 + UNKNOWN 状态同一事务（绝不分离）。droppable progress
-        落独立受控槽 work_progress（不与 event_id 冲突）。"""
+        落独立受控槽 work_progress（不与 event_id 冲突）。
+        Patch 8 lossy 语义：同 (execution_id, event_id)——两侧 non-lossy 且
+        canonical 内容相同 → duplicate；内容不同 → conflict；任一侧 lossy
+        （即使 sanitized 内容相同）→ "ambiguous"（零状态变化）。"""
         if not isinstance(kind, EventKind):
             raise WorkLedgerError("kind 必须是 EventKind")
         if type(event_id) is not str or not event_id or len(event_id) > 128:
             raise WorkLedgerError("event_id 必须是非空短 builtin str")
+        if type(lossy) is not bool:
+            raise WorkLedgerError("lossy 必须是严格 bool")
         blob = _canonical_json(payload, self._max_payload_bytes)
         priority = classify_priority(kind)
         now = self._now()
@@ -1409,7 +1439,7 @@ class WorkLedger:
                 cur_state = str(row["state"])
                 cur_version = int(row["state_version"])
                 dup = self._conn.execute(
-                    "SELECT kind, payload_json FROM work_events "
+                    "SELECT kind, payload_json, lossy FROM work_events "
                     "WHERE execution_id=? AND event_id=?",
                     (execution_id, event_id)).fetchone()
                 if dup is not None:
@@ -1417,6 +1447,8 @@ class WorkLedger:
                             or str(dup["payload_json"]) != blob:
                         raise EventContentConflict(
                             f"event {event_id!r} 同 execution 异内容")
+                    if int(dup["lossy"]) == 1 or lossy:
+                        return "ambiguous"      # 任一侧 lossy → typed ambiguous
                     return "duplicate"
                 per_run = int(self._conn.execute(
                     "SELECT COUNT(*) AS c FROM work_events WHERE execution_id=?",
@@ -1473,9 +1505,11 @@ class WorkLedger:
                     return "dropped"
                 self._conn.execute(
                     "INSERT INTO work_events(execution_id,event_id,kind,"
-                    "payload_json,critical,received_at) VALUES(?,?,?,?,?,?)",
+                    "payload_json,critical,lossy,received_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
                     (execution_id, event_id, kind.value, blob,
-                     1 if priority.value == "critical" else 0, now))
+                     1 if priority.value == "critical" else 0,
+                     1 if lossy else 0, now))
                 return "stored"
 
     def progress_latest(self, execution_id: int) -> Optional[Dict[str, Any]]:

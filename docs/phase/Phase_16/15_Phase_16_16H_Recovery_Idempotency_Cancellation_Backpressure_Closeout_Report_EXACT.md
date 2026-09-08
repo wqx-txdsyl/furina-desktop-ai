@@ -391,3 +391,58 @@ tests/cognition 279 passed；full suite 2010 passed / 0 failed（15 warnings
 furina/agent/work_ledger.py + 2 测试文件 + 本 closeout 增补，16A–16E
 frozen contracts 与 C1–C7 零改动。不合并 integration、不开始 16G、
 不声明 16H_PASS，停在 READY_FOR_REVIEW。
+
+---
+
+## Patch 8（BASE 56607e9，READY_FOR_REVIEW）
+
+Reviewer Patch 7 复核（PATCH_REQUIRED）确立 3 个 blocker，本补丁全量落地；
+schema 升级 **16H.5**（user_version 5，v1/v2/v3/v4→5 全部幂等，future 拒绝）：
+
+1. **raw-secret 普通摘要方案彻底废弃**：terminal_evidence_raw_digest 不再
+   写入、读取或参与 VERIFIED 判定（_raw_canonical_digest 助手删除）；列
+   保留为 deprecated 空列，迁移对所有既有行执行
+   `terminal_evidence_raw_digest=''` 清空（v4 遗留值零残留、之后永不再写）；
+   VERIFIED 依据 = 持久化 sanitized terminal evidence canonical 相等 +
+   authentic 16F outcome + **同一条 bound observation 的 (event_id, kind)
+   精确配对**（绝不经 secret 派生物，遵守 frozen 16E 保守 lossy 语义）。
+2. **16E lossy_payload 保留并传播**：work_events 新增有界严格 bool 的
+   lossy 列（additive，v<=4 经 ALTER 幂等补列，纳入结构完整性检查）；
+   record_event 增加 lossy 严格 bool 参数，同 (execution_id, event_id)
+   语义：两侧 non-lossy 且 canonical 内容相同 → duplicate；内容不同 →
+   conflict（EventContentConflict）；任一侧 lossy（即使 sanitized 内容
+   相同）→ 返回 typed "ambiguous"，零状态变化；lossy 标记持久化，重启后
+   语义仍成立。RecoveryCoordinator 不再丢弃 NormalizedEvent.lossy_payload
+   （getattr + 严格 bool 校验，非 bool → 类型化拒绝）。
+3. **真实 16E frozen payload 接线**：新增 thaw_payload——递归、有界
+   （深度 8 / 条目 64）、确定性 thaw：Mapping/MappingProxyType → builtin
+   dict、tuple → builtin list、标量保持 JSON 原生类型；禁止 repr/str/
+   default=str 兜底，非 JSON-native 类型化拒绝，NaN/Inf fail-closed；
+   RecoveryCoordinator 对 normalized payload 先 thaw 再落盘，terminal
+   evidence payload 同样使用 thawed 值——嵌套 Hermes payload 不再因
+   MappingProxyType 序列化 TypeError 收口成 UNKNOWN。
+4. **单条 observation 配对**（Patch 8 任务书确认方向）：mark_verified_by_
+   outcome 要求恰有一条 report bound terminal observation 同时匹配 stored
+   event_id 与 kind（len(matched)!=1 → 拒绝），消除此前分别建集合交叉
+   命中的隐式多义。
+
+reviewer-locked 测试新增/改造：零 raw secret 及其普通 SHA-256 派生物
+落库否证（含 v4 遗留 digest 清空 + 重开逐值校验）、lossy duplicate/
+ambiguous/conflict 三语义 + 重启持久、lossy 严格 bool、MappingProxyType/
+tuple 递归 thaw + 敌意对象类型化拒绝、嵌套 payload 真实 recovery 端到端
+VERIFIED、单条 observation 配对正/负例；Patch 7 的 kind→state 映射、
+attempt run/backend CAS、stop backend 谓词、RecursionError/OverflowError
+测试全部保留，原 44 项零弱化（secret 分歧测试按任务书改造为零派生物
+否证——raw digest 方案已废除）。
+
+门禁：16H 专项 49 passed / 0 failed / 0 skipped；tests/agent 733 passed；
+tests/cognition 279 passed；full suite 2015 passed / 0 failed（15 warnings
+全部来自非 16H 既有套件）；git diff --check 干净。范围仅
+furina/agent/work_ledger.py + furina/agent/work_coordinator.py +
+2 测试文件 + 本 closeout，16A–16E frozen contracts 与 C1–C7 零改动。
+不合并 integration、不开始 16G、不声明 16H_PASS，停在 READY_FOR_REVIEW。
+回执字段：RAW_SECRET_DIGEST_PERSISTED=false；
+LOSSY_EVENT_SEMANTICS_PRESERVED=true；
+NESTED_NORMALIZED_PAYLOAD_SUPPORTED=true；REPORT_EVENT_PAIR_EXACT=true；
+V4_SECRET_DERIVATIVES_CLEARED=true；C1_C7_UNCHANGED=true；
+LOCAL_REMOTE_MATCH=push 后核验。
