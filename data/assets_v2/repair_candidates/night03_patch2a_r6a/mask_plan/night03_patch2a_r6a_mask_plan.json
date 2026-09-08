@@ -1,0 +1,33 @@
+{
+ "MASK_PLAN_SHA256": "616ce3a6aa45925bf62d1969ad6c7839dc2ed0a11d53b460ef06bc38b19b6a0d",
+ "assets": {
+  "a16": {
+   "master_file": "data/assets_v2/masters/furina_v2_a16_work_focused.png",
+   "master_sha256": "f4997917453d6a541a08d021132ecad3bd8cffb63773833d31bdcde805d099ab",
+   "ownership_labels": {
+    "other": 1259463,
+    "protected_costume": 118721,
+    "protected_glove_gold_cuff": 2264,
+    "protected_hair": 125883,
+    "protected_quill_paper": 4947,
+    "remove_cane": 28103,
+    "remove_chair": 33483
+   }
+  }
+ },
+ "base_sha": "1b402f9ec8ad79620fb78e0f70cf34c03196d083",
+ "inputs": {
+  "BASE": "2f8e10bb17cdc325cf29954bd960e55c90208e84835dddf5b62001a5b922682a",
+  "PATCH1_REVIEW_REPORT": "cb4088eac01ff69cb9fba27a4f960254d6c4a8c9b2ef99da80d7d7af18ca14c2",
+  "_spec/ART_ALPHA_PLAN.md": "8f51692223df9f0a3ba86a413508e3f6c3a1a11bfa1baf1b9160869aee5cad67",
+  "_spec/ART_ALPHA_REVIEW_REPORT.md": "76c7869c5be2f0d4b7ec574612ab6716b79ea1c6ae8a9887599e9210bd5fb09a",
+  "_spec/ASSET_GEOMETRY_AND_ANCHOR_SPEC.md": "0104d217c9349b7228c8a3ae7e2d308ca822c271263f55173f3ff2be0810bd28",
+  "_spec/ASSET_STYLE_LOCK.md": "a7b0bbdbd191531887359fefc2101efa292388db08693690e1c5d3e647fa0843",
+  "_spec/ASSET_TAXONOMY_AND_MANIFEST.md": "be0ef70865029ad617b311488704ff33790789f836263644b4a46a0bd1ece6f4",
+  "_spec/ASSET_TOPOLOGY_MAP.md": "a6de9475db124f44e03b1b828fca870a2b9379032d8a530954ef47051710d3f2",
+  "_spec/FURINA_IDENTITY_LOCK.md": "9b6762dc95f3b1b7b85be4f444ca8482ae665f8261c024382ddc72285cffb6a9",
+  "_spec/MASTER_GENERATION_PROMPT_SPEC.md": "22f16b6292fc022b361cf0e8cf78adbb8cfe0a70396e148d314da7ddc2cf2edb"
+ },
+ "method": "pure geometric region assignment from manually specified coordinates; zero colour tests, zero connected components, zero morphological ops, zero near_prot, zero removal mask references, zero default-to-costume",
+ "task": "NIGHT03_RECOVERY_PATCH2A_R6A_STATIC_OWNERSHIP"
+}
