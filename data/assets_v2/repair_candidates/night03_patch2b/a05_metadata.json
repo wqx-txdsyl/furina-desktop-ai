@@ -1,0 +1,14 @@
+{
+ "allowed_edit_px": 72590,
+ "asset": "a05",
+ "candidate_sha256": "511f268be714f53c4cf10926712c826048388b4ceffb18bdf3350b1ef60f35a5",
+ "changed_px": 72590,
+ "dimensions": [
+  1024,
+  1536
+ ],
+ "frozen_allowed_edit_sha256": "71c5e5119fa9a10053bc1a252080aa95de8bde81da94e074fbc171d66ff8ca15",
+ "master_file": "furina_v2_a05_stand_confident_proud.png",
+ "master_sha256": "8ddcfde186fb352ce32381543273902295ceeb3fd3f3db6b064141fcf5199a77",
+ "unauthorized_diff_px": 0
+}

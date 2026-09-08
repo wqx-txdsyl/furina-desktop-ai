@@ -1,0 +1,14 @@
+{
+ "allowed_edit_px": 49941,
+ "asset": "a01",
+ "candidate_sha256": "cc71e9d3545793c4b071eff273c5cfdcb6f80b4d651c6136c191fff06657ab7f",
+ "changed_px": 49596,
+ "dimensions": [
+  1024,
+  1536
+ ],
+ "frozen_allowed_edit_sha256": "a89353b604a036ae6d31939947694978d9a98d13c45d1a62c7aaf82eed9be61c",
+ "master_file": "furina_v2_a01_stand_neutral_front.png",
+ "master_sha256": "c3ed763c7eed3bfc620e4847e0028e5c6eae83a8170f41a1152915e7885172a6",
+ "unauthorized_diff_px": 0
+}

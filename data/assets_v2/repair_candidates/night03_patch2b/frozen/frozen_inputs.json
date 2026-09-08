@@ -1,0 +1,21 @@
+{
+ "a01:allowed_edit_px": 49941,
+ "a01:mask:authorized_cleanup": "9ca2440fc9bc56024992928f3ced50598e0a36b71d9917e471cc76bfb2477a89",
+ "a01:mask:seam_reconstruction": "dd01dc2541af0c6b32abb18d4e1ad169a06f2b6108a0f84de0f4d320b863f0a9",
+ "a01:mask:tail_destination": "a814d44010be1adeaee864522163bffb3bbe2a7fb087143b54f72c8c8628875d",
+ "a01:mask:tail_source": "ff741143e8bc74ad6a07e195a74b473da09a005935f90d7bc64402e9d5819f68",
+ "a01:master": "c3ed763c7eed3bfc620e4847e0028e5c6eae83a8170f41a1152915e7885172a6",
+ "a05:allowed_edit_px": 72590,
+ "a05:mask:authorized_cleanup": "1bb099b4d75dcab3ad534f42e13d447f171c41aa32e0d12d8e7e10f3875b57ef",
+ "a05:mask:seam_reconstruction": "0807909bd58a9f929118935c505dde213e4d14ca6a4f9460b3cd408c6d1a6517",
+ "a05:mask:tail_destination": "e9b3a950338e4e0c30799e9a7d1e78e31b1bb5496ca4ebd3a52a3f9cf6a06284",
+ "a05:mask:tail_source": "18f3ac33ef606c189f01bd68badc3c99ed4109aad1f63b1c75bc188366d4493a",
+ "a05:master": "8ddcfde186fb352ce32381543273902295ceeb3fd3f3db6b064141fcf5199a77",
+ "a16:allowed_edit_px": 78097,
+ "a16:mask:hand_reconstruction": "a7a7d90a7b39715b6429ceebf2627111289853e0a997be536218a344c4f29ab5",
+ "a16:mask:seam_reconstruction": "c065566f0d441db863bf40433fd708342314eaf60f205b33d681477f807eca99",
+ "a16:mask:speck_cleanup": "ad13bc1bb055167f9cfa6b0e8ec8ae46bfdc7240891bea9247a54d9a56b56d6a",
+ "a16:mask:tail_destination": "519f8ec98c3acfb37a1ac065bd293698ede6b80852b38cf46d62628ab3c33e9f",
+ "a16:mask:tail_source": "0f1d636117ad9780b8ea5e1a5e84ba17a427d15a0c14cf7802fd689077f86bea",
+ "a16:master": "f4997917453d6a541a08d021132ecad3bd8cffb63773833d31bdcde805d099ab"
+}
