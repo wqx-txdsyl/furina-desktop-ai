@@ -14,7 +14,9 @@
 - coordinator evidence 全身份绑定（builder 忽略 evidence → fail-closed）。
 """
 import json
+import pathlib
 import sqlite3
+import tempfile
 
 import pytest
 
@@ -28,6 +30,7 @@ from furina.agent.work_coordinator import (
 )
 from furina.agent.work_ledger import (
     CorruptionError,
+    IllegalTransition,
     CriticalBufferOverflow,
     EventBufferOutcome,
     StaleStateVersion,
@@ -289,7 +292,7 @@ CREATE TABLE work_counters(name TEXT PRIMARY KEY,
     conn.close()
     assert len(pre["contract"][1]) == 64
     led = WorkLedger(db)
-    assert led.user_version() == 3
+    assert led.user_version() == 4
     # contract 逐值
     row = led._conn.execute(
         "SELECT contract_id, contract_hash, transport_json, "
@@ -321,7 +324,7 @@ CREATE TABLE work_counters(name TEXT PRIMARY KEY,
     led.close()
     # 二次 reopen 幂等 + 数据仍逐值一致
     led2 = WorkLedger(db)
-    assert led2.user_version() == 3
+    assert led2.user_version() == 4
     rec2 = led2.get_execution(1)
     assert (rec2.contract_id, rec2.contract_hash, rec2.attempt_id,
             rec2.run_id, rec2.state.value, rec2.state_version) == (
@@ -573,3 +576,102 @@ def test_terminal_evidence_exact_six_key_schema(ledger, tmp_path):
     # 正确六键接受
     assert ledger.mark_terminal_evidence(eid, base,
                                          expected_version=v) == v + 1
+
+
+# ================================================================
+# Patch 7 reviewer-locked —— raw digest 绑定 / kind 白名单+映射 /
+# attempt run-backend 谓词 / 序列化异常类型化
+# ================================================================
+
+def test_secret_payload_divergence_rejected(ledger, tmp_path):
+    """Reviewer 否证：不同 secret payload sanitize 后折叠为同一
+    [REDACTED] blob——raw digest 绑定使伪造分歧不得 VERIFIED。"""
+    c = _contract(tmp_path, "wc_sec_0001")
+    v = IndependentVerifier(c)
+    ledger.register_contract(c)
+    eid = ledger.submit_intent(c, "att_sec_0001")
+    v1 = ledger.bind_run(eid, "run_sec_0001", "native_agent",
+                         expected_version=1)
+    ev_a = {"event_id": "lev_1756000000001_0000ff",
+            "kind": "backend.completed", "run_id": "run_sec_0001",
+            "backend_id": "native_agent", "contract_id": c.contract_id,
+            "payload": {"exit": 0, "token": "aaaa1111bbbb2222"}}
+    v1 = ledger.mark_terminal_evidence(eid, ev_a, expected_version=v1)
+    v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+                           expected_version=v1)
+    rep, outcome = _verified_outcome_for(c, v, "run_sec_0001")
+    # 同六键、sanitize 后 blob 相同（token 均折叠为 [REDACTED]）但 raw 不同
+    ev_forged = dict(ev_a)
+    ev_forged["payload"] = {"exit": 0, "token": "cccc3333dddd4444"}
+    with pytest.raises(WorkLedgerError):
+        ledger.mark_verified_by_outcome(eid, v, outcome,
+                                        expected_version=v1,
+                                        terminal_evidence=ev_forged)
+    assert ledger.get_execution(eid).state is         WorkExecutionState.BACKEND_DONE_UNVERIFIED
+
+
+def test_terminal_kind_whitelist_and_state_mapping(ledger, tmp_path):
+    """Reviewer 否证：tool.progress 不得充当 terminal evidence；
+    completed 不得收口为 FAILED（kind→state 严格映射）。"""
+    c = _contract(tmp_path, "wc_knd_0001")
+    ledger.register_contract(c)
+    eid = ledger.submit_intent(c, "att_knd_0001")
+    v = ledger.bind_run(eid, "run_knd_0001", "native_agent",
+                        expected_version=1)
+    v = ledger.begin_reconciliation(eid, expected_version=v)   # UNKNOWN
+    prog = {"event_id": "ev_knd_0001", "kind": "tool.progress",
+            "run_id": "run_knd_0001", "backend_id": "native_agent",
+            "contract_id": c.contract_id, "payload": {"pct": 50}}
+    with pytest.raises(WorkLedgerError):
+        ledger.mark_terminal_evidence(eid, prog, expected_version=v)
+    ok = {"event_id": "ev_knd_0002", "kind": "backend.completed",
+          "run_id": "run_knd_0001", "backend_id": "native_agent",
+          "contract_id": c.contract_id, "payload": {"exit": 0}}
+    v = ledger.mark_terminal_evidence(eid, ok, expected_version=v)
+    with pytest.raises(IllegalTransition):
+        ledger.recover_terminal(eid, ok, WorkExecutionState.FAILED,
+                                expected_version=v)
+    assert ledger.get_execution(eid).state is WorkExecutionState.UNKNOWN
+
+
+def test_attempt_run_backend_tamper_rejected(ledger, tmp_path):
+    """Reviewer 否证：attempt 行 run_id/backend_id 被外部篡改 → 后续
+    mutation CorruptionError 零部分写入。"""
+    c = _contract(tmp_path, "wc_tam_0001")
+    ledger.register_contract(c)
+    eid = ledger.submit_intent(c, "att_tam_0001")
+    v = ledger.bind_run(eid, "run_tam_0001", "native_agent",
+                        expected_version=1)
+    conn = sqlite3.connect(ledger._path)
+    conn.execute("UPDATE work_attempts SET backend_id='evil_backend' "
+                 "WHERE attempt_id=?", ("att_tam_0001",))
+    conn.commit()
+    conn.close()
+    with pytest.raises(CorruptionError):
+        ledger.mark_terminal_evidence(
+            eid, {"event_id": "ev_tam_0001", "kind": "backend.completed",
+                  "run_id": "run_tam_0001", "backend_id": "native_agent",
+                  "contract_id": c.contract_id, "payload": {}},
+            expected_version=v)
+    rec = ledger.get_execution(eid)
+    assert rec.terminal_evidence == {}       # 零部分写入
+
+
+def test_deep_nesting_typed_error():
+    """Reviewer 否证：10000 层 JSON 不泄漏原生 RecursionError。"""
+    buf = WorkEventBuffer()
+    deep = cur = {}
+    for _ in range(10000):
+        cur["n"] = {}
+        cur = cur["n"]
+    with pytest.raises(WorkLedgerError):
+        buf.offer("run_deep", "deep_0001", EventKind.TOOL_PROGRESS, deep)
+    c = _contract(pathlib.Path(tempfile.mkdtemp()), "wc_deep_0001")
+    led = WorkLedger(c.workspace_scope.write_roots[0] + "/wl_deep.db")
+    try:
+        led.register_contract(c)
+        eid = led.submit_intent(c, "att_deep_0001")
+        with pytest.raises(WorkLedgerError):
+            led.record_event(eid, "ev_deep", EventKind.TOOL_PROGRESS, deep)
+    finally:
+        led.close()

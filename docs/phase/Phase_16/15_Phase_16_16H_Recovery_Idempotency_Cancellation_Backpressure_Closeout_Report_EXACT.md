@@ -347,3 +347,47 @@ tests/cognition 279 passed；full suite 2006 passed / 0 failed（15 warnings
 furina/agent/work_ledger.py + 2 测试文件 + 本 closeout 增补（work_coordinator.py
 本轮零改动），16A–16E frozen contracts 与 C1–C7 零改动。不合并
 integration、不开始 16G、不声明 16H_PASS，停在 READY_FOR_REVIEW。
+
+---
+
+## Patch 7（BASE c95594e，READY_FOR_REVIEW）
+
+Reviewer Patch 6 复核（PHASE16_16H_PATCH6_PATCH_REQUIRED，TARGETED_TESTS
+40 passed 独立复现）以一次性探针确立 5 个新 blocker，本补丁全量落地：
+
+1. **raw canonical evidence digest 绑定（secret 分歧否证闭环）**：schema
+   升级 16H.4（user_version 4，additive：work_executions 新增
+   terminal_evidence_raw_digest 列，v1/v2/v3 全部经
+   _add_missing_execution_columns 幂等补列）；mark_terminal_evidence/
+   recover_terminal 写入时持久化 sanitize **之前**的原始 canonical
+   evidence SHA-256 digest；mark_verified_by_outcome 重算传入 evidence
+   raw digest 与持久化值精确比较——不同 secret payload 经 sanitize 折叠
+   为同一 [REDACTED] blob 的伪造分歧在此被捕获，绝不 VERIFIED；持久化
+   payload 保持脱敏（audit 性质如实声明）。
+2. **terminal kind 封闭白名单 + kind→state 严格映射**：_TERMINAL_EVIDENCE_
+   KINDS 仅接受 backend.completed→BACKEND_DONE_UNVERIFIED、backend.
+   failed→FAILED、backend.cancelled→CANCELLED；tool.progress 等非终态
+   kind 在写入即拒；recover_terminal 的 new_state 必须与 evidence kind
+   映射精确一致（completed 冒充 FAILED 收口路径封闭）；
+   mark_verified_by_outcome 仅接受 backend.completed evidence。
+3. **attempt CAS 补齐冻结 run_id/backend_id 谓词**：_attempt_cas_locked
+   UPDATE WHERE 追加 run_id=? AND backend_id=?（取 execution 行冻结值），
+   attempt 行身份列被外部篡改后任何 mutation CorruptionError 零部分写入。
+4. **stop claim WHERE 补 backend_id**：dispatch_stop_once 的 UPDATE
+   WHERE 追加 backend_id=?（与冻结绑定一致），跨 backend 抢占 claim 的
+   SQL 通道封闭。
+5. **RecursionError/OverflowError 类型化**：_canonical_json 与
+   WorkEventBuffer raw 预检的序列化异常面统一捕获 RecursionError/
+   OverflowError 折为 WorkLedgerError——10000 层深 JSON 绝不泄漏原生
+   异常；_raw_canonical_digest 同规则。
+
+新增 reviewer-locked 测试 4 项（secret payload 分歧否证、kind 白名单+
+映射否证、attempt run/backend 篡改否证+零部分写入、10000 层深 JSON 双路径
+类型化），原 40 项全保留（迁移断言适配 user_version 4，语义不变）。
+
+门禁：16H 专项 44 passed / 0 failed / 0 skipped；tests/agent 728 passed；
+tests/cognition 279 passed；full suite 2010 passed / 0 failed（15 warnings
+全部来自非 16H 既有套件）；git diff --check 干净。范围仅
+furina/agent/work_ledger.py + 2 测试文件 + 本 closeout 增补，16A–16E
+frozen contracts 与 C1–C7 零改动。不合并 integration、不开始 16G、
+不声明 16H_PASS，停在 READY_FOR_REVIEW。

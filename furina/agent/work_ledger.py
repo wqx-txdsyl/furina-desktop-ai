@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import math
 import sqlite3
@@ -129,9 +130,9 @@ DEFAULT_EVENTS_PER_RUN = 256
 DEFAULT_MAX_GLOBAL_EVENTS = 4096
 DEFAULT_MAX_PAYLOAD_BYTES = 4096
 
-_SCHEMA_VERSION = "16H.3"
-_KNOWN_USER_VERSIONS = (1, 2, 3)
-_CURRENT_USER_VERSION = 3
+_SCHEMA_VERSION = "16H.4"
+_KNOWN_USER_VERSIONS = (1, 2, 3, 4)
+_CURRENT_USER_VERSION = 4
 
 _CURRENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS work_schema_meta(
@@ -158,6 +159,7 @@ CREATE TABLE IF NOT EXISTS work_executions(
     submit_intent_at REAL NOT NULL DEFAULT 0,
     run_bound_at REAL NOT NULL DEFAULT 0,
     terminal_evidence_json TEXT NOT NULL DEFAULT '',
+    terminal_evidence_raw_digest TEXT NOT NULL DEFAULT '',
     verification_marker TEXT NOT NULL DEFAULT '',
     verification_verified INTEGER NOT NULL DEFAULT 0,
     overflow_marker TEXT NOT NULL DEFAULT '',
@@ -290,7 +292,7 @@ def _canonical_json(payload: Any, max_bytes: int) -> str:
     try:
         raw_len = len(json.dumps(payload, ensure_ascii=False,
                                  allow_nan=False).encode("utf-8"))
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
         raise WorkLedgerError(
             f"payload 无法序列化（{type(exc).__name__}）") from None
     if raw_len > max_bytes:
@@ -314,6 +316,27 @@ def _is_terminal(state: WorkExecutionState) -> bool:
 # Patch 6：terminal evidence exact 六键 schema（写入与验证双重执行）
 _TERMINAL_EVIDENCE_KEYS = frozenset({
     "event_id", "kind", "run_id", "backend_id", "contract_id", "payload"})
+
+# Patch 7：terminal kind 封闭白名单 + kind→state 严格映射（tool.progress 等
+# 非终态 kind 绝不能充当 terminal evidence；kind 与目标状态强绑定）
+_TERMINAL_EVIDENCE_KINDS = {
+    EventKind.BACKEND_COMPLETED.value: WorkExecutionState.BACKEND_DONE_UNVERIFIED,
+    EventKind.BACKEND_FAILED.value: WorkExecutionState.FAILED,
+    EventKind.BACKEND_CANCELLED.value: WorkExecutionState.CANCELLED,
+}
+
+
+def _raw_canonical_digest(evidence: Any) -> str:
+    """sanitize **之前**的原始 canonical evidence digest（精确一致性绑定）：
+    不同 secret payload 经 sanitize 后可能折叠为同一 [REDACTED] blob，
+    raw digest 捕获该分歧；序列化异常统一折为类型化错误。"""
+    try:
+        blob = json.dumps(evidence, sort_keys=True, ensure_ascii=False,
+                          allow_nan=False)
+    except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+        raise WorkLedgerError(
+            f"evidence 无法 canonical 化（{type(exc).__name__}）") from None
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _finite_time(value: Any, field_name: str) -> float:
@@ -432,6 +455,9 @@ class WorkLedger:
                     self._migrate_v1_to_v3()
                 elif version == 2:
                     self._migrate_v2_to_v3()
+                # v3→v4 / v1→v4 / v2→v4：统一补齐缺失列（含
+                # terminal_evidence_raw_digest）
+                self._add_missing_execution_columns()
                 self._verify_structure()
                 self._conn.execute(
                     f"PRAGMA user_version = {_CURRENT_USER_VERSION}")
@@ -550,7 +576,9 @@ class WorkLedger:
                 ("approval_id", "TEXT NOT NULL DEFAULT ''"),
                 ("verification_verified", "INTEGER NOT NULL DEFAULT 0"),
                 ("overflow_marker", "TEXT NOT NULL DEFAULT ''"),
-                ("truth_commit_digest", "TEXT NOT NULL DEFAULT ''")):
+                ("truth_commit_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("terminal_evidence_raw_digest",
+                 "TEXT NOT NULL DEFAULT ''")):
             if col not in cols:
                 self._conn.execute(
                     f"ALTER TABLE work_executions ADD COLUMN {col} {decl}")
@@ -840,6 +868,10 @@ class WorkLedger:
                     f"terminal evidence {f} 必须是非空短 builtin str")
         if type(evidence["payload"]) is not dict:
             raise WorkLedgerError("terminal evidence payload 必须是 dict")
+        if evidence["kind"] not in _TERMINAL_EVIDENCE_KINDS:
+            raise WorkLedgerError(
+                "terminal evidence kind 必须是 backend.completed/"
+                "backend.failed/backend.cancelled（非终态 kind 拒绝）")
         bound_run = str(row["run_id"])
         if not bound_run or evidence["run_id"] != bound_run:
             raise WorkLedgerError(
@@ -863,11 +895,12 @@ class WorkLedger:
                "state_version+1"
                + (", " + extra_assigns if extra_assigns else "")
                + ", updated_at=? WHERE attempt_id=? AND execution_id=? "
-               "AND contract_id=? AND contract_hash=? AND state=? "
-               "AND state_version=?")
+               "AND contract_id=? AND contract_hash=? AND run_id=? "
+               "AND backend_id=? AND state=? AND state_version=?")
         params = (new_state, *extra_params, now, str(row["attempt_id"]),
                   int(row["execution_id"]), str(row["contract_id"]),
-                  str(row["contract_hash"]), old_state, old_version)
+                  str(row["contract_hash"]), str(row["run_id"]),
+                  str(row["backend_id"]), old_state, old_version)
         cur = conn.execute(sql, params)
         if cur.rowcount != 1:
             raise CorruptionError(
@@ -989,6 +1022,7 @@ class WorkLedger:
                                evidence: Mapping[str, Any], *,
                                expected_version: int) -> int:
         blob = _canonical_json(evidence, self._max_payload_bytes)
+        raw_digest = _raw_canonical_digest(evidence)
         now = self._now()
         with self._lock:
             with self._conn:
@@ -998,9 +1032,10 @@ class WorkLedger:
                     raise StaleStateVersion("evidence CAS 失败")
                 cur = self._conn.execute(
                     "UPDATE work_executions SET terminal_evidence_json=?, "
+                    "terminal_evidence_raw_digest=?, "
                     "state_version=state_version+1, updated_at=? "
                     "WHERE execution_id=? AND state_version=?",
-                    (blob, now, execution_id, expected_version))
+                    (blob, raw_digest, now, execution_id, expected_version))
                 if cur.rowcount != 1:
                     raise StaleStateVersion("evidence CAS rowcount=0")
                 self._attempt_cas_locked(
@@ -1081,6 +1116,21 @@ class WorkLedger:
                     raise WorkLedgerError(
                         "传入 terminal_evidence 与持久化 evidence 不一致"
                         "（canonical 不等，evidence 绑定失败）")
+                # Patch 7：sanitize 前 raw digest 精确绑定——不同 secret
+                # payload 折叠为同一 [REDACTED] blob 的伪造分歧在此被捕获
+                stored_digest = str(row["terminal_evidence_raw_digest"])
+                if not stored_digest \
+                        or stored_digest != _raw_canonical_digest(
+                            terminal_evidence):
+                    raise WorkLedgerError(
+                        "传入 terminal_evidence 与持久化 raw digest 不一致"
+                        "（evidence 绑定失败）")
+                # VERIFIED 只能来自 backend.completed（kind/state 严格映射）
+                if terminal_evidence["kind"] \
+                        != EventKind.BACKEND_COMPLETED.value:
+                    raise WorkLedgerError(
+                        "VERIFIED 仅接受 backend.completed terminal "
+                        "evidence")
                 # P13-R2/B2：从 authentic report 的 EvidenceBundle 提取
                 # terminal observation 并与 ledger persisted evidence 的
                 # event_id 精确匹配（不能只验证调用方传入的 evidence）。
@@ -1154,11 +1204,19 @@ class WorkLedger:
                 f"recover_terminal 仅接受 BACKEND_DONE_UNVERIFIED/FAILED/"
                 f"CANCELLED，得到 {new_state.value}")
         blob = _canonical_json(terminal_evidence, self._max_payload_bytes)
+        raw_digest = _raw_canonical_digest(terminal_evidence)
         now = self._now()
         with self._lock:
             with self._conn:
                 row = self._execution_row(self._conn, execution_id)
                 self._validate_terminal_evidence(terminal_evidence, row)
+                # Patch 7：kind→目标状态严格映射（completed→BACKEND_DONE_
+                # UNVERIFIED、failed→FAILED、cancelled→CANCELLED），错配拒绝
+                if _TERMINAL_EVIDENCE_KINDS[
+                        terminal_evidence["kind"]] is not new_state:
+                    raise IllegalTransition(
+                        "terminal evidence kind 与目标状态不匹配"
+                        "（严格映射拒绝）")
                 current = WorkExecutionState(str(row["state"]))
                 if current is not WorkExecutionState.UNKNOWN:
                     raise IllegalTransition(
@@ -1168,10 +1226,11 @@ class WorkLedger:
                     raise StaleStateVersion("recover CAS 失败")
                 cur = self._conn.execute(
                     "UPDATE work_executions SET terminal_evidence_json=?, "
+                    "terminal_evidence_raw_digest=?, "
                     "state=?, is_active=?, state_version=state_version+1, "
                     "updated_at=? WHERE execution_id=? AND state_version=? "
                     "AND state='UNKNOWN'",
-                    (blob, new_state.value,
+                    (blob, raw_digest, new_state.value,
                      0 if _is_terminal(new_state) else 1,
                      now, execution_id, expected_version))
                 if cur.rowcount != 1:
@@ -1264,9 +1323,10 @@ class WorkLedger:
                     "UPDATE work_executions SET stop_dispatched=1, "
                     "state_version=state_version+1, updated_at=? "
                     "WHERE execution_id=? AND state_version=? AND run_id=? "
-                    "AND stop_dispatched=0 AND state=? AND cancel_intent=1",
+                    "AND backend_id=? AND stop_dispatched=0 AND state=? "
+                    "AND cancel_intent=1",
                     (now, execution_id, expected_version, bound_run,
-                     current))
+                     bound_backend, current))
                 if cur.rowcount != 1:
                     return False        # CAS rowcount=0
                 self._attempt_cas_locked(
@@ -1594,7 +1654,7 @@ class WorkEventBuffer:
         try:
             raw_len = len(json.dumps(payload, ensure_ascii=False,
                                      allow_nan=False).encode("utf-8"))
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
             raise WorkLedgerError(
                 f"payload 无法序列化（{type(exc).__name__}）") from None
         if raw_len > self._RAW_PRECHECK_BYTES:
