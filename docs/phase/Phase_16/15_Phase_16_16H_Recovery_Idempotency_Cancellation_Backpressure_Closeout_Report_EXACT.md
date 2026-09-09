@@ -446,3 +446,55 @@ LOSSY_EVENT_SEMANTICS_PRESERVED=true；
 NESTED_NORMALIZED_PAYLOAD_SUPPORTED=true；REPORT_EVENT_PAIR_EXACT=true；
 V4_SECRET_DERIVATIVES_CLEARED=true；C1_C7_UNCHANGED=true；
 LOCAL_REMOTE_MATCH=push 后核验。
+
+---
+
+## Patch 9（BASE 7420fa4，READY_FOR_REVIEW）
+
+Reviewer Patch 8 复核（PATCH_REQUIRED，7分17秒独立审计）确立 2 P0 + 4 项
+收口要求，本补丁全量落地：
+
+1. **移除调用方重提交 terminal evidence 的验证路径**：
+   mark_verified_by_outcome 删除 terminal_evidence 参数（旧参数调用 →
+   TypeError）；VERIFIED 唯一依据 = 当前事务内读取的
+   work_executions.terminal_evidence_json（builtin dict、六键 exact schema、
+   contract/run/backend 冻结身份、kind=backend.completed）+ authentic 16F
+   outcome 恰有一条 bound observation 同时匹配 event_id+kind；持久化
+   evidence 身份/六键/JSON 被破坏 → CorruptionError/WorkLedgerError
+   fail-closed 绝不 VERIFIED；不得重新引入 raw secret hash/普通 SHA-256/
+   HMAC/原文存储。
+2. **RecoveryCoordinator 消费封闭 typed outcome**：新增
+   EventWriteOutcome 枚举（STORED/DUPLICATE/AMBIGUOUS/DROPPED，禁止自由
+   字符串比较）；record_event 全部返回枚举；coordinator——STORED 继续、
+   DUPLICATE（仅双方 non-lossy 精确重投）继续、AMBIGUOUS 立即返回 typed
+   unknown_ambiguous_event（状态保持 UNKNOWN，不调用 recover_terminal/
+   submission_builder/IndependentVerifier、不写验证 marker）、
+   EventContentConflict 收口为 typed unknown_event_conflict、DROPPED
+   fail-closed UNKNOWN。重启端到端否证：lossy 首次 + non-lossy 重放与
+   non-lossy 首次 + lossy 重放两种顺序均停 UNKNOWN，
+   recover_terminal/verifier 调用计数为 0。
+3. **lossy durable contract 完整封闭**：events_of 读取并导出 lossy: bool；
+   duplicate lookup 与 events_of 读取 lossy 只接受 exact SQLite integer
+   0/1（2/-1/"x"/NULL → CorruptionError，禁止 int()/bool() 静默强转）；
+   损坏读取零状态变化；重启后 events_of 仍可观察原始 lossy 标记。
+4. **真实迁移矩阵**：新增真实 v3/v4 schema fixture（对应版本实际表结构 +
+   真实 PRAGMA user_version）→ 16H.5；v4 fixture 写入 Patch 7 真实旧算法
+   digest = SHA-256(canonical unsanitized full terminal evidence JSON)，
+   迁移后逻辑值空、reopen 仍空、DB 字节面不含该 digest 与秘密派生物；
+   contract/execution/attempt/event/counter 其余字段逐值保留；v2 真实
+   fixture 补迁移断言；future schema 继续拒绝。
+5. **thaw_payload exact 类型封闭**：只接受 exact builtin dict/list/tuple、
+   exact types.MappingProxyType 与 JSON builtin scalar；任意
+   Mapping/list/tuple 子类在调用 keys/items/len/iter/getitem/str/repr/bool
+   之前即类型化拒绝（敌意子类魔术方法调用计数为 0）。
+6. **回归**：Patch 7 的 kind→state 白名单、attempt run/backend CAS、
+   stop backend_id 谓词、RecursionError/OverflowError 类型化、单条
+   observation 配对、嵌套 NormalizedEvent 恢复（断言收紧为精确
+   VERIFIED，移除弱 "or"）全部保留。
+
+门禁：16H 专项 61 passed / 0 failed / 0 skipped；tests/agent 745 passed；
+tests/cognition 279 passed；full suite 2027 passed / 0 failed（15 warnings
+全部来自非 16H 既有套件）；git diff --check 干净。范围仅
+furina/agent/work_ledger.py + furina/agent/work_coordinator.py +
+3 测试文件 + 本 closeout，16A–16E frozen contracts 与 C1–C7 零改动。
+不合并 integration、不开始 16G、不声明 16H_PASS，停在 READY_FOR_REVIEW。

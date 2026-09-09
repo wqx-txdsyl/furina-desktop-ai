@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import enum
 import json
+import types
 import math
 import sqlite3
 import threading
@@ -51,6 +52,7 @@ __all__ = [
     "CriticalBufferOverflow",
     "DuplicateActiveExecution",
     "EventBufferOutcome",
+    "EventWriteOutcome",
     "EventContentConflict",
     "ExecutionRecord",
     "IllegalTransition",
@@ -213,6 +215,15 @@ _REQUIRED_COLUMNS = {
 }
 
 
+class EventWriteOutcome(enum.Enum):
+    """record_event 封闭 typed outcome（禁止自由字符串比较）。"""
+
+    STORED = "stored"
+    DUPLICATE = "duplicate"
+    AMBIGUOUS = "ambiguous"
+    DROPPED = "dropped"
+
+
 class WorkLedgerError(FurinaError):
     """16H 工作域 ledger 统一异常基类。"""
 
@@ -311,10 +322,13 @@ def _canonical_json(payload: Any, max_bytes: int) -> str:
 
 
 def thaw_payload(value: Any, depth: int = 0) -> Any:
-    """Patch 8：16E frozen payload 的递归、有界、确定性 thaw——
-    Mapping/MappingProxyType → builtin dict、tuple → builtin list、
-    标量保持 JSON 原生类型；禁止 repr/str/default=str 兜底；深度/条目/
-    NaN-Inf fail-closed（真实 NormalizedEvent 嵌套 payload 必须可落盘）。"""
+    """Patch 8/9：16E frozen payload 的递归、有界、确定性 thaw——
+    **只接受 exact builtin dict/list/tuple、exact types.MappingProxyType
+    与 JSON builtin scalar**；任意 Mapping/list/tuple 子类在调用
+    keys/items/len/iter/getitem/str/repr/bool 之前即类型化拒绝
+    （子类魔术方法零调用）。MappingProxyType → dict、tuple → list、
+    标量保持 JSON 原生；禁止 repr/str/default=str 兜底；深度/条目/
+    NaN-Inf fail-closed。"""
     if depth > 8:
         raise WorkLedgerError("payload 嵌套超深（>8）")
     if value is None or type(value) in (bool, int, str):
@@ -323,7 +337,7 @@ def thaw_payload(value: Any, depth: int = 0) -> Any:
         if not math.isfinite(value):
             raise WorkLedgerError("payload 含 NaN/Inf（明确拒绝）")
         return value
-    if isinstance(value, Mapping):
+    if type(value) in (dict, types.MappingProxyType):
         out: Dict[str, Any] = {}
         for k, v in value.items():
             if type(k) is not str:
@@ -332,7 +346,7 @@ def thaw_payload(value: Any, depth: int = 0) -> Any:
                 raise WorkLedgerError("payload 条目数超界（>64）")
             out[k] = thaw_payload(v, depth + 1)
         return out
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         out_list: List[Any] = []
         for item in value:
             if len(out_list) >= 64:
@@ -883,6 +897,15 @@ class WorkLedger:
                     ) from None
                 return eid
 
+    @staticmethod
+    def _strict_sqlite_bool(value: Any, field_name: str) -> bool:
+        """SQLite 布尔列只接受 exact integer 0/1（禁止 int()/bool() 静默
+        强转；2/-1/"x"/None 等损坏值 → CorruptionError）。"""
+        if type(value) is not int or value not in (0, 1):
+            raise CorruptionError(
+                f"{field_name} 持久化值损坏（只接受 integer 0/1）")
+        return bool(value)
+
     # -------------------------------------------------- attempt 统一 CAS
     @staticmethod
     def _validate_terminal_evidence(evidence: Any,
@@ -1077,9 +1100,7 @@ class WorkLedger:
                 return expected_version + 1
 
     def mark_verified_by_outcome(self, execution_id: int, verifier, outcome,
-                                 *, expected_version: int,
-                                 terminal_evidence: Optional[Mapping[str, Any]] = None
-                                 ) -> int:
+                                 *, expected_version: int) -> int:
         """VERIFIED 唯一入口（P13-R2 前置强化）：run 已绑定非空、状态属于
         合法验证前驱（BACKEND_DONE_UNVERIFIED 或 recovery-UNKNOWN）、持久化
         terminal evidence 非空且与传入 evidence 精确绑定、execution+attempt
@@ -1134,27 +1155,22 @@ class WorkLedger:
                 if not evidence_blob:
                     raise WorkLedgerError(
                         "无持久化 terminal evidence 不得 VERIFIED")
-                # Patch 6：传入 terminal_evidence 必须与持久化 evidence
-                # canonical 相等（六键 schema + 冻结身份三重校验）——
-                # 绝不允许调用时传完全不同的 evidence 仍进入 VERIFIED。
-                if terminal_evidence is None:
-                    raise WorkLedgerError(
-                        "mark_verified_by_outcome 必须传入与持久化一致的 "
-                        "terminal_evidence")
-                self._validate_terminal_evidence(terminal_evidence, row)
-                passed_blob = _canonical_json(terminal_evidence,
-                                              self._max_payload_bytes)
-                if passed_blob != evidence_blob:
-                    raise WorkLedgerError(
-                        "传入 terminal_evidence 与持久化 evidence 不一致"
-                        "（canonical 不等，evidence 绑定失败）")
-                # Patch 8：raw-secret 普通摘要方案已废弃（16E frozen 边界
-                # 绝不保存 raw secret 或其普通未加密摘要）——VERIFIED 依据
-                # sanitized evidence canonical 相等 + authentic outcome +
-                # 单条 bound observation (event_id, kind) 精确配对。
-                # VERIFIED 只能来自 backend.completed（kind/state 严格映射）
-                if terminal_evidence["kind"] \
-                        != EventKind.BACKEND_COMPLETED.value:
+                # Patch 9：**删除 terminal_evidence 自报参数**——VERIFIED
+                # 唯一依据是 ledger 持久化的 sanitized terminal evidence +
+                # authentic 16F outcome + 同一条 bound observation 的
+                # (event_id, kind) 精确配对；调用方无从注入/重提 evidence，
+                # 两个不同原始秘密值折叠为同一脱敏内容的伪造分歧通道关闭。
+                try:
+                    persisted_ev = json.loads(evidence_blob)
+                except Exception:
+                    raise CorruptionError(
+                        "持久化 terminal evidence JSON 损坏（fail-closed）"
+                    ) from None
+                if type(persisted_ev) is not dict:
+                    raise CorruptionError(
+                        "持久化 terminal evidence 必须是 builtin object")
+                self._validate_terminal_evidence(persisted_ev, row)
+                if persisted_ev["kind"]                         != EventKind.BACKEND_COMPLETED.value:
                     raise WorkLedgerError(
                         "VERIFIED 仅接受 backend.completed terminal "
                         "evidence")
@@ -1443,13 +1459,17 @@ class WorkLedger:
                     "WHERE execution_id=? AND event_id=?",
                     (execution_id, event_id)).fetchone()
                 if dup is not None:
-                    if str(dup["kind"]) != kind.value \
-                            or str(dup["payload_json"]) != blob:
+                    same_content = (str(dup["kind"]) == kind.value
+                                    and str(dup["payload_json"]) == blob)
+                    if not same_content:
                         raise EventContentConflict(
                             f"event {event_id!r} 同 execution 异内容")
-                    if int(dup["lossy"]) == 1 or lossy:
-                        return "ambiguous"      # 任一侧 lossy → typed ambiguous
-                    return "duplicate"
+                    # Patch 9：lossy 只接受 SQLite integer 0/1（禁止
+                    # int()/bool() 静默强转；2/-1/"x"/NULL → CorruptionError）
+                    dup_lossy = self._strict_sqlite_bool(dup["lossy"], "lossy")
+                    if dup_lossy or lossy:
+                        return EventWriteOutcome.AMBIGUOUS
+                    return EventWriteOutcome.DUPLICATE
                 per_run = int(self._conn.execute(
                     "SELECT COUNT(*) AS c FROM work_events WHERE execution_id=?",
                     (execution_id,)).fetchone()["c"])
@@ -1499,10 +1519,10 @@ class WorkLedger:
                         (execution_id, blob, now))
                     self._incr_counter_locked(self._conn, "progress_dropped", 1)
                     self._incr_counter_locked(self._conn, "progress_upserts", 1)
-                    return "dropped"
+                    return EventWriteOutcome.DROPPED
                 if at_capacity:
                     self._incr_counter_locked(self._conn, "coalesced", 1)
-                    return "dropped"
+                    return EventWriteOutcome.DROPPED
                 self._conn.execute(
                     "INSERT INTO work_events(execution_id,event_id,kind,"
                     "payload_json,critical,lossy,received_at) "
@@ -1510,7 +1530,7 @@ class WorkLedger:
                     (execution_id, event_id, kind.value, blob,
                      1 if priority.value == "critical" else 0,
                      1 if lossy else 0, now))
-                return "stored"
+                return EventWriteOutcome.STORED
 
     def progress_latest(self, execution_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -1532,9 +1552,10 @@ class WorkLedger:
     def events_of(self, execution_id: int) -> Tuple[Dict[str, Any], ...]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT event_id, kind, payload_json, critical, received_at "
-                "FROM work_events WHERE execution_id=? ORDER BY received_at, "
-                "event_id", (execution_id,)).fetchall()
+                "SELECT event_id, kind, payload_json, critical, lossy, "
+                "received_at FROM work_events WHERE execution_id=? "
+                "ORDER BY received_at, event_id",
+                (execution_id,)).fetchall()
             out = []
             for row in rows:
                 try:
@@ -1554,6 +1575,8 @@ class WorkLedger:
                             "kind": str(row["kind"]),
                             "payload": payload,
                             "critical": bool(crit),
+                            "lossy": self._strict_sqlite_bool(
+                                row["lossy"], "lossy"),
                             "received_at": _finite_time(row["received_at"],
                                                         "received_at")})
             return tuple(out)

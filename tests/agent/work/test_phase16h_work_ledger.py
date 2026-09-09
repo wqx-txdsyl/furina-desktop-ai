@@ -32,6 +32,7 @@ from furina.agent.work_contract import (
     WorkContract,
 )
 from furina.agent.work_ledger import (
+    EventWriteOutcome,
     CommitClaimConflict,
     ContractIdentityConflict,
     CorruptionError,
@@ -343,8 +344,8 @@ def test_authentic_verified_via_proper_path(ledger):
     v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
                            expected_version=v1)
     rep, outcome = _verified_outcome(c, v, "run_av_0001")
-    v2 = ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v1,
-                                         terminal_evidence=ev)
+    v2 = ledger.mark_verified_by_outcome(eid, v, outcome,
+                                         expected_version=v1)
     rec = ledger.get_execution(eid)
     assert rec.state is WorkExecutionState.VERIFIED
     assert rec.verification_marker == rep.report_digest
@@ -374,8 +375,9 @@ def test_evidence_mismatch_rejected(ledger):
     v1X = ledger.mark_terminal_evidence(eid, ev_wrong_kind,
                                         expected_version=v1)
     with pytest.raises(WorkLedgerError):
-        ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v1X,
-                                        terminal_evidence=ev_wrong_kind)
+        # stored evidence kind=backend.failed → 持久化 evidence 自身
+        # 非 completed，VERIFIED 拒绝（调用方无从注入 evidence）
+        ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v1X)
 
 
 # ================================================================
@@ -601,9 +603,9 @@ def test_critical_overflow_durable_marker(tmp_path):
     eid = led.submit_intent(c, "att_b6_0001")
     for i in range(4):
         assert led.record_event(eid, f"prog_{i}", EventKind.TOOL_PROGRESS,
-                                {"i": i}) in ("stored", "dropped")
+                                {"i": i}) in (EventWriteOutcome.STORED, EventWriteOutcome.DROPPED)
     assert led.record_event(eid, "term_0001", EventKind.BACKEND_COMPLETED,
-                            {"exit": 0}) == "stored"
+                            {"exit": 0}) is EventWriteOutcome.STORED
     with pytest.raises(CriticalBufferOverflow):
         led.record_event(eid, "term_0002", EventKind.BACKEND_FAILED,
                          {"exit": 1})

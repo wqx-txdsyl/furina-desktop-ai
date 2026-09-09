@@ -29,6 +29,7 @@ from furina.agent.work_coordinator import (
     RecoveryCoordinator,
 )
 from furina.agent.work_ledger import (
+    EventWriteOutcome,
     CorruptionError,
     EventContentConflict,
     thaw_payload,
@@ -472,9 +473,11 @@ def test_dispatch_stop_rejects_wrong_backend_identity(ledger, tmp_path):
 
 
 def test_verified_rejects_evidence_identity_mismatch(ledger, tmp_path):
-    """Reviewer 否证闭环：① 身份错误的 evidence 在写入即拒（exact 六键 +
-    冻结身份）；② 写入正确 evidence 后传不同 evidence 验证 → canonical
-    不等拒绝。两条路径都不得 VERIFIED。"""
+    """Patch 9 否证闭环：① 身份错误的 evidence 在写入即拒（exact 六键 +
+    冻结身份）；② mark_verified_by_outcome **不再接受** terminal_evidence
+    自报参数（调用方无从注入/重提 evidence），VERIFIED 唯一依据为持久化
+    evidence + authentic outcome + 单条 bound observation 配对。"""
+    import inspect
     c = _contract(tmp_path, "wc_eid_0001")
     v = IndependentVerifier(c)
     ledger.register_contract(c)
@@ -487,7 +490,11 @@ def test_verified_rejects_evidence_identity_mismatch(ledger, tmp_path):
               "contract_id": "wc_attacker_9999", "payload": {"exit": 0}}
     with pytest.raises(WorkLedgerError):
         ledger.mark_terminal_evidence(eid, bad_ev, expected_version=v1)
-    # ② 正确 evidence 写入后，验证时传完全不同的 evidence → 拒绝
+    # ② 自报参数已删除（API 面封闭）
+    params = inspect.signature(
+        WorkLedger.mark_verified_by_outcome).parameters
+    assert "terminal_evidence" not in params
+    # ③ 正确 evidence 写入 + 持久化驱动 → VERIFIED 正例
     good_ev = {"event_id": "lev_1756000000001_0000ff",
                "kind": "backend.completed", "run_id": "run_eid_0001",
                "backend_id": "native_agent", "contract_id": c.contract_id,
@@ -496,13 +503,8 @@ def test_verified_rejects_evidence_identity_mismatch(ledger, tmp_path):
     v1 = ledger.transition(eid, WorkExecutionState.BACKEND_DONE_UNVERIFIED,
                            expected_version=v1)
     rep, outcome = _verified_outcome_for(c, v, "run_eid_0001")
-    divergent = dict(good_ev)
-    divergent["payload"] = {"exit": 0, "forged": True}
-    with pytest.raises(WorkLedgerError):
-        ledger.mark_verified_by_outcome(eid, v, outcome,
-                                        expected_version=v1,
-                                        terminal_evidence=divergent)
-    assert ledger.get_execution(eid).state is         WorkExecutionState.BACKEND_DONE_UNVERIFIED
+    ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v1)
+    assert ledger.get_execution(eid).state is WorkExecutionState.VERIFIED
 
 
 def _verified_outcome_for(c, v, run_id):
@@ -747,8 +749,7 @@ def test_cross_stitched_observations_rejected(ledger, tmp_path):
                            expected_version=v1)
     with pytest.raises(WorkLedgerError):
         ledger.mark_verified_by_outcome(eid, v, outcome,
-                                        expected_version=v1,
-                                        terminal_evidence=ev_bad)
+                                        expected_version=v1)
     assert ledger.get_execution(eid).state is         WorkExecutionState.BACKEND_DONE_UNVERIFIED
     # 正例：唯一匹配（bb 那条）→ VERIFIED
     ev_ok = {"event_id": "lev_1756000000001_0000bb",
@@ -756,8 +757,7 @@ def test_cross_stitched_observations_rejected(ledger, tmp_path):
              "backend_id": "native_agent", "contract_id": c.contract_id,
              "payload": {}}
     v2 = ledger.mark_terminal_evidence(eid, ev_ok, expected_version=v1)
-    ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v2,
-                                    terminal_evidence=ev_ok)
+    ledger.mark_verified_by_outcome(eid, v, outcome, expected_version=v2)
     assert ledger.get_execution(eid).state is WorkExecutionState.VERIFIED
 
 
@@ -774,15 +774,15 @@ def test_lossy_duplicate_semantics(tmp_path):
     led.register_contract(c)
     eid = led.submit_intent(c, "att_ls_0001")
     assert led.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
-                            {"exit": 0}, lossy=True) == "stored"
+                            {"exit": 0}, lossy=True) is EventWriteOutcome.STORED
     assert led.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
-                            {"exit": 0}) == "ambiguous"
+                            {"exit": 0}) is EventWriteOutcome.AMBIGUOUS
     assert led.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
-                            {"exit": 0}, lossy=True) == "ambiguous"
+                            {"exit": 0}, lossy=True) is EventWriteOutcome.AMBIGUOUS
     assert led.record_event(eid, "ev_ls2", EventKind.BACKEND_COMPLETED,
-                            {"exit": 0}) == "stored"
+                            {"exit": 0}) is EventWriteOutcome.STORED
     assert led.record_event(eid, "ev_ls2", EventKind.BACKEND_COMPLETED,
-                            {"exit": 0}) == "duplicate"
+                            {"exit": 0}) is EventWriteOutcome.DUPLICATE
     # lossy + 异内容 → conflict 优先
     with pytest.raises(EventContentConflict):
         led.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
@@ -790,7 +790,7 @@ def test_lossy_duplicate_semantics(tmp_path):
     led.close()
     led2 = WorkLedger(tmp_path / "wl_ls.db")
     assert led2.record_event(eid, "ev_ls", EventKind.BACKEND_COMPLETED,
-                             {"exit": 0}) == "ambiguous"   # lossy 已持久
+                             {"exit": 0}) is EventWriteOutcome.AMBIGUOUS   # lossy 已持久
     led2.close()
 
 
@@ -850,4 +850,52 @@ def test_nested_normalized_payload_survives_recovery(tmp_path):
     evs = led2.events_of(eid)
     nested = [e for e in evs if e["kind"] == "backend.completed"]
     assert nested and nested[0]["payload"]["detail"]["artifacts"] == ["a.md"]
+    led2.close()
+
+
+def test_coordinator_stops_on_ambiguous_replay(tmp_path, monkeypatch):
+    """Patch 9 否证：record_event 返回 ambiguous 后 RecoveryCoordinator
+    必须真正停止恢复——绝不忽略返回值继续 16F 验证成 VERIFIED。"""
+    import types as _types
+    from furina.agent.events.models import EventKind
+    import furina.agent.work_coordinator as wc
+
+    calls = {"n": 0}
+
+    class _FakeNormalizer:
+        def __init__(self, **kwargs):
+            pass
+
+        def normalize(self, raw):
+            calls["n"] += 1
+            return _types.SimpleNamespace(
+                event_id="ev_amb_0001",
+                kind=EventKind.BACKEND_COMPLETED,
+                payload={"exit": 0},
+                lossy_payload=False)   # 重放为非 lossy，与已持久 lossy 冲突
+
+    monkeypatch.setattr(wc, "BackendEventNormalizer", _FakeNormalizer)
+    c = _contract(tmp_path, "wc_amb_0001")
+    v = IndependentVerifier(c)
+    led = WorkLedger(tmp_path / "work_ledger.db")
+    led.register_contract(c)
+    eid = led.submit_intent(c, "att_amb_0001")
+    led.bind_run(eid, "run_amb_0001", "native_agent", expected_version=1)
+    # 预先持久化同 event_id 的 lossy 事件（模拟上一生命周期写入）
+    assert led.record_event(eid, "ev_amb_0001", EventKind.BACKEND_COMPLETED,
+                            {"exit": 0}, lossy=True) is EventWriteOutcome.STORED
+    led.close()
+    backend = _FakeBackend(events=[BackendEvent(
+        backend_id="native_agent", run_id="run_amb_0001",
+        event_type="backend.completed", payload={"exit": 0})])
+    led2 = WorkLedger(tmp_path / "work_ledger.db")
+    coord = RecoveryCoordinator(
+        led2, backend_registry=_registry_with(backend), verifier=v,
+        submission_builder=_evidence_bound_builder(c))
+    result = coord.recover_execution(eid)
+    assert result.status == "unknown_ambiguous_event"
+    assert result.submit_calls == 0
+    rec = led2.get_execution(eid)
+    assert rec.state is WorkExecutionState.UNKNOWN
+    assert rec.state is not WorkExecutionState.VERIFIED
     led2.close()

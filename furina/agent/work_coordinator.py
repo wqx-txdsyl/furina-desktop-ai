@@ -28,6 +28,8 @@ from furina.agent.events.reducer import WorkExecutionState
 from furina.agent.events.reducer import WorkExecutionReducer, WorkExecutionState
 from furina.agent.events.normalizer import BackendEventNormalizer
 from furina.agent.work_ledger import (
+    EventContentConflict,
+    EventWriteOutcome,
     WorkLedger,
     WorkLedgerError,
     thaw_payload,
@@ -165,8 +167,35 @@ class RecoveryCoordinator:
                 thawed = thaw_payload(event.payload)
                 if type(thawed) is not dict:
                     raise WorkLedgerError("normalized payload 必须是 dict")
-                self._ledger.record_event(execution_id, event.event_id,
-                                          event.kind, thawed, lossy=lossy)
+                try:
+                    stored_outcome = self._ledger.record_event(
+                        execution_id, event.event_id, event.kind, thawed,
+                        lossy=lossy)
+                except EventContentConflict:
+                    return RecoveryOutcome(
+                        execution_id=execution_id,
+                        status="unknown_event_conflict",
+                        events_consumed=consumed, submit_calls=0,
+                        detail="同 (execution,event_id) 异内容——typed "
+                               "unknown_event_conflict，绝不推进状态/验证")
+                # Patch 9：record_event 封闭 typed outcome 必须被消费——
+                # AMBIGUOUS/DROPPED 立即终止恢复，绝不忽略返回值继续
+                # 终态恢复/16F 验证（lossy 语义下 sanitized 内容相同也
+                # 不能冒充同一事件）。
+                if stored_outcome is EventWriteOutcome.AMBIGUOUS:
+                    return RecoveryOutcome(
+                        execution_id=execution_id,
+                        status="unknown_ambiguous_event",
+                        events_consumed=consumed, submit_calls=0,
+                        detail="lossy 事件重投 typed ambiguous——保持 "
+                               "UNKNOWN，绝不进入验证")
+                if stored_outcome is EventWriteOutcome.DROPPED:
+                    return RecoveryOutcome(
+                        execution_id=execution_id,
+                        status="unknown_event_dropped",
+                        events_consumed=consumed, submit_calls=0,
+                        detail="critical 事件被 drop——fail-closed 保持 "
+                               "UNKNOWN")
                 if event.kind in (EventKind.BACKEND_COMPLETED,
                                   EventKind.BACKEND_FAILED,
                                   EventKind.BACKEND_CANCELLED):
@@ -243,8 +272,7 @@ class RecoveryCoordinator:
                 attempts=(attempt,), final_report=report,
                 started_at_epoch=started, finished_at_epoch=finished)
             self._ledger.mark_verified_by_outcome(
-                execution_id, verifier, outcome, expected_version=v,
-                terminal_evidence=terminal_evidence)
+                execution_id, verifier, outcome, expected_version=v)
         except Exception as exc:
             return RecoveryOutcome(
                 execution_id=execution_id, status="verification_failed",
