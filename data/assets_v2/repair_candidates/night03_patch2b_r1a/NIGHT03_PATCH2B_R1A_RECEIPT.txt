@@ -1,0 +1,77 @@
+NIGHT03_PATCH2B_R1A_RECEIPT (program-generated)
+
+STATUS = READY_FOR_NIGHT03_PATCH2B_R1A_PLAN_REVIEW
+TASK_ID = NIGHT03_RECOVERY_PATCH2B_R1A
+BASE_SHA = 23f6eb1f2a385b7ac23949f143c96660e83463c1
+CANDIDATES = 0 / GENERATION_CALLS = 0 / MASTERS_UNCHANGED = true
+A16_PARTITION = transparent 33161 + reconstruction 2963 = prop_union 36124 (disjoint, complete)
+A16_SUB = hand_glove 1451 / gold_cuff 0 / sleeve_coat 1500 / lower_leg 12 / other 0
+A01_TAIL_SOURCE_COMPLETE = 29183 (growth 4815 incl outline+AA)
+A05_TAIL_SOURCE_COMPLETE = 67616 (growth 21000 incl outline+AA arcs)
+MIRROR_SOURCE_OUTSIDE_TAIL = 0 (a01) / 0 (a05)
+SEAM_MAPPED = 681 (a01) / 0 (a05); SEAM_RESIDUAL_MASTER = 1372 / 0
+DOUBLE_RUN = byte-identical (61 files)
+
+FILES (SHA256):
+  a01/a01_ledger_background.npy = f0658543f91f672c01d9ffee1ea70f7dfc7181fd2e1b5d4267af0d2e014f648f
+  a01/a01_ledger_background.png = 3c24e2cfcec5ad4f2a55600325b5dbc7ca8f3df95cc79fadd91aef3098be9088
+  a01/a01_ledger_character_kept.npy = c5ecfdeeaab3adbfa70975c41cf23f69cda2411ddde75949959a86eb7dd3e456
+  a01/a01_ledger_character_kept.png = ae1c1d6eec20cca67758363799c5830bb8c98b45998dbff00659beb397d22285
+  a01/a01_ledger_costume_kept.npy = 9761be38ae6bbfbb3188a9a797c591f27e88a22d5e295f41496f6e89c724663b
+  a01/a01_ledger_costume_kept.png = 0829321db80955a646501ef5d21c8553db0022ce82917dff6a7361dd63137789
+  a01/a01_ledger_identity_kept.npy = c57ff993161f5e23570e1b8711a555913056a361c4f713ae0c972c23b8ebfd25
+  a01/a01_ledger_identity_kept.png = cab00defd7842e65c846c2ba247862d81e0fa53aabe8ff0ca4237afdbd99c4c1
+  a01/a01_ledger_props_kept.npy = df9927893eecff043042206041e557472b0baa2b337152e977dc4831d924bbe4
+  a01/a01_ledger_props_kept.png = fd1cf738337878cc86398e5db87e00059e50ec4ae700554922584d5edaa42cf1
+  a01/a01_ledger_tail_removed.npy = ff741592cbeec7f37ccf379526f4009ec8eac9a83eb5cdc277cc0c392e58207a
+  a01/a01_ledger_tail_removed.png = 5a74798175f180211ddd01fbc1e0cf979ba362689869b3242dd269c7be2528ee
+  a01/a01_plan_stats.json = 09daa6906d041103c0ca2f3a39da6e153c1ad94daaddb938551b05637660e883
+  a01/a01_seam_plan_mapped.png = f1cd31f92523387e6f24b95c7d609cad33227d0c48d8c34d0db9d65566106464
+  a01/a01_seam_residual_master.png = 125b804d86672a486545f7be98802d8d535918df819e27b619cff55d33202d81
+  a01/a01_tail_destination.npy = 3d3aeb429f49fcfee0d4037b8e5231bf44465352b40affd0731cfd08a60a076a
+  a01/a01_tail_destination.png = 658c0c371c72c2c485369b02ba0071cf1262670ff855873fd5cc1cf552b86091
+  a01/a01_tail_source_complete.npy = ff741592cbeec7f37ccf379526f4009ec8eac9a83eb5cdc277cc0c392e58207a
+  a01/a01_tail_source_complete.png = 5a74798175f180211ddd01fbc1e0cf979ba362689869b3242dd269c7be2528ee
+  a01/a01_tail_source_map.npy = 9d3f1e423a1665e1accf605b0ad7d682f9df9536fb6f3e5c632101754e5213b1
+  a05/a05_ledger_background.npy = bd498d9662222bc8f76f3745da1f8e7ecc5e3d31dbd2eafb699a648463ebfd05
+  a05/a05_ledger_background.png = f98d81bc038d954795d81f54dcf196480aa85b215730940b053377e0f01ab9c6
+  a05/a05_ledger_character_kept.npy = e56690078e5ed2821d133040bc1b2b802bcae4d721264717c5cdd0764c2eae49
+  a05/a05_ledger_character_kept.png = eec06faafc53b8cbf64ca6438a7e4ee74b7ba63a72117166f99aab4e1ad12fd8
+  a05/a05_ledger_costume_kept.npy = 6a546ce25368a613ee84da5d8e6d1beb5da51c05294d107cec0b47dceba3c0d4
+  a05/a05_ledger_costume_kept.png = 75fe321efd6eac4374d1b75dff39a6926117e6c90024e1a53c2c756c812e1377
+  a05/a05_ledger_identity_kept.npy = c9de034010216e8c10e10b923ca1257dd10640a63e5311880810c154c1b39373
+  a05/a05_ledger_identity_kept.png = 1b6848732b6a792738141d98c1f110d92db317978d4594e737254c88a7d91b6c
+  a05/a05_ledger_props_kept.npy = 5030f781b51d1329b8cd32238c9f7bbd8ebe76819c5648fd97693ab23e900f70
+  a05/a05_ledger_props_kept.png = b2d661b9c7823d305b40f24aa6000fdecbde6b202c2328f9da2bc5b5c99faf1d
+  a05/a05_ledger_tail_removed.npy = 8b799b61a93fd598276311ff3fe633d22d5896f6d812209dfe08e66d2dfca09e
+  a05/a05_ledger_tail_removed.png = 123031e40afad987898488955aa46279404ae9a00a9e9f0e5140a8fb1f832a12
+  a05/a05_plan_stats.json = d9177a2f4d662621c38b5d17f04743ec41dcbf950c4d9a66f23c6c3ccf387590
+  a05/a05_seam_plan_mapped.png = 0807909bd58a9f929118935c505dde213e4d14ca6a4f9460b3cd408c6d1a6517
+  a05/a05_seam_residual_master.png = 0807909bd58a9f929118935c505dde213e4d14ca6a4f9460b3cd408c6d1a6517
+  a05/a05_tail_destination.npy = f624b79b852317c3cbeec397363f9aad588f742797289ca33aba1c46e6b4638f
+  a05/a05_tail_destination.png = 48e7475b9f76201ca2b7a5f3d9fbe8a2108eb75e41b2aa252119dcc9ae527d9f
+  a05/a05_tail_source_complete.npy = 8b799b61a93fd598276311ff3fe633d22d5896f6d812209dfe08e66d2dfca09e
+  a05/a05_tail_source_complete.png = 123031e40afad987898488955aa46279404ae9a00a9e9f0e5140a8fb1f832a12
+  a05/a05_tail_source_map.npy = 3260a4f56114f44c42cdb002e964afd3ecf0156abeae723a4d67d9e13241c928
+  a16/a16_character_reconstruction_gold_cuff.npy = 84b2c7588ae7587a9c0d6745f34efcedf36d3749ee666e4f6bdc135802a27c73
+  a16/a16_character_reconstruction_gold_cuff.png = 0807909bd58a9f929118935c505dde213e4d14ca6a4f9460b3cd408c6d1a6517
+  a16/a16_character_reconstruction_hand_glove.npy = 1b9dec59416969608775cd224bde502844998147849a05262a07810f94f3166e
+  a16/a16_character_reconstruction_hand_glove.png = 15583890e7a0fba1576e3e14517db8fbfaf025b763e49ae0bfe0dfe769c5a333
+  a16/a16_character_reconstruction_lower_garment_leg.npy = 512e82837ea004a1b2a64f82f4c2c4387964dea45bb98fd12604e02c8910eea5
+  a16/a16_character_reconstruction_lower_garment_leg.png = 646e97d071aaa5679ea4e550f4e3e940044669f769bc5aee299d6a69bfd3ae4c
+  a16/a16_character_reconstruction_other.npy = 84b2c7588ae7587a9c0d6745f34efcedf36d3749ee666e4f6bdc135802a27c73
+  a16/a16_character_reconstruction_other.png = 0807909bd58a9f929118935c505dde213e4d14ca6a4f9460b3cd408c6d1a6517
+  a16/a16_character_reconstruction_sleeve_coat.npy = 0b1f43e5299ae0f34a2e6d09feae73173097af8e5321a58b193fff552c59a2db
+  a16/a16_character_reconstruction_sleeve_coat.png = ea8bce1772598a86e32bd7effa2ebade11ba310b13b12f5c2dd27d5e876fedb1
+  a16/a16_partition_stats.json = 458e22eeb52c3314f6f6723d8482c533044123b2857147a1c2287c60b716bc0e
+  a16/a16_prop_union.png = ce0f9636ffb7425471c6b663bccf2dcc3807e83d2c04d634173361179911fb4d
+  a16/a16_protected_costume_frozen.png = b2612b53e40dd33b08626b806e82b6ec6301ae15c8487c2e9e01f8c4eea3832e
+  a16/a16_protected_existing_hair_frozen.png = 6025c5518e6bb4ad47e90a8db505521dcf56e3273d7a6dd3f304323b2d5fc519
+  a16/a16_protected_glove_gold_cuff_frozen.png = cc46dc0f6d4ab1b2877f1d2b7ced61ff447d1605b68beccfba6aff851d67d7ac
+  a16/a16_protected_quill_paper_frozen.png = 2ad8ffc6acf65aa4f02dabd63a18e400ad04400679972b3ec36ea97b0ae8cb46
+  a16/a16_remove_cane_primitive.png = 7e4b0564f5938cc82f1dc9ed2ced9f287da8c1c8378c1a31516b1b5c98db24f7
+  a16/a16_remove_chair_primitive.png = 11af3f5c5ea3be466e686ccf5b84fb5ed636ec95e5a53607f51243afc110fac2
+  a16/a16_transparent_after_removal.npy = 0cf4661b22b54f0fda02ec8cc02b30a5ae740fc88371e5421edd940354ab28ab
+  a16/a16_transparent_after_removal.png = cf913c3dd7f63d6facd50a055dc85d9137e72debf27288438f262a46bade8baf
+  NIGHT03_PATCH2B_R1A_REPORT.md = 2006e480c0916fd555720f8e28b3b7d08ab2db7c5d0ea9d3a6f7982f47bb67d6
+  R1A_PLAN_STATS.json = bff55ba1bf6a8e42eb2876d0ca1cefb59ce53a9fc6ca32482bf8f27138e23e92

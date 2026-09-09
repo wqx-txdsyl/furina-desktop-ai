@@ -1,0 +1,14 @@
+{
+ "character_reconstruction_px": 2963,
+ "partition_equation": "transparent_after_removal \u222a character_reconstruction = prop_union, disjoint, complete",
+ "prop_union_px": 36124,
+ "r6ar4_gate": "PASS (unchanged, bit-exact primitives)",
+ "sub_items": {
+  "gold_cuff": 0,
+  "hand_glove": 1451,
+  "lower_garment_leg": 12,
+  "other": 0,
+  "sleeve_coat": 1500
+ },
+ "transparent_after_removal_px": 33161
+}

@@ -1,0 +1,18 @@
+{
+ "cleanup_px": 2,
+ "mirror_source_outside_tail": 0,
+ "old_tail_source_px": 24368,
+ "residual_ledger": {
+  "background": 1017146,
+  "character_kept": 64982,
+  "costume_kept": 138904,
+  "identity_kept": 320071,
+  "props_kept": 2578,
+  "tail_removed": 29183
+ },
+ "seam_mapped_px": 681,
+ "seam_residual_px": 1372,
+ "sprite_growth_px": 4815,
+ "tail_destination_px": 26400,
+ "tail_source_complete_px": 29183
+}
