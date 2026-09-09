@@ -1,0 +1,16 @@
+{
+ "NIGHT03_PATCH2A_R1A_R1_RECEIPT.txt": "360ce6e2491c9901260e65549dc1a60d5fffe57ed2472ad583034352149186f5",
+ "NIGHT03_PATCH2B_R1A_R1_REPORT.md": "ffeb5ecc4b1b5dc9487f3a546c8cc50e38ff478e30adfd014f8c53a610f3abc9",
+ "a01/a01_tail_destination.png": "11512022854302678a059309da7cc6a9e54dfb1604ba01cfa902caafce5f35b1",
+ "a01/a01_tail_source_manual.npy": "e2ff610a9c3b24523ff5bf31dfac87bbf64f5b92d751ba5f716e7cd12d577b5b",
+ "a01/a01_tail_source_manual.png": "34270180b3d77adb0412f1bf3c8598f70ff6bbce2aa7178ca1af6c062097612e",
+ "a01/a01_tail_underlay.png": "e6f1783f15683ef7e75d9337bdb4b896c37eed4f9f2b3253eea55c3737aa0229",
+ "a01/a01_tail_visible_destination.png": "454010fd66c764ea9fbc28a0ad333be03f440473578f905fd5688aa6277dc973",
+ "a05/a05_tail_destination.png": "041805c63416a843aee3c1f865aa342263e6ea99aeee0d41e9aaeeaa858cd1f2",
+ "a05/a05_tail_source_manual.npy": "1e30a9dbfabf288552fcb594395020d7e76db354106a0af36808890f9573dbee",
+ "a05/a05_tail_source_manual.png": "d6e26818171fb9ca8bee9e9fb41fe6427ca62ec9c06e91f78571cbd8115ec1f6",
+ "a05/a05_tail_underlay.png": "d3b7e4d356420fa92a50b84ddcec6719cdbb83f62fcfde6456eabf6aa8f923b3",
+ "a05/a05_tail_visible_destination.png": "95d368e2c5ab2721f8751aec009b84cd0f4b7fb7fa7464083b492582dc4241a5",
+ "a16_occlusion_annotation.json": "dae3f0e900a325c982aaabade3b92faaa08815a21f296dc2d94ddfdc8cf2ef5c",
+ "a16_occlusion_partition.png": "ce0f9636ffb7425471c6b663bccf2dcc3807e83d2c04d634173361179911fb4d"
+}

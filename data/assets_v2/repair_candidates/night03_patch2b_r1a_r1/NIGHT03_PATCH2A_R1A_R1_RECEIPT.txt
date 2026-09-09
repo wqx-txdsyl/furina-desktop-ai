@@ -1,0 +1,8 @@
+# NIGHT03_PATCH2B_R1A_R1_RECEIPT (program-generated)
+
+STATUS = READY_FOR_NIGHT03_PATCH2B_R1A_R1_PLAN_REVIEW
+A01_TAIL = {"destination_px": 24875, "visible_destination_px": 24084, "underlay_px": 791, "underlay_protected_px": 0, "mirror_source_outside_tail": 0, "tail_source_outside_protected": 0}
+A05_TAIL = {"destination_px": 48250, "visible_destination_px": 26216, "underlay_px": 22034, "underlay_protected_px": 21976, "mirror_source_outside_tail": 0, "tail_source_outside_protected": 0}
+A16_OCCLUSION = {"transparent": 34581, "hand_glove": 83, "gold_cuff": 40, "sleeve_coat": 808, "lower_garment_leg": 612, "other": 0}
+A16_PROP_UNION_PX = 36124
+
