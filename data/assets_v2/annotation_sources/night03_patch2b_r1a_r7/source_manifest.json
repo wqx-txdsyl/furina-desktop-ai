@@ -1,0 +1,7 @@
+{
+ "files": {
+  "data/assets_v2/annotation_sources/night03_patch2b_r1a_r7/a16_occlusion_annotation.json": "5c53516e3dbfd0ef11441140251e18f33b5a78939a98848b191276e199eda993",
+  "data/assets_v2/annotation_sources/night03_patch2b_r1a_r7/hand_ledger.json": "326dafd54e291dad6bb0d261924bb678530e0ee6e43953b674674535e1729c2f"
+ },
+ "format": "night03-r1a-r7-source-manifest-v1"
+}
