@@ -85,6 +85,16 @@ ZOOM_REGIONS = {
 }
 REJECT_REASONS = ('PROTECTED_CONFLICT', 'GOLD_STAFF_AA')
 
+# R1A-R6-R1: the freeze embeds the expected DRAFT_AUTHORITY bytes hash
+# and fail-closes BEFORE parsing JSON, constructing sets, or using the
+# authority in any way.
+PINNED_DRAFT_AUTHORITY_SHA256 = {
+    'a01': ('4a9dcbbf8d1c551ee0e6cc23eea7f45a0a5be4bb04eec8e020d6a0a'
+            'a06c60ad9'),
+    'a05': ('2d36504af33b5601bab30e9397234d9a52861d6ac7876a585fe9ea'
+            '2b3a367fab'),
+}
+
 
 class FreezeError(RuntimeError):
     pass
@@ -459,9 +469,16 @@ def main():
 
         doc = json.loads(
             (SRC / f'{asset}_tail_source.json').read_text(encoding='utf-8'))
-        da_doc = json.loads(
-            (SRC / f'{asset}_tail_draft_authority.json')
-            .read_text(encoding='utf-8'))
+        # freeze-side DRAFT_AUTHORITY SHA pin (R1A-R6-R1): raw bytes
+        # verified BEFORE any parse, set construction, or use
+        da_bytes = (SRC / f'{asset}_tail_draft_authority.json').read_bytes()
+        da_sha = sha256_bytes(da_bytes)
+        if da_sha != PINNED_DRAFT_AUTHORITY_SHA256[asset]:
+            raise FreezeError(
+                f'{asset}: DRAFT_AUTHORITY SHA256 mismatch ({da_sha} != '
+                f'{PINNED_DRAFT_AUTHORITY_SHA256[asset]}) — refusing to '
+                f'parse or use a non-authoritative draft file')
+        da_doc = json.loads(da_bytes.decode('utf-8'))
         raw, review = validate_tail_source(doc, da_doc, asset)
 
         raw_outside = int((raw & ~visible).sum())

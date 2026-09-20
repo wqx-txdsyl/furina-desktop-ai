@@ -304,6 +304,85 @@ def test_rejected_run_outside_draft_authority_rejected(tmp_path):
         'rejected run outside draft authority accepted'
 
 
+def test_freeze_itself_rejects_self_consistent_authority_tamper(tmp_path):
+    """R1A-R6-R1: mutate the DRAFT_AUTHORITY by 1px AND sync the review
+    draft/rejected runs and every total so ALL five-set equations still
+    hold — then run the FREEZE entry directly. The freeze must reject
+    via its own embedded SHA256 pin (nonzero exit / FreezeError).
+    The independent verifier is not invoked."""
+    import importlib.util
+
+    src = copy_sources(tmp_path)
+    doc = load_json(src / 'a01_tail_source.json')
+    da = load_json(src / 'a01_tail_draft_authority.json')
+
+    # find a rejected run [a,b] whose end b+1 is OUTSIDE the draft
+    # authority, so extending it keeps every equation valid
+    da_by_y = {int(r[0]): r for r in da['rows']}
+    review_by_y = {int(e[0]): e for e in doc['review']['rows']}
+    patched = None
+    for entry in doc['review']['rows']:
+        y = entry[0]
+        da_row = da_by_y.get(y)
+        if not da_row or not entry[3]:
+            continue
+        draft_mask = set()
+        for a, b in da_row[1:]:
+            draft_mask.update(range(a, b + 1))
+        for rej_run in entry[3]:
+            a, b = rej_run[0], rej_run[1]
+            if b + 1 < 1024 and (b + 1) not in draft_mask:
+                # 1. extend the rejected run (stays jointly canonical)
+                rej_run[1] = b + 1
+                # 2. extend the matching review draft run
+                for d_run in entry[1]:
+                    if d_run[0] <= b <= d_run[1]:
+                        assert d_run[1] == b
+                        d_run[1] = b + 1
+                        break
+                else:
+                    pytest.fail('draft run not found for rejected run')
+                # 3. extend the draft authority run identically
+                for da_run in da_row[1:]:
+                    if da_run[0] <= b <= da_run[1]:
+                        assert da_run[1] == b
+                        da_run[1] = b + 1
+                        break
+                else:
+                    pytest.fail('authority run not found')
+                patched = (y, b + 1)
+                break
+        if patched:
+            break
+    assert patched, 'no extendable rejected run found in a01'
+    y_patched, x_patched = patched
+
+    # 4. sync every total; all five-set equations now hold:
+    #    DRAFT == REVIEW_DRAFT (+1px both), ACCEPTED == FINAL (untouched),
+    #    A ∩ R == 0, DRAFT == A ∪ R (the new px is in R), UNREVIEWED == 0
+    doc['review']['draft_px'] += 1
+    doc['review']['rejected_px'] += 1
+    doc['review']['unreviewed_px'] = 0
+    da['draft_px'] += 1
+    save_json(src / 'a01_tail_source.json', doc)
+    save_json(src / 'a01_tail_draft_authority.json', da)
+
+    # sanity: the independent verifier's coverage checks would pass on
+    # this self-consistent data (only the SHA pin differs) — we do NOT
+    # call the verifier for the assertion; freeze must reject alone.
+    out = tmp_path / 'freeze_out'
+    spec = importlib.util.spec_from_file_location(
+        'freeze_r6_hotfix', str(FREEZE))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.SRC = src
+    mod.OUT = out
+    with pytest.raises(mod.FreezeError) as exc_info:
+        mod.main()
+    assert 'DRAFT_AUTHORITY SHA256 mismatch' in str(exc_info.value), \
+        str(exc_info.value)
+
+
 # ---------------- carried-over mutations ------------------------------
 
 def test_a16_missing_pixel_rejected(tmp_path):
