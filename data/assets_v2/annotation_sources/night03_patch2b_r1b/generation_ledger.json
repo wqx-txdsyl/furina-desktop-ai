@@ -1,0 +1,15 @@
+{
+ "a16_authoring_method": "deterministic hand-tuned local reconstruction (no image generation)",
+ "a16_generation_calls": 0,
+ "attempts": [
+  {
+   "accept_reason": "visual self-gate: hand/cuff/seat read naturally at 2x-8x; no flat blocks, no cane/chair residue",
+   "id": "A16_RECON_V3",
+   "method": "hand rules: glove white fill + finger creases; gold cuff band; sleeve_coat navy/lavender same-row continuation with smooth highlight stroke and silhouette; seat garment hem curve + thigh skin wedge",
+   "nominated": true,
+   "sha256": "35aada777a169df7910f682941841162fe7928b15b76fbce69aa4c12554ec403",
+   "source_file": "a16_reconstruction_source.png"
+  }
+ ],
+ "format": "night03-r1b-authoring-ledger-v1"
+}

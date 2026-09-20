@@ -1,0 +1,9 @@
+{
+ "files": {
+  "data/assets_v2/annotation_sources/night03_patch2b_r1a_r6/a01_tail_source.json": "2418be1d43d3295bfa5f5683b3c5215059511d564e8649f92b069b9bc200eace",
+  "data/assets_v2/annotation_sources/night03_patch2b_r1a_r6/a05_tail_source.json": "570a3fa7ba51d56eddb4a95cfc37a112741186784ce542cade9e17ea05e14393",
+  "data/assets_v2/annotation_sources/night03_patch2b_r1a_r6/a16_occlusion_annotation.json": "0274181f6bce18ba3fad25f259a5e76e73a2b3a1bb5fc03062e44b5ff59d7de8",
+  "data/assets_v2/annotation_sources/night03_patch2b_r1b/a16_reconstruction_source.png": "35aada777a169df7910f682941841162fe7928b15b76fbce69aa4c12554ec403"
+ },
+ "format": "night03-r1b-source-manifest-v1"
+}
