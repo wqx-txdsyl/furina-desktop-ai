@@ -1,0 +1,30 @@
+{
+ "a16_generation_calls_total": 0,
+ "a16_generation_tool_available": false,
+ "attempts": [
+  {
+   "id": "A16_RECON_V3",
+   "nominated": false,
+   "round": "R1B",
+   "verdict": "REJECTED by sole Reviewer: disconnected strips"
+  },
+  {
+   "id": "A16_RECON_V4",
+   "method": "hand-drawn shapes: fist mitt + thumb, gold cuff band, navy sleeve strips, lavender tail texture, seat garment + thigh ellipse masses",
+   "nominated": false,
+   "round": "R1B-R1",
+   "verdict": "superseded by V5 (fist anatomy corrected to horizontal finger bands)"
+  },
+  {
+   "accept_reason": "best effort inside the frozen union; honest self-gate = false: the frozen transparent rows y1060-1074 x704-745 (342 px) sever the wrist between fist and cuff, and y985-1015 sever the dome fingers from the fist, so a natural connected hand is impossible without mask expansion (R1A reopen required)",
+   "id": "A16_RECON_V5",
+   "method": "V4 coat/seat + fist v2: horizontal finger bands wrapping the cane with knuckle rounds, creases, thumb wrap, silhouette outline; gold cuff band; same coat/seat treatment",
+   "nominated": true,
+   "round": "R1B-R1",
+   "sha256": "2bb3b9acb314b1f8cad2311a54c02fb607743862aa5cfb440c4f9326e37f4d4f",
+   "source_file": "a16_reconstruction_source.png"
+  }
+ ],
+ "format": "night03-r1b-r1-authoring-ledger-v1",
+ "note": "no image-generation capability exists in this environment; the image skill is vision-only (analysis), so all a16 attempts are deterministic hand pixel work"
+}
