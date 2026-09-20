@@ -57,7 +57,7 @@
 - raw_source ∩ protected = 0 (a01, a05)
 - mirror_source_outside_tail = 0 (a01, a05)
 - visible_destination ∩ protected = 0 (a01, a05)
-- review ledger closure: y sets equal, accepted == final, draft == draft authority, rejected jointly validated, UNREVIEWED computed == 0 (a01, a05)
+- review ledger closure: y sets equal, accepted == final, draft == draft authority, draft == accepted ∪ rejected, rejected jointly validated, UNREVIEWED computed == 0 (a01, a05)
 - a16 labeled == R6A-R4 prop union == 36124
 - a16 provenance contract: rows-only (enforced)
 - PNG encoding: deterministic fixed-Huffman LZ77 deflate (environment-independent bytes)

@@ -404,6 +404,11 @@ def validate_tail_source(doc, da_doc, asset):
     if not np.array_equal(dm_all, draft_a):
         raise FreezeError(f'{asset}: review draft (whole canvas) != '
                           f'independent DRAFT_AUTHORITY')
+    if not np.array_equal(dm_all, am_all | rm_all):
+        raise FreezeError(f'{asset}: REVIEW_DRAFT != REVIEW_ACCEPTED ∪ '
+                          f'REVIEW_REJECTED (rejected runs must live '
+                          f'inside the draft authority and cover the '
+                          f'rest of it)')
     if n_acc != int(final.sum()) or n_acc != doc.get('source_px'):
         raise FreezeError(f'{asset}: accepted_sum {n_acc} != '
                           f'FINAL_SOURCE.sum()/source_px '
@@ -613,7 +618,8 @@ def main():
     report.append('- mirror_source_outside_tail = 0 (a01, a05)')
     report.append('- visible_destination ∩ protected = 0 (a01, a05)')
     report.append('- review ledger closure: y sets equal, accepted == '
-                  'final, draft == draft authority, rejected jointly '
+                  'final, draft == draft authority, '
+                  'draft == accepted ∪ rejected, rejected jointly '
                   'validated, UNREVIEWED computed == 0 (a01, a05)')
     report.append('- a16 labeled == R6A-R4 prop union == 36124')
     report.append('- a16 provenance contract: rows-only (enforced)')

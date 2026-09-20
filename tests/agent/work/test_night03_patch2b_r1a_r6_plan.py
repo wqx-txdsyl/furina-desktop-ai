@@ -272,6 +272,38 @@ def test_draft_authority_tamper_rejected(tmp_path):
     assert r.returncode != 0, 'tampered draft authority accepted'
 
 
+def test_rejected_run_outside_draft_authority_rejected(tmp_path):
+    """Task book equation REVIEW_DRAFT == REVIEW_ACCEPTED ∪
+    REVIEW_REJECTED: extending a rejected run past the draft authority
+    boundary must fail the union-closure check."""
+    src = copy_sources(tmp_path)
+    doc = load_json(src / 'a05_tail_source.json')
+    da = load_json(src / 'a05_tail_draft_authority.json')
+    draft_by_y = {int(r[0]): r for r in da['rows']}
+    patched = None
+    for entry in doc['review']['rows']:
+        y = entry[0]
+        da_row = draft_by_y.get(y)
+        if not da_row or not entry[3]:
+            continue
+        draft_mask = set()
+        for a, b in da_row[1:]:
+            draft_mask.update(range(a, b + 1))
+        for run in entry[3]:
+            a, b = run[0], run[1]
+            if b + 1 < 1024 and (b + 1) not in draft_mask:
+                run[1] = b + 1
+                patched = (y, b + 1)
+                break
+        if patched:
+            break
+    assert patched, 'no extendable rejected run found'
+    save_json(src / 'a05_tail_source.json', doc)
+    r = run_verifier(sources=src)
+    assert r.returncode != 0, \
+        'rejected run outside draft authority accepted'
+
+
 # ---------------- carried-over mutations ------------------------------
 
 def test_a16_missing_pixel_rejected(tmp_path):

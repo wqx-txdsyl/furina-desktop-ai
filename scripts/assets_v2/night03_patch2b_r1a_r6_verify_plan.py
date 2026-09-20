@@ -514,6 +514,9 @@ def verify(sources, output, r6ar4_json, r4masks, masters):
                     ck.check(np.array_equal(dm_all, draft_a),
                              f'{asset} review draft (whole canvas) == '
                              f'DRAFT_AUTHORITY')
+                    ck.check(np.array_equal(dm_all, am_all | rm_all),
+                             f'{asset} REVIEW_DRAFT == REVIEW_ACCEPTED ∪ '
+                             f'REVIEW_REJECTED')
                     ck.check(n_acc == int(raw.sum()) ==
                              doc_t.get('source_px'),
                              f'{asset} accepted_sum == FINAL_SOURCE.sum() '
